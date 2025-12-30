@@ -31,7 +31,7 @@ export default function Footer() {
               {[
                 { name: 'О компании', href: '/company' },
                 { name: 'Каталог моделей', href: '/catalog' },
-                { name: 'Опции и запчасти', href: '/accessories' },
+                { name: 'Статьи', href: '/articles' },
                 { name: 'Доставка и оплата', href: '/delivery' },
                 { name: 'Дилеры', href: '/dealers' },
                 { name: 'Контакты', href: '/contacts' },
