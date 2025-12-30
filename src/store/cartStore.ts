@@ -1,53 +1,63 @@
 import { create } from 'zustand';
-import { VehicleModel, CartItem } from '@/data/models';
+import { Product, ProductVariant, ProductColor, ProductOption } from '@/data/products';
+
+export interface CartItemConfig {
+  product: Product;
+  variant: ProductVariant;
+  color: ProductColor;
+  options: ProductOption[];
+  quantity: number;
+}
 
 interface CartStore {
-  items: CartItem[];
+  items: CartItemConfig[];
   isOpen: boolean;
-  addItem: (model: VehicleModel) => void;
-  removeItem: (modelId: string) => void;
-  updateQuantity: (modelId: string, quantity: number) => void;
+  addItem: (config: Omit<CartItemConfig, 'quantity'>) => void;
+  removeItem: (index: number) => void;
+  updateQuantity: (index: number, quantity: number) => void;
+  removeOption: (itemIndex: number, optionId: string) => void;
   clearCart: () => void;
   toggleCart: () => void;
   closeCart: () => void;
   getTotalPrice: () => number;
   getTotalItems: () => number;
+  getItemTotal: (item: CartItemConfig) => number;
 }
 
 export const useCartStore = create<CartStore>((set, get) => ({
   items: [],
   isOpen: false,
 
-  addItem: (model) => {
-    set((state) => {
-      const existingItem = state.items.find((item) => item.model.id === model.id);
-      if (existingItem) {
-        return {
-          items: state.items.map((item) =>
-            item.model.id === model.id
-              ? { ...item, quantity: item.quantity + 1 }
-              : item
-          ),
-        };
-      }
-      return { items: [...state.items, { model, quantity: 1 }] };
-    });
-  },
-
-  removeItem: (modelId) => {
+  addItem: (config) => {
     set((state) => ({
-      items: state.items.filter((item) => item.model.id !== modelId),
+      items: [...state.items, { ...config, quantity: 1 }],
     }));
   },
 
-  updateQuantity: (modelId, quantity) => {
+  removeItem: (index) => {
+    set((state) => ({
+      items: state.items.filter((_, i) => i !== index),
+    }));
+  },
+
+  updateQuantity: (index, quantity) => {
     if (quantity <= 0) {
-      get().removeItem(modelId);
+      get().removeItem(index);
       return;
     }
     set((state) => ({
-      items: state.items.map((item) =>
-        item.model.id === modelId ? { ...item, quantity } : item
+      items: state.items.map((item, i) =>
+        i === index ? { ...item, quantity } : item
+      ),
+    }));
+  },
+
+  removeOption: (itemIndex, optionId) => {
+    set((state) => ({
+      items: state.items.map((item, i) =>
+        i === itemIndex
+          ? { ...item, options: item.options.filter((o) => o.id !== optionId) }
+          : item
       ),
     }));
   },
@@ -58,11 +68,14 @@ export const useCartStore = create<CartStore>((set, get) => ({
 
   closeCart: () => set({ isOpen: false }),
 
+  getItemTotal: (item) => {
+    const optionsTotal = item.options.reduce((sum, o) => sum + o.price, 0);
+    return (item.variant.price + optionsTotal) * item.quantity;
+  },
+
   getTotalPrice: () => {
-    return get().items.reduce(
-      (total, item) => total + item.model.price * item.quantity,
-      0
-    );
+    const { items, getItemTotal } = get();
+    return items.reduce((total, item) => total + getItemTotal(item), 0);
   },
 
   getTotalItems: () => {

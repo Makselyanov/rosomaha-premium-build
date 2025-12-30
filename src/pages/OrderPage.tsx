@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Send, Check } from 'lucide-react';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
 
 export default function OrderPage() {
-  const navigate = useNavigate();
-  const { items, clearCart, getTotalPrice } = useCartStore();
+  const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
   const { toast } = useToast();
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [formData, setFormData] = useState({
@@ -57,11 +56,33 @@ export default function OrderPage() {
           {items.length > 0 && (
             <div className="bg-card p-6 rounded-lg border border-border mb-8">
               <h2 className="font-display uppercase tracking-wider mb-4">Выбранные товары</h2>
-              <div className="space-y-3 mb-4">
-                {items.map((item) => (
-                  <div key={item.model.id} className="flex justify-between">
-                    <span>{item.model.name} × {item.quantity}</span>
-                    <span className="text-primary">{formatPrice(item.model.price * item.quantity)}</span>
+              <div className="space-y-4 mb-4">
+                {items.map((item, index) => (
+                  <div key={index} className="border-b border-border pb-4 last:border-0 last:pb-0">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <p className="font-medium">{item.product.name}</p>
+                        <p className="text-sm text-muted-foreground">{item.variant.name}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span
+                            className="w-4 h-4 rounded-full border border-border"
+                            style={{ backgroundColor: item.color.hex }}
+                          />
+                          <span className="text-xs text-muted-foreground">{item.color.name}</span>
+                        </div>
+                      </div>
+                      <span className="text-primary font-medium">{formatPrice(getItemTotal(item))}</span>
+                    </div>
+                    {item.options.length > 0 && (
+                      <div className="text-xs text-muted-foreground mt-2 pl-4 border-l-2 border-primary/30 space-y-1">
+                        {item.options.map((opt) => (
+                          <div key={opt.id} className="flex justify-between">
+                            <span>{opt.name}</span>
+                            <span className="text-primary">+{opt.priceFormatted}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
