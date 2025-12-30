@@ -7,6 +7,7 @@ import { useCartStore } from '@/store/cartStore';
 const navigation = [
   { name: 'О компании', href: '/company' },
   { name: 'Каталог', href: '/catalog' },
+  { name: 'Статьи', href: '/articles' },
   { name: 'Доставка и оплата', href: '/delivery' },
   { name: 'Контакты', href: '/contacts' },
   { name: 'Дилеры', href: '/dealers' },
