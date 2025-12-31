@@ -49,14 +49,17 @@ export const models: VehicleModel[] = [
     id: 'eger-1',
     slug: 'rosomaha-eger-1',
     name: 'Росомаха Егерь-1',
-    category: 'pickup',
-    categoryName: 'Пикапы',
+    category: 'classic',
+    categoryName: 'Классические модели',
     price: 850000,
     priceFormatted: 'от 850 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-pickup.jpg',
-    images: ['/src/assets/model-pickup.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/71f/4mst9p11f3ljlilp39q0i2ri76npymcv.png',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/71f/4mst9p11f3ljlilp39q0i2ri76npymcv.png',
+      'https://rosomaha-rus.ru/upload/iblock/789/z7wy86u7zyxjearnfvy5kocknb8bmca4.jpg',
+    ],
     specs: {
       engine: 'ДВС 30 л.с.',
       power: '30 л.с.',
@@ -66,7 +69,7 @@ export const models: VehicleModel[] = [
   },
   {
     id: 'standart-plus-jimny',
-    slug: 'rosomaha-standart-plus-jimny',
+    slug: 'rosomaha-standart-plus',
     name: 'Росомаха Стандарт ПЛЮС',
     category: 'classic',
     categoryName: 'Классические модели',
@@ -74,8 +77,13 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 1 300 000 ₽',
     available: true,
     badge: 'hit',
-    image: '/src/assets/model-standard.jpg',
-    images: ['/src/assets/model-standard.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png',
+      'https://rosomaha-rus.ru/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png',
+      'https://rosomaha-rus.ru/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -85,7 +93,7 @@ export const models: VehicleModel[] = [
   },
   {
     id: 'standart-plus-uaz',
-    slug: 'rosomaha-standart-plus-uaz-timken',
+    slug: 'rosomaha-standart-plus-uaz',
     name: 'Росомаха Стандарт ПЛЮС УАЗ',
     category: 'classic',
     categoryName: 'Классические модели',
@@ -93,8 +101,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 1 400 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-extreme.jpg',
-    images: ['/src/assets/model-extreme.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/bfe/s9atpzqrdsihjm2vy57obxr8e0h5bd9h.JPG',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/bfe/s9atpzqrdsihjm2vy57obxr8e0h5bd9h.JPG',
+      'https://rosomaha-rus.ru/upload/iblock/c05/sbgm44vkpdqigphyvecm4w5scqt5h9l2.jpg',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -112,8 +123,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 1 800 000 ₽',
     available: true,
     badge: 'recommended',
-    image: '/src/assets/model-extreme.jpg',
-    images: ['/src/assets/model-extreme.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/5f8/lqgshzfsjgagdxjudqnfcdqfsmcv2ngj.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/5f8/lqgshzfsjgagdxjudqnfcdqfsmcv2ngj.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/b2b/zxs24n86j5hvb8hxdmjx2l66uidrx7td.jpg',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -131,8 +145,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 2 050 000 ₽',
     available: true,
     badge: 'recommended',
-    image: '/src/assets/model-extreme.jpg',
-    images: ['/src/assets/model-extreme.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/a0f/kxl6zw9ysq3chfhjlwf90hg6c2r7k5wn.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/a0f/kxl6zw9ysq3chfhjlwf90hg6c2r7k5wn.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -150,8 +167,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 2 150 000 ₽',
     available: true,
     badge: 'recommended',
-    image: '/src/assets/model-extreme.jpg',
-    images: ['/src/assets/model-extreme.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/ddf/b6rlqvb3e6gpwzw8j2bflnjz41xgtblq.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/ddf/b6rlqvb3e6gpwzw8j2bflnjz41xgtblq.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/a2f/xpxqf4s67l99gmq3cz2ufhqycjm88vw5.jpg',
+    ],
     specs: {
       engine: '1.8 литра',
       power: '1ZZ-FE',
@@ -169,8 +189,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 2 180 000 ₽',
     available: true,
     badge: 'recommended',
-    image: '/src/assets/model-extreme.jpg',
-    images: ['/src/assets/model-extreme.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/3b6/fuhfx86rfvslwsdjqkf65oc9w3y8j0xa.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/3b6/fuhfx86rfvslwsdjqkf65oc9w3y8j0xa.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/bc7/7h1r9h9e19hy5dhlpxujhfv56gzphpg7.jpg',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -188,8 +211,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 1 700 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-pickup.jpg',
-    images: ['/src/assets/model-pickup.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/8a9/b85x0qunl22t96aetvxvv81o2ejzr8wt.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/8a9/b85x0qunl22t96aetvxvv81o2ejzr8wt.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/d1f/yzx7d21n8gk5l2t5e5nxqspcvkf6n4w1.jpg',
+    ],
     specs: {
       engine: '1.5 литра',
       power: '1NZ-FE',
@@ -207,8 +233,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 2 250 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-pickup.jpg',
-    images: ['/src/assets/model-pickup.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/d2f/c7jkf1ylnpb9u5m4kx3w8hq2r0v6z9at.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/d2f/c7jkf1ylnpb9u5m4kx3w8hq2r0v6z9at.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/8a9/b85x0qunl22t96aetvxvv81o2ejzr8wt.jpg',
+    ],
     specs: {
       engine: '1.8 литра',
       power: '1ZZ-FE',
@@ -226,8 +255,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 2 450 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-pickup.jpg',
-    images: ['/src/assets/model-pickup.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/1a3/s7k2n5p8x3q9w1r4t6y0u2i5o8.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/1a3/s7k2n5p8x3q9w1r4t6y0u2i5o8.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/d2f/c7jkf1ylnpb9u5m4kx3w8hq2r0v6z9at.jpg',
+    ],
     specs: {
       engine: '1.8 литра',
       power: '1ZZ-FE',
@@ -245,8 +277,11 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 3 100 000 ₽',
     available: true,
     badge: 'new',
-    image: '/src/assets/model-6x6.jpg',
-    images: ['/src/assets/model-6x6.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/8c4/vkhqjf9p2n5l1x7w3r6t0y4u8i2o5.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/8c4/vkhqjf9p2n5l1x7w3r6t0y4u8i2o5.jpg',
+      'https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png',
+    ],
     specs: {
       engine: '1.8 литра',
       power: '1ZZ-FE',
@@ -263,8 +298,10 @@ export const models: VehicleModel[] = [
     price: 200000,
     priceFormatted: '200 000 ₽',
     available: true,
-    image: '/src/assets/model-pickup.jpg',
-    images: ['/src/assets/model-pickup.jpg'],
+    image: 'https://rosomaha-rus.ru/upload/iblock/edf/yu0b79nbzg322gdbs5ak00q7n3mz1iln.jpg',
+    images: [
+      'https://rosomaha-rus.ru/upload/iblock/edf/yu0b79nbzg322gdbs5ak00q7n3mz1iln.jpg',
+    ],
     specs: {
       engine: '-',
       power: '-',
@@ -388,7 +425,7 @@ export const accessories = [
     price: 60000,
     priceFormatted: '60 000 ₽',
     available: true,
-    image: '/src/assets/model-standard.jpg',
+    image: 'https://rosomaha-rus.ru/upload/iblock/73a/cc53t6mbf7qdj7ssciy503lxi4ed075s.jpg',
   },
   {
     id: 'tire-avtoros-max',
@@ -397,7 +434,7 @@ export const accessories = [
     price: 70300,
     priceFormatted: '70 300 ₽',
     available: true,
-    image: '/src/assets/model-standard.jpg',
+    image: 'https://rosomaha-rus.ru/upload/iblock/73a/cc53t6mbf7qdj7ssciy503lxi4ed075s.jpg',
   },
   {
     id: 'tire-avtoros-mx',
@@ -406,7 +443,7 @@ export const accessories = [
     price: 55900,
     priceFormatted: '55 900 ₽',
     available: true,
-    image: '/src/assets/model-standard.jpg',
+    image: 'https://rosomaha-rus.ru/upload/iblock/73a/cc53t6mbf7qdj7ssciy503lxi4ed075s.jpg',
   },
   {
     id: 'tire-avtoros-xtrim',
@@ -415,6 +452,6 @@ export const accessories = [
     price: 59700,
     priceFormatted: '59 700 ₽',
     available: true,
-    image: '/src/assets/model-standard.jpg',
+    image: 'https://rosomaha-rus.ru/upload/iblock/73a/cc53t6mbf7qdj7ssciy503lxi4ed075s.jpg',
   },
 ];
