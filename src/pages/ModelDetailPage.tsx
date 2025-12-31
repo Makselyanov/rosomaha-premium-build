@@ -16,8 +16,9 @@ export default function ModelDetailPage() {
   const { addItem, toggleCart } = useCartStore();
   const { toast } = useToast();
 
-  // State
-  const [selectedVariant, setSelectedVariant] = useState(product?.variants[0]?.id || '');
+  // State - выбираем вариант, соответствующий данному товару, или первый если не найден
+  const defaultVariant = product?.variants.find(v => v.id === product.id)?.id || product?.variants[0]?.id || '';
+  const [selectedVariant, setSelectedVariant] = useState(defaultVariant);
   const [selectedColor, setSelectedColor] = useState(product?.colors[0]?.id || '');
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
 
