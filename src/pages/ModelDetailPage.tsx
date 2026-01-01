@@ -33,6 +33,18 @@ export default function ModelDetailPage() {
     [product, selectedColor]
   );
 
+  // Галерея изображений с учетом выбранного цвета
+  const galleryImages = useMemo(() => {
+    // Если у выбранного цвета есть изображение, ставим его первым
+    if (currentColor?.image) {
+      const colorImage = currentColor.image;
+      // Проверяем, есть ли это изображение уже в галерее
+      const otherImages = product?.gallery.filter(img => img !== colorImage) || [];
+      return [colorImage, ...otherImages];
+    }
+    return product?.gallery || [];
+  }, [product, currentColor]);
+
   const selectedOptionsData = useMemo(
     () => product?.options.filter((o) => selectedOptions.includes(o.id)) || [],
     [product, selectedOptions]
@@ -225,7 +237,7 @@ export default function ModelDetailPage() {
                 )}
               </div>
             )}
-            <ProductGallery images={product.gallery} productName={product.name} />
+            <ProductGallery images={galleryImages} productName={product.name} key={selectedColor} />
           </motion.div>
 
           {/* Info */}
