@@ -13,6 +13,7 @@ export interface ProductColor {
   name: string;
   ral: string;
   hex: string;
+  image?: string;
 }
 
 export interface ProductOption {
@@ -59,20 +60,20 @@ export interface Product {
   description: string;
 }
 
-// Общие цвета для всех моделей
+// Общие цвета для всех моделей с изображениями по цветам (где доступны)
 export const productColors: ProductColor[] = [
-  { id: 'ral9010', name: 'Белый', ral: 'RAL 9010', hex: '#FFFFFF' },
-  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D' },
-  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#ED760E' },
-  { id: 'ral3020', name: 'Транспортный красный', ral: 'RAL 3020', hex: '#CC0605' },
-  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#1E3A5F' },
-  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387' },
-  { id: 'ral7022', name: 'Серая Умбра', ral: 'RAL 7022', hex: '#4C4A44' },
-  { id: 'ral7006', name: 'Бежево-серый', ral: 'RAL 7006', hex: '#756F61' },
-  { id: 'ral6003', name: 'Оливково-зеленый', ral: 'RAL 6003', hex: '#4C5D3D' },
-  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044' },
-  { id: 'ral8011', name: 'Орехово-коричневый', ral: 'RAL 8011', hex: '#5A3D30' },
-  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B' },
+  { id: 'ral9010', name: 'Белый', ral: 'RAL 9010', hex: '#FFFFFF', image: 'https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png' },
+  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D', image: 'https://rosomaha-rus.ru/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg' },
+  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#ED760E', image: 'https://rosomaha-rus.ru/upload/iblock/f23/fsjwurbhdxokiwtt4e2hraykou0lge5y.png' },
+  { id: 'ral3020', name: 'Транспортный красный', ral: 'RAL 3020', hex: '#CC0605', image: 'https://rosomaha-rus.ru/upload/iblock/7ce/vwc9ic3vmki2q8clnq7a5pysc521wdwq.jpg' },
+  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#1E3A5F', image: 'https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png' },
+  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387', image: 'https://rosomaha-rus.ru/upload/iblock/789/z7wy86u7zyxjearnfvy5kocknb8bmca4.jpg' },
+  { id: 'ral7022', name: 'Серая Умбра', ral: 'RAL 7022', hex: '#4C4A44', image: 'https://rosomaha-rus.ru/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png' },
+  { id: 'ral7006', name: 'Бежево-серый', ral: 'RAL 7006', hex: '#756F61', image: 'https://rosomaha-rus.ru/upload/iblock/234/f4dow1nnjv0d03zowcy979eqv7gjcp3i.png' },
+  { id: 'ral6003', name: 'Оливково-зеленый', ral: 'RAL 6003', hex: '#4C5D3D', image: 'https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg' },
+  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044', image: 'https://rosomaha-rus.ru/upload/iblock/190/1blxzkyg24rzxojpycxgiq6xanlste1p.png' },
+  { id: 'ral8011', name: 'Орехово-коричневый', ral: 'RAL 8011', hex: '#5A3D30', image: 'https://rosomaha-rus.ru/upload/iblock/70a/arvm500pi0v2vn6b6cokpewo1tdvxezg.jpg' },
+  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: 'https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png' },
 ];
 
 // Варианты комплектаций (одинаковые для классических моделей)
