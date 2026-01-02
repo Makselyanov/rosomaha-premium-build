@@ -76,7 +76,7 @@ export const productColors: ProductColor[] = [
   { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: 'https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png' },
 ];
 
-// Для Егерь-1 на сайте другие изображения по цветам: фиксируем корректные (и не показываем чужие фото для остальных цветов).
+// Для Егерь-1 на сайте другие изображения по цветам: фиксируем корректные (и сохраняем работу всех цветов)
 const eger1Colors: ProductColor[] = [
   {
     ...productColors.find((c) => c.id === 'ral6003')!,
@@ -90,7 +90,7 @@ const eger1Colors: ProductColor[] = [
   },
   ...productColors
     .filter((c) => c.id !== 'ral6003' && c.id !== 'ral9010')
-    .map((c) => ({ ...c, image: undefined })),
+    .map((c) => ({ ...c, image: c.image })),
 ];
 
 // Варианты комплектаций (одинаковые для классических моделей)
