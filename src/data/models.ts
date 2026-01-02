@@ -55,9 +55,9 @@ export const models: VehicleModel[] = [
     priceFormatted: 'от 850 000 ₽',
     available: true,
     badge: 'new',
-    image: 'https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
+    image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
     images: [
-      'https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
+      'https://rosomaha-rus.ru/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
       'https://rosomaha-rus.ru/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG',
       'https://rosomaha-rus.ru/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG',
       'https://rosomaha-rus.ru/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG',

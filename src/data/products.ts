@@ -76,6 +76,23 @@ export const productColors: ProductColor[] = [
   { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: 'https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png' },
 ];
 
+// Для Егерь-1 на сайте другие изображения по цветам: фиксируем корректные (и не показываем чужие фото для остальных цветов).
+const eger1Colors: ProductColor[] = [
+  {
+    ...productColors.find((c) => c.id === 'ral6003')!,
+    image:
+      'https://rosomaha-rus.ru/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
+  },
+  {
+    ...productColors.find((c) => c.id === 'ral9010')!,
+    image:
+      'https://rosomaha-rus.ru/upload/resize_cache/iblock/c13/520_520_140cd750bba9870f18aada2478b24840a/b871jl0m6ndqbbeb6fgp35s5y5ejtn5v.png',
+  },
+  ...productColors
+    .filter((c) => c.id !== 'ral6003' && c.id !== 'ral9010')
+    .map((c) => ({ ...c, image: undefined })),
+];
+
 // Варианты комплектаций (одинаковые для классических моделей)
 export const classicVariants: ProductVariant[] = [
   { id: 'eger-1', name: 'Егерь-1 (Волга)', slug: 'rosomakha-model-eger-1-dvs-30-l-s-s-mostami-volga-', price: 850000, priceFormatted: 'от 850 000 ₽' },
@@ -390,7 +407,7 @@ export const products: Product[] = [
     available: true,
     badge: 'new',
     gallery: [
-      'https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
+      'https://rosomaha-rus.ru/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
       'https://rosomaha-rus.ru/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG',
       'https://rosomaha-rus.ru/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG',
       'https://rosomaha-rus.ru/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG',
@@ -405,7 +422,7 @@ export const products: Product[] = [
       'https://rosomaha-rus.ru/upload/resize_cache/iblock/9ee/50_50_140cd750bba9870f18aada2478b24840a/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG',
     ],
     variants: classicVariants,
-    colors: productColors,
+    colors: eger1Colors,
     options: productOptions,
     specs: {
       length: '2850',
