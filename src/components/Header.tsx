@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Menu, X, ShoppingCart, Phone } from 'lucide-react';
 import { useCartStore } from '@/store/cartStore';
+import logoImage from '@/assets/logo-rosomaha.png';
 
 const navigation = [
   { name: 'О компании', href: '/company' },
@@ -24,14 +25,7 @@ export default function Header() {
       <nav className="container flex items-center justify-between h-20">
         {/* Logo */}
         <Link to="/" className="flex items-center gap-3">
-          <div className="flex flex-col">
-            <span className="text-2xl font-display font-bold tracking-wider text-foreground">
-              РОСОМАХА
-            </span>
-            <span className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
-              Снегоболотоходы
-            </span>
-          </div>
+          <img src={logoImage} alt="Росомаха" className="h-10 w-auto" />
         </Link>
 
         {/* Desktop Navigation */}

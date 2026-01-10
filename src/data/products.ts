@@ -1,4 +1,10 @@
 // Расширенная модель данных товаров с реальными URL изображений с rosomaha-rus.ru
+// Локальные изображения для Егерь-1
+import eger1Ral6003 from '@/assets/eger1-ral6003.jpg';
+import eger1Ral7006 from '@/assets/eger1-ral7006.png';
+import eger1Ral7022 from '@/assets/eger1-ral7022.png';
+import eger1Ral8011 from '@/assets/eger1-ral8011.png';
+import eger1Ral9010 from '@/assets/eger1-ral9010.png';
 
 export interface ProductVariant {
   id: string;
@@ -76,21 +82,20 @@ export const productColors: ProductColor[] = [
   { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: 'https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png' },
 ];
 
-// Для Егерь-1 у каждого RAL своя уникальная фотография с rosomaha-rus.ru (oid 968-979).
-// Полный маппинг RAL → первое фото галереи для корректного отображения при смене цвета.
+// Для Егерь-1 используем локально скачанные изображения.
 const eger1Colors: ProductColor[] = [
-  { id: 'ral6003', name: 'Оливково-зеленый', ral: 'RAL 6003', hex: '#4A5240', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg' },
-  { id: 'ral7006', name: 'Бежево-серый', ral: 'RAL 7006', hex: '#756F61', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/2bc/520_520_140cd750bba9870f18aada2478b24840a/r4kenlul05bfq1kysh3uainomh2nmcgh.png' },
-  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/a10/520_520_140cd750bba9870f18aada2478b24840a/z9jq0x96ld2t3w2f0c77g03tqk1koxwo.png' },
-  { id: 'ral7022', name: 'Серая умбра', ral: 'RAL 7022', hex: '#4B4D46', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/185/520_520_140cd750bba9870f18aada2478b24840a/kwuz5hmd19iahjyi08c3z22q1cof5tzh.png' },
-  { id: 'ral8011', name: 'Орехово-коричневый', ral: 'RAL 8011', hex: '#5A3826', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/cc8/520_520_140cd750bba9870f18aada2478b24840a/ml7oz8p6zlaym7yrjbw0nmztqxqy8715.png' },
-  { id: 'ral9010', name: 'Белый', ral: 'RAL 9010', hex: '#FFFFFF', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/c13/520_520_140cd750bba9870f18aada2478b24840a/b871jl0m6ndqbbeb6fgp35s5y5ejtn5v.png' },
-  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/a6c/520_520_140cd750bba9870f18aada2478b24840a/bnfl39g1t36c5x4e9vcvycvd7w34llb9.png' },
-  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/5c1/520_520_140cd750bba9870f18aada2478b24840a/45opd67xlp50mjqvcwv59wpuxz1hupq4.png' },
-  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#DD7907', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/9be/520_520_140cd750bba9870f18aada2478b24840a/t3r6rmlhqcb6zpmabg22xt0hv1hncz6c.png' },
-  { id: 'ral3020', name: 'Красный насыщенный', ral: 'RAL 3020', hex: '#C1121C', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/3e9/520_520_140cd750bba9870f18aada2478b24840a/gikqmz2y1y9n2m8swcg3l5r1k3a6kfdn.png' },
-  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#232C3F', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/e31/520_520_140cd750bba9870f18aada2478b24840a/dpd5oxj4o9nba2fv1ezysjp1c7n0p2ba.png' },
-  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387', image: 'https://rosomaha-rus.ru/upload/resize_cache/iblock/ff1/520_520_140cd750bba9870f18aada2478b24840a/8lgkbwz8qdg6t8qjhk24u0kvp1r8abog.png' },
+  { id: 'ral6003', name: 'Оливково-зеленый', ral: 'RAL 6003', hex: '#4A5240', image: eger1Ral6003 },
+  { id: 'ral7006', name: 'Бежево-серый', ral: 'RAL 7006', hex: '#756F61', image: eger1Ral7006 },
+  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044', image: eger1Ral6003 },
+  { id: 'ral7022', name: 'Серая умбра', ral: 'RAL 7022', hex: '#4B4D46', image: eger1Ral7022 },
+  { id: 'ral8011', name: 'Орехово-коричневый', ral: 'RAL 8011', hex: '#5A3826', image: eger1Ral8011 },
+  { id: 'ral9010', name: 'Белый', ral: 'RAL 9010', hex: '#FFFFFF', image: eger1Ral9010 },
+  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: eger1Ral6003 },
+  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D', image: eger1Ral6003 },
+  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#DD7907', image: eger1Ral6003 },
+  { id: 'ral3020', name: 'Красный насыщенный', ral: 'RAL 3020', hex: '#C1121C', image: eger1Ral6003 },
+  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#232C3F', image: eger1Ral6003 },
+  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387', image: eger1Ral6003 },
 ];
 
 // Варианты комплектаций (одинаковые для классических моделей)
