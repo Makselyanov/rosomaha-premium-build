@@ -16,7 +16,7 @@ export default function ModelDetailPage() {
   const { addItem, toggleCart } = useCartStore();
   const { toast } = useToast();
 
-  // State - выбираем вариант, соответствующий данному товару, или первый если не найден
+  // State - РІС‹Р±РёСЂР°РµРј РІР°СЂРёР°РЅС‚, СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓСЋС‰РёР№ РґР°РЅРЅРѕРјСѓ С‚РѕРІР°СЂСѓ, РёР»Рё РїРµСЂРІС‹Р№ РµСЃР»Рё РЅРµ РЅР°Р№РґРµРЅ
   const defaultVariant = product?.variants.find(v => v.id === product.id)?.id || product?.variants[0]?.id || '';
   const [selectedVariant, setSelectedVariant] = useState(defaultVariant);
   const [selectedColor, setSelectedColor] = useState(product?.colors[0]?.id || '');
@@ -33,12 +33,12 @@ export default function ModelDetailPage() {
     [product, selectedColor]
   );
 
-  // Галерея изображений с учетом выбранного цвета
+  // Р“Р°Р»РµСЂРµСЏ РёР·РѕР±СЂР°Р¶РµРЅРёР№ СЃ СѓС‡РµС‚РѕРј РІС‹Р±СЂР°РЅРЅРѕРіРѕ С†РІРµС‚Р°
   const galleryImages = useMemo(() => {
-    // Если у выбранного цвета есть изображение, ставим его первым
+    // Р•СЃР»Рё Сѓ РІС‹Р±СЂР°РЅРЅРѕРіРѕ С†РІРµС‚Р° РµСЃС‚СЊ РёР·РѕР±СЂР°Р¶РµРЅРёРµ, СЃС‚Р°РІРёРј РµРіРѕ РїРµСЂРІС‹Рј
     if (currentColor?.image) {
       const colorImage = currentColor.image;
-      // Проверяем, есть ли это изображение уже в галерее
+      // РџСЂРѕРІРµСЂСЏРµРј, РµСЃС‚СЊ Р»Рё СЌС‚Рѕ РёР·РѕР±СЂР°Р¶РµРЅРёРµ СѓР¶Рµ РІ РіР°Р»РµСЂРµРµ
       const otherImages = product?.gallery.filter(img => img !== colorImage) || [];
       return [colorImage, ...otherImages];
     }
@@ -61,15 +61,15 @@ export default function ModelDetailPage() {
   );
 
   const formatPrice = (price: number) =>
-    new Intl.NumberFormat('ru-RU').format(price) + ' ₽';
+    new Intl.NumberFormat('ru-RU').format(price) + ' в‚Ѕ';
 
   if (!product) {
     return (
       <main className="pt-24 pb-16">
         <div className="container text-center py-16">
-          <h1 className="section-title mb-4">Модель не найдена</h1>
+          <h1 className="section-title mb-4">РњРѕРґРµР»СЊ РЅРµ РЅР°Р№РґРµРЅР°</h1>
           <Link to="/catalog" className="text-primary hover:underline">
-            Вернуться в каталог
+            Р’РµСЂРЅСѓС‚СЊСЃСЏ РІ РєР°С‚Р°Р»РѕРі
           </Link>
         </div>
       </main>
@@ -95,8 +95,8 @@ export default function ModelDetailPage() {
     });
 
     toast({
-      title: 'Добавлено в корзину',
-      description: `${product.name} — ${currentVariant.name}`,
+      title: 'Р”РѕР±Р°РІР»РµРЅРѕ РІ РєРѕСЂР·РёРЅСѓ',
+      description: `${product.name} вЂ” ${currentVariant.name}`,
     });
 
     toggleCart();
@@ -106,7 +106,7 @@ export default function ModelDetailPage() {
     const printContent = `
       <html>
         <head>
-          <title>Конфигурация — ${product.name}</title>
+          <title>РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ вЂ” ${product.name}</title>
           <style>
             body { font-family: Arial, sans-serif; padding: 40px; color: #333; }
             h1 { font-size: 24px; margin-bottom: 10px; }
@@ -122,23 +122,23 @@ export default function ModelDetailPage() {
           </style>
         </head>
         <body>
-          <h1>Росомаха</h1>
+          <h1>Р РѕСЃРѕРјР°С…Р°</h1>
           <h2>${product.name}</h2>
           
           <div class="section">
-            <div class="section-title">Комплектация</div>
+            <div class="section-title">РљРѕРјРїР»РµРєС‚Р°С†РёСЏ</div>
             <div class="row">
-              <span class="label">Выбрано:</span>
+              <span class="label">Р’С‹Р±СЂР°РЅРѕ:</span>
               <span class="value">${currentVariant?.name}</span>
             </div>
             <div class="row">
-              <span class="label">Базовая цена:</span>
+              <span class="label">Р‘Р°Р·РѕРІР°СЏ С†РµРЅР°:</span>
               <span class="value">${currentVariant?.priceFormatted}</span>
             </div>
           </div>
           
           <div class="section">
-            <div class="section-title">Цвет кузова</div>
+            <div class="section-title">Р¦РІРµС‚ РєСѓР·РѕРІР°</div>
             <div class="row">
               <span class="label">${currentColor.ral}</span>
               <span class="value">${currentColor.name}</span>
@@ -147,7 +147,7 @@ export default function ModelDetailPage() {
           
           ${selectedOptionsData.length > 0 ? `
           <div class="section">
-            <div class="section-title">Дополнительные опции</div>
+            <div class="section-title">Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РѕРїС†РёРё</div>
             <div class="options-list">
               ${selectedOptionsData.map(o => `
                 <div class="option-item row">
@@ -160,22 +160,22 @@ export default function ModelDetailPage() {
           ` : ''}
           
           <div class="section">
-            <div class="section-title">Характеристики</div>
-            ${product.specs.engine ? `<div class="row"><span class="label">Двигатель:</span><span class="value">${product.specs.engine}</span></div>` : ''}
-            ${product.specs.power ? `<div class="row"><span class="label">Мощность:</span><span class="value">${product.specs.power} л.с.</span></div>` : ''}
-            ${product.specs.axles ? `<div class="row"><span class="label">Мосты:</span><span class="value">${product.specs.axles}</span></div>` : ''}
-            ${product.specs.speed ? `<div class="row"><span class="label">Макс. скорость:</span><span class="value">${product.specs.speed} км/ч</span></div>` : ''}
+            <div class="section-title">РҐР°СЂР°РєС‚РµСЂРёСЃС‚РёРєРё</div>
+            ${product.specs.engine ? `<div class="row"><span class="label">Р”РІРёРіР°С‚РµР»СЊ:</span><span class="value">${product.specs.engine}</span></div>` : ''}
+            ${product.specs.power ? `<div class="row"><span class="label">РњРѕС‰РЅРѕСЃС‚СЊ:</span><span class="value">${product.specs.power} Р».СЃ.</span></div>` : ''}
+            ${product.specs.axles ? `<div class="row"><span class="label">РњРѕСЃС‚С‹:</span><span class="value">${product.specs.axles}</span></div>` : ''}
+            ${product.specs.speed ? `<div class="row"><span class="label">РњР°РєСЃ. СЃРєРѕСЂРѕСЃС‚СЊ:</span><span class="value">${product.specs.speed} РєРј/С‡</span></div>` : ''}
           </div>
           
           <div class="total row">
-            <span>ИТОГО:</span>
+            <span>РРўРћР“Рћ:</span>
             <span class="value">${formatPrice(totalPrice)}</span>
           </div>
           
           <p style="margin-top: 40px; color: #999; font-size: 12px;">
-            Дата: ${new Date().toLocaleDateString('ru-RU')}<br/>
-            Телефон: +7 (3452) 564-164<br/>
-            rosomaha-rus.ru
+            Р”Р°С‚Р°: ${new Date().toLocaleDateString('ru-RU')}<br/>
+            РўРµР»РµС„РѕРЅ: +7 (3452) 564-164<br/>
+            
           </p>
         </body>
       </html>
@@ -197,13 +197,13 @@ export default function ModelDetailPage() {
           <ol className="flex items-center gap-2 text-sm text-muted-foreground flex-wrap">
             <li>
               <Link to="/" className="hover:text-foreground transition-colors">
-                Главная
+                Р“Р»Р°РІРЅР°СЏ
               </Link>
             </li>
             <li>/</li>
             <li>
               <Link to="/catalog" className="hover:text-foreground transition-colors">
-                Каталог
+                РљР°С‚Р°Р»РѕРі
               </Link>
             </li>
             <li>/</li>
@@ -217,7 +217,7 @@ export default function ModelDetailPage() {
           className="inline-flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors mb-8"
         >
           <ArrowLeft className="w-4 h-4" />
-          Назад в каталог
+          РќР°Р·Р°Рґ РІ РєР°С‚Р°Р»РѕРі
         </Link>
 
         <div className="grid lg:grid-cols-2 gap-12">
@@ -228,11 +228,11 @@ export default function ModelDetailPage() {
           >
             {product.badge && (
               <div className="mb-4">
-                {product.badge === 'new' && <span className="badge-new">Новинка</span>}
-                {product.badge === 'hit' && <span className="badge-hit">Хит</span>}
+                {product.badge === 'new' && <span className="badge-new">РќРѕРІРёРЅРєР°</span>}
+                {product.badge === 'hit' && <span className="badge-hit">РҐРёС‚</span>}
                 {product.badge === 'recommended' && (
                   <span className="inline-flex items-center px-3 py-1 text-xs font-bold uppercase tracking-wider bg-blue-600 text-white font-display">
-                    Рекомендуем
+                    Р РµРєРѕРјРµРЅРґСѓРµРј
                   </span>
                 )}
               </div>
@@ -259,24 +259,24 @@ export default function ModelDetailPage() {
             {product.available && (
               <div className="flex items-center gap-2 text-green-500">
                 <Check className="w-5 h-5" />
-                <span className="font-medium">В наличии</span>
+                <span className="font-medium">Р’ РЅР°Р»РёС‡РёРё</span>
               </div>
             )}
 
             {/* Price Block */}
             <div className="bg-secondary/50 rounded-lg p-6 space-y-3">
               <div className="flex justify-between items-center">
-                <span className="text-muted-foreground">Базовая цена:</span>
+                <span className="text-muted-foreground">Р‘Р°Р·РѕРІР°СЏ С†РµРЅР°:</span>
                 <span className="text-xl font-bold">{currentVariant?.priceFormatted}</span>
               </div>
               {optionsTotal > 0 && (
                 <div className="flex justify-between items-center text-sm">
-                  <span className="text-muted-foreground">Опции:</span>
+                  <span className="text-muted-foreground">РћРїС†РёРё:</span>
                   <span className="text-primary">+{formatPrice(optionsTotal)}</span>
                 </div>
               )}
               <div className="flex justify-between items-center pt-3 border-t border-border">
-                <span className="font-medium">Итого:</span>
+                <span className="font-medium">РС‚РѕРіРѕ:</span>
                 <span className="text-2xl md:text-3xl font-display font-bold text-gradient">
                   {formatPrice(totalPrice)}
                 </span>
@@ -301,18 +301,18 @@ export default function ModelDetailPage() {
             <div className="flex flex-col sm:flex-row gap-4 pt-4">
               <button onClick={handleAddToCart} className="btn-primary flex-1">
                 <ShoppingCart className="mr-2 w-5 h-5" />
-                В корзину
+                Р’ РєРѕСЂР·РёРЅСѓ
               </button>
               <button onClick={handlePrint} className="btn-secondary flex-1">
                 <Printer className="mr-2 w-5 h-5" />
-                Распечатать
+                Р Р°СЃРїРµС‡Р°С‚Р°С‚СЊ
               </button>
             </div>
 
             {/* Contact */}
             <div className="p-6 bg-card border border-border rounded-lg">
               <p className="text-sm text-muted-foreground mb-3">
-                Есть вопросы по модели?
+                Р•СЃС‚СЊ РІРѕРїСЂРѕСЃС‹ РїРѕ РјРѕРґРµР»Рё?
               </p>
               <a
                 href="tel:+73452564164"
@@ -330,42 +330,42 @@ export default function ModelDetailPage() {
           <div className="grid md:grid-cols-2 gap-8">
             <div className="bg-secondary/50 rounded-lg p-6">
               <h3 className="font-display text-lg uppercase tracking-wider mb-4">
-                Характеристики
+                РҐР°СЂР°РєС‚РµСЂРёСЃС‚РёРєРё
               </h3>
               <dl className="space-y-3">
                 {product.specs.length && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Длина, мм</dt>
+                    <dt className="text-muted-foreground">Р”Р»РёРЅР°, РјРј</dt>
                     <dd className="font-medium">{product.specs.length}</dd>
                   </div>
                 )}
                 {product.specs.width && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Ширина, мм</dt>
+                    <dt className="text-muted-foreground">РЁРёСЂРёРЅР°, РјРј</dt>
                     <dd className="font-medium">{product.specs.width}</dd>
                   </div>
                 )}
                 {product.specs.height && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Высота, мм</dt>
+                    <dt className="text-muted-foreground">Р’С‹СЃРѕС‚Р°, РјРј</dt>
                     <dd className="font-medium">{product.specs.height}</dd>
                   </div>
                 )}
                 {product.specs.wheelDiameter && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Диаметр колёс, мм</dt>
+                    <dt className="text-muted-foreground">Р”РёР°РјРµС‚СЂ РєРѕР»С‘СЃ, РјРј</dt>
                     <dd className="font-medium">{product.specs.wheelDiameter}</dd>
                   </div>
                 )}
                 {product.specs.clearance && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Клиренс, мм</dt>
+                    <dt className="text-muted-foreground">РљР»РёСЂРµРЅСЃ, РјРј</dt>
                     <dd className="font-medium">{product.specs.clearance}</dd>
                   </div>
                 )}
                 {product.specs.weight && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Масса, кг</dt>
+                    <dt className="text-muted-foreground">РњР°СЃСЃР°, РєРі</dt>
                     <dd className="font-medium">{product.specs.weight}</dd>
                   </div>
                 )}
@@ -374,36 +374,36 @@ export default function ModelDetailPage() {
 
             <div className="bg-secondary/50 rounded-lg p-6">
               <h3 className="font-display text-lg uppercase tracking-wider mb-4">
-                Двигатель и трансмиссия
+                Р”РІРёРіР°С‚РµР»СЊ Рё С‚СЂР°РЅСЃРјРёСЃСЃРёСЏ
               </h3>
               <dl className="space-y-3">
                 {product.specs.engine && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Двигатель</dt>
+                    <dt className="text-muted-foreground">Р”РІРёРіР°С‚РµР»СЊ</dt>
                     <dd className="font-medium">{product.specs.engine}</dd>
                   </div>
                 )}
                 {product.specs.engineVolume && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Объём, см³</dt>
+                    <dt className="text-muted-foreground">РћР±СЉС‘Рј, СЃРјВі</dt>
                     <dd className="font-medium">{product.specs.engineVolume}</dd>
                   </div>
                 )}
                 {product.specs.power && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Мощность, л.с.</dt>
+                    <dt className="text-muted-foreground">РњРѕС‰РЅРѕСЃС‚СЊ, Р».СЃ.</dt>
                     <dd className="font-medium">{product.specs.power}</dd>
                   </div>
                 )}
                 {product.specs.axles && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Мосты</dt>
+                    <dt className="text-muted-foreground">РњРѕСЃС‚С‹</dt>
                     <dd className="font-medium">{product.specs.axles}</dd>
                   </div>
                 )}
                 {product.specs.speed && (
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Макс. скорость, км/ч</dt>
+                    <dt className="text-muted-foreground">РњР°РєСЃ. СЃРєРѕСЂРѕСЃС‚СЊ, РєРј/С‡</dt>
                     <dd className="font-medium">{product.specs.speed}</dd>
                   </div>
                 )}
@@ -416,7 +416,7 @@ export default function ModelDetailPage() {
         {product.baseEquipment.length > 0 && (
           <section className="mt-12">
             <h3 className="font-display text-xl uppercase tracking-wider mb-6">
-              Базовая комплектация
+              Р‘Р°Р·РѕРІР°СЏ РєРѕРјРїР»РµРєС‚Р°С†РёСЏ
             </h3>
             <div className="bg-secondary/30 rounded-lg p-6">
               <ul className="grid md:grid-cols-2 gap-x-8 gap-y-2">
@@ -443,7 +443,7 @@ export default function ModelDetailPage() {
         {/* Description */}
         <section className="mt-12">
           <h3 className="font-display text-xl uppercase tracking-wider mb-4">
-            Описание
+            РћРїРёСЃР°РЅРёРµ
           </h3>
           <p className="text-muted-foreground text-lg leading-relaxed max-w-3xl">
             {product.description}
