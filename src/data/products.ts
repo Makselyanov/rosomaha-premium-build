@@ -94,16 +94,18 @@ export const productColors: ProductColor[] = [
 const eger1Colors: ProductColor[] = [
   { id: 'ral6003', name: 'Оливково-зеленый', ral: 'RAL 6003', hex: '#4A5240', image: eger1Ral6003 },
   { id: 'ral7006', name: 'Бежево-серый', ral: 'RAL 7006', hex: '#756F61', image: eger1Ral7006 },
-  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044', image: eger1Ral6003 },
+  // Эти цвета ранее были с одной и той же заглушкой — даём каждому свой источник изображения,
+  // чтобы при выборе цвета менялась фотография.
+  { id: 'ral7013', name: 'Коричнево-серый', ral: 'RAL 7013', hex: '#575044', image: productColors.find(c => c.id === 'ral7013')?.image },
   { id: 'ral7022', name: 'Серая умбра', ral: 'RAL 7022', hex: '#4B4D46', image: eger1Ral7022 },
   { id: 'ral8011', name: 'Орехово-коричневый', ral: 'RAL 8011', hex: '#5A3826', image: eger1Ral8011 },
   { id: 'ral9010', name: 'Белый', ral: 'RAL 9010', hex: '#FFFFFF', image: eger1Ral9010 },
-  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: eger1Ral6003 },
-  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D', image: eger1Ral6003 },
-  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#DD7907', image: eger1Ral6003 },
-  { id: 'ral3020', name: 'Красный насыщенный', ral: 'RAL 3020', hex: '#C1121C', image: eger1Ral6003 },
-  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#232C3F', image: eger1Ral6003 },
-  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387', image: eger1Ral6003 },
+  { id: 'ral9011', name: 'Графитно-чёрный', ral: 'RAL 9011', hex: '#27292B', image: productColors.find(c => c.id === 'ral9011')?.image },
+  { id: 'ral1002', name: 'Песочно-жёлтый', ral: 'RAL 1002', hex: '#D2AA6D', image: productColors.find(c => c.id === 'ral1002')?.image },
+  { id: 'ral2000', name: 'Жёлто-оранжевый', ral: 'RAL 2000', hex: '#DD7907', image: productColors.find(c => c.id === 'ral2000')?.image },
+  { id: 'ral3020', name: 'Красный насыщенный', ral: 'RAL 3020', hex: '#C1121C', image: productColors.find(c => c.id === 'ral3020')?.image },
+  { id: 'ral5013', name: 'Кобальтово-синий', ral: 'RAL 5013', hex: '#232C3F', image: productColors.find(c => c.id === 'ral5013')?.image },
+  { id: 'ral5005', name: 'Сигнальный синий', ral: 'RAL 5005', hex: '#005387', image: productColors.find(c => c.id === 'ral5005')?.image },
 ];
 
 // Варианты комплектаций (одинаковые для классических моделей)
