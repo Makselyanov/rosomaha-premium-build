@@ -1,8 +1,8 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { Building2, Users, Award, Target } from 'lucide-react';
-import modelExtreme from '@/assets/model-extreme.jpg';
-import modelStandard from '@/assets/model-standard.jpg';
+// Images now loaded from public/media
+
 
 export default function CompanyPage() {
   return (
@@ -29,8 +29,8 @@ export default function CompanyPage() {
         >
           <h1 className="section-title mb-6">О компании «Росомаха»</h1>
           <p className="text-xl text-muted-foreground max-w-3xl">
-            ТПК «Росомаха» — динамично развивающееся производство снегоболотоходов 
-            в различной комплектации. Мы основали компанию ООО «Тюменский завод 
+            ТПК «Росомаха» — динамично развивающееся производство снегоболотоходов
+            в различной комплектации. Мы основали компанию ООО «Тюменский завод
             вездеходной техники» в 2012 году.
           </p>
         </motion.div>
@@ -43,9 +43,9 @@ export default function CompanyPage() {
             viewport={{ once: true }}
           >
             <img
-              src={modelExtreme}
-              alt="Производство Росомаха"
-              className="rounded-lg w-full aspect-video object-cover"
+              src="/media/company/rosomaha-wheelie-snow.jpg"
+              alt="Вездеход Росомаха в прыжке"
+              className="rounded-lg w-full aspect-[4/5] object-cover shadow-2xl"
             />
           </motion.div>
 
@@ -59,17 +59,17 @@ export default function CompanyPage() {
             </h2>
             <div className="space-y-4 text-muted-foreground leading-relaxed">
               <p>
-                Компания является заводом-изготовителем снегоболотохода «Росомаха», 
-                представляющего собой мощный вездеход на шинах низкого давления 
+                Компания является заводом-изготовителем снегоболотохода «Росомаха»,
+                представляющего собой мощный вездеход на шинах низкого давления
                 повышенной проходимости.
               </p>
               <p>
-                Мы используем надёжные японские двигатели Toyota (1NZ-FE, 1ZZ-FE) 
-                и проверенные временем мосты (УАЗ, Toyota, Suzuki Jimny), что 
+                Мы используем надёжные японские двигатели Toyota (1NZ-FE, 1ZZ-FE)
+                и проверенные временем мосты (УАЗ, Toyota, Suzuki Jimny), что
                 гарантирует долговечность и ремонтопригодность техники.
               </p>
               <p>
-                <strong className="text-foreground">Гарантия:</strong> 6 месяцев 
+                <strong className="text-foreground">Гарантия:</strong> 6 месяцев
                 или 200 моточасов на всю технику.
               </p>
             </div>
@@ -141,7 +141,7 @@ export default function CompanyPage() {
           <div className="grid md:grid-cols-2 gap-8">
             <div>
               <p className="text-lg text-muted-foreground mb-6">
-                На снегоболотоходах «Росомаха» вы сможете передвигаться в условиях 
+                На снегоболотоходах «Росомаха» вы сможете передвигаться в условиях
                 полного бездорожья:
               </p>
               <ul className="space-y-3">
@@ -158,14 +158,14 @@ export default function CompanyPage() {
                 ))}
               </ul>
               <p className="mt-6 text-primary font-medium">
-                Снегоболотоход «Росомаха» также сможет преодолевать водные преграды 
+                Снегоболотоход «Росомаха» также сможет преодолевать водные преграды
                 без какой-либо подготовки!
               </p>
             </div>
             <img
-              src={modelStandard}
-              alt="Росомаха в действии"
-              className="rounded-lg aspect-video object-cover"
+              src="/media/company/rosomaha-deep-mud.jpg"
+              alt="Росомаха проходит сложную грязь"
+              className="rounded-lg w-full aspect-[4/5] object-cover shadow-xl"
             />
           </div>
         </motion.section>

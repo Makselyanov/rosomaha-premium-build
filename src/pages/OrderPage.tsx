@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
-import { Send, Check } from 'lucide-react';
+import { Send, Check, Loader2 } from 'lucide-react';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
+import emailjs from '@emailjs/browser';
 
 export default function OrderPage() {
   const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
   const { toast } = useToast();
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
@@ -17,11 +19,58 @@ export default function OrderPage() {
 
   const formatPrice = (price: number) => new Intl.NumberFormat('ru-RU').format(price) + ' ₽';
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitted(true);
-    clearCart();
-    toast({ title: 'Заявка отправлена!', description: 'Мы свяжемся с вами в ближайшее время.' });
+    setIsSending(true);
+
+    const orderDetails = items.map((item, index) => {
+      const options = item.options.length > 0
+        ? `\n   Опции: ${item.options.map(o => `${o.name} (+${formatPrice(o.price)})`).join(', ')}`
+        : '';
+      return `${index + 1}. ${item.product.name} (${item.variant.name}) - ${item.quantity} шт.
+   Цвет: ${item.color.name}
+   Цена: ${formatPrice(getItemTotal(item))}${options}`;
+    }).join('\n\n');
+
+    const templateParams = {
+      customer_name: formData.name,
+      customer_phone: formData.phone,
+      message: formData.comment,
+      order_details: orderDetails,
+      total_price: formatPrice(getTotalPrice()),
+      subject: 'заявка с сайта росомаха.site',
+      to_email: 'rosomaha-rus999@yandex.ru, rosomaha-rus@mail.ru'
+    };
+
+    try {
+      const serviceId = import.meta.env.VITE_EMAILJS_SERVICE_ID;
+      const templateId = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
+      const publicKey = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+
+      if (!serviceId || !templateId || !publicKey) {
+        throw new Error('EmailJS configuration missing');
+      }
+
+      await emailjs.send(
+        serviceId,
+        templateId,
+        templateParams,
+        publicKey
+      );
+
+      setIsSubmitted(true);
+      clearCart();
+      toast({ title: 'Заявка отправлена!', description: 'Мы свяжемся с вами в ближайшее время.' });
+    } catch (error) {
+      console.error('Email sending failed:', error);
+      toast({
+        title: 'Ошибка отправки',
+        description: 'Не удалось отправить заявку. Пожалуйста, проверьте соединение или свяжитесь с нами по телефону.',
+        variant: 'destructive'
+      });
+    } finally {
+      setIsSending(false);
+    }
   };
 
   if (isSubmitted) {
@@ -106,9 +155,13 @@ export default function OrderPage() {
               <label className="block text-sm font-medium mb-2">Комментарий</label>
               <textarea value={formData.comment} onChange={(e) => setFormData({ ...formData, comment: e.target.value })} className="input-premium min-h-[120px]" placeholder="Интересующая модель, вопросы..." />
             </div>
-            <button type="submit" className="btn-primary w-full">
-              <Send className="mr-2 w-5 h-5" />
-              Отправить заявку
+            <button type="submit" className="btn-primary w-full" disabled={isSending}>
+              {isSending ? (
+                <Loader2 className="mr-2 w-5 h-5 animate-spin" />
+              ) : (
+                <Send className="mr-2 w-5 h-5" />
+              )}
+              {isSending ? 'Отправка...' : 'Отправить заявку'}
             </button>
           </form>
         </motion.div>

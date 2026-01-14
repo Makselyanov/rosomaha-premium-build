@@ -1,13 +1,16 @@
 import { Link } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { ArrowRight, Shield, Truck, Clock, Wrench } from 'lucide-react';
-import heroImage from '@/assets/hero-atv.jpg';
+import { motion, useInView } from 'framer-motion';
+import { ArrowRight, Shield, Truck, Clock, Wrench, Snowflake, Trees, Waves, Droplets, Zap } from 'lucide-react';
+import { useState, useRef, MouseEvent } from 'react';
 import modelStandard from '@/assets/model-standard.jpg';
 import modelExtreme from '@/assets/model-extreme.jpg';
 import modelPickup from '@/assets/model-pickup.jpg';
 import model6x6 from '@/assets/model-6x6.jpg';
 import { models } from '@/data/models';
 import ModelCard from '@/components/ModelCard';
+import MagneticButton from '@/components/MagneticButton';
+import ProductShowcase from '@/components/ProductShowcase';
+import ApplicationsSection from '@/components/ApplicationsSection';
 
 const stats = [
   { value: '1000+', label: 'Машин реализовано' },
@@ -55,12 +58,17 @@ export default function HomePage() {
       {/* Hero Section */}
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
         <div className="absolute inset-0">
-          <img
-            src={heroImage}
-            alt="Снегоболотоход Росомаха"
-            className="w-full h-full object-cover"
-          />
-          <div className="hero-overlay absolute inset-0" />
+          <video
+            autoPlay
+            muted
+            loop
+            playsInline
+            preload="auto"
+            className="absolute inset-0 w-full h-full object-cover"
+          >
+            <source src="/media/hero.mp4" type="video/mp4" />
+          </video>
+          <div className="hero-overlay absolute inset-0 z-[1]" />
         </div>
 
         <div className="container relative z-10 pt-20">
@@ -75,7 +83,7 @@ export default function HomePage() {
               <span className="text-gradient">безграничны!</span>
             </h1>
             <p className="text-xl md:text-2xl text-muted-foreground mb-8 max-w-2xl">
-              Квадроциклы-вездеходы РОСОМАХА. Российское производство, 
+              Квадроциклы-вездеходы РОСОМАХА. Российское производство,
               японская надёжность, проходимость без компромиссов.
             </p>
 
@@ -188,128 +196,11 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Capabilities Section */}
-      <section className="py-24 bg-card relative overflow-hidden">
-        <div className="absolute inset-0 opacity-10">
-          <img
-            src={model6x6}
-            alt=""
-            className="w-full h-full object-cover"
-          />
-        </div>
-        <div className="container relative z-10">
-          <div className="grid lg:grid-cols-2 gap-16 items-center">
-            <motion.div
-              initial={{ opacity: 0, x: -30 }}
-              whileInView={{ opacity: 1, x: 0 }}
-              viewport={{ once: true }}
-            >
-              <h2 className="section-title mb-6">
-                Передвигайтесь там,{' '}
-                <span className="text-gradient">где другие застревают</span>
-              </h2>
-              <p className="text-muted-foreground text-lg mb-8">
-                Снегоболотоходы «Росомаха» позволяют передвигаться в условиях 
-                полного бездорожья. Наша техника преодолевает водные преграды 
-                без какой-либо подготовки.
-              </p>
-              <ul className="space-y-4 mb-8">
-                {capabilities.map((item) => (
-                  <li key={item} className="flex items-center gap-3">
-                    <span className="w-2 h-2 bg-primary rounded-full" />
-                    <span className="text-lg">{item}</span>
-                  </li>
-                ))}
-              </ul>
-              <Link to="/company" className="btn-primary">
-                О компании
-                <ArrowRight className="ml-2 w-5 h-5" />
-              </Link>
-            </motion.div>
-
-            <motion.div
-              initial={{ opacity: 0, x: 30 }}
-              whileInView={{ opacity: 1, x: 0 }}
-              viewport={{ once: true }}
-              className="relative"
-            >
-              <img
-                src={modelExtreme}
-                alt="Росомаха в действии"
-                className="rounded-lg glow-orange"
-              />
-            </motion.div>
-          </div>
-        </div>
-      </section>
+      {/* WOW Capabilities Section */}
+      <CapabilitiesSection />
 
       {/* Applications Section */}
-      <section className="py-24">
-        <div className="container">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-center mb-16"
-          >
-            <h2 className="section-title">Применение техники</h2>
-            <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
-              Снегоболотоход эффективен для различных профессиональных задач
-            </p>
-          </motion.div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            {[
-              {
-                title: 'Снабжение полевых лагерей',
-                description: 'Оперативная доставка без использования вертолётов на удалении до 200-300 км от населённых пунктов.',
-                image: modelPickup,
-              },
-              {
-                title: 'Обслуживание ЛЭП',
-                description: 'Для обслуживания магистральных и местных линий электропередач ЛЭП 500, 220 и 110 КВ.',
-                image: modelExtreme,
-              },
-              {
-                title: 'Ремонт трубопроводов',
-                description: 'Для обслуживания и ремонта трубопроводов различного назначения в труднодоступных местах.',
-                image: modelStandard,
-              },
-              {
-                title: 'Перевозка людей',
-                description: 'Для перевозки людей и продуктов питания в труднодоступные районы.',
-                image: model6x6,
-              },
-            ].map((item, index) => (
-              <motion.div
-                key={item.title}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: index * 0.1 }}
-                className="card-premium group"
-              >
-                <div className="relative aspect-video overflow-hidden">
-                  <img
-                    src={item.image}
-                    alt={item.title}
-                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-background to-transparent" />
-                </div>
-                <div className="p-6">
-                  <h3 className="font-display text-xl uppercase tracking-wider mb-3">
-                    {item.title}
-                  </h3>
-                  <p className="text-muted-foreground">
-                    {item.description}
-                  </p>
-                </div>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <ApplicationsSection />
 
       {/* CTA Section */}
       <section className="py-24 bg-card">
@@ -324,7 +215,7 @@ export default function HomePage() {
               Готовы обсудить <span className="text-gradient">ваш проект?</span>
             </h2>
             <p className="text-muted-foreground text-lg mb-8">
-              Расскажите нам о ваших задачах — мы найдём оптимальное решение 
+              Расскажите нам о ваших задачах — мы найдём оптимальное решение
               и подберём технику под ваши потребности.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -339,5 +230,157 @@ export default function HomePage() {
         </div>
       </section>
     </main>
+  );
+}
+
+// WOW Capabilities Section Component
+function CapabilitiesSection() {
+  const sectionRef = useRef<HTMLElement>(null);
+  const isInView = useInView(sectionRef, { once: true, amount: 0.2 });
+
+  const points = [
+    {
+      icon: Droplets,
+      title: "Болота любой категории",
+      desc: "Едет там, где «обычный» тонет"
+    },
+    {
+      icon: Waves,
+      title: "Заболоченная местность",
+      desc: "Стабильный ход и контроль траектории"
+    },
+    {
+      icon: Snowflake,
+      title: "Снежная целина",
+      desc: "Уверенное движение по рыхлому снегу"
+    },
+    {
+      icon: Trees,
+      title: "Грунтовые и лесные дороги",
+      desc: "Тяга и проходимость на маршруте"
+    },
+    {
+      icon: Zap,
+      title: "Водные преграды",
+      desc: "Заехали, прошли, выехали без подготовки"
+    }
+  ];
+
+  return (
+    <section
+      ref={sectionRef}
+      className="py-24 relative overflow-hidden bg-background"
+    >
+      {/* Background Decorative Elements */}
+      <div className="absolute top-0 right-0 w-1/3 h-1/3 bg-primary/5 blur-[120px] rounded-full" />
+      <div className="absolute bottom-0 left-0 w-1/4 h-1/4 bg-primary/5 blur-[100px] rounded-full" />
+
+      <div className="container relative z-10">
+        <div className="flex flex-col lg:grid lg:grid-cols-12 gap-12 items-center">
+
+          {/* Left: Video Showcase (60%) */}
+          <motion.div
+            initial={{ opacity: 0, x: -50 }}
+            animate={isInView ? { opacity: 1, x: 0 } : {}}
+            transition={{ duration: 0.8, ease: "easeOut" }}
+            className="lg:col-span-7 w-full relative group"
+          >
+            <div className="relative aspect-video rounded-[2rem] overflow-hidden shadow-2xl border border-white/10">
+              <video
+                src="/media/Robot.mp4"
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="metadata"
+                className="w-full h-full object-cover scale-105 group-hover:scale-100 transition-transform duration-700"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20" />
+
+              {/* Overlaid Badges on Video */}
+              <div className="absolute bottom-6 left-6 flex gap-3">
+                <span className="bg-primary/90 backdrop-blur-md text-white text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full">
+                  Проверено в деле
+                </span>
+                <span className="bg-white/20 backdrop-blur-md text-white text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full border border-white/20">
+                  Amphibious 100%
+                </span>
+              </div>
+            </div>
+
+            {/* Background Glow */}
+            <div className="absolute -inset-4 bg-primary/10 blur-3xl -z-10 group-hover:bg-primary/20 transition-colors" />
+          </motion.div>
+
+          {/* Right: Content (40%) */}
+          <div className="lg:col-span-5 w-full">
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              animate={isInView ? { opacity: 1, y: 0 } : {}}
+              transition={{ duration: 0.6, delay: 0.2 }}
+            >
+              <div className="flex flex-wrap gap-2 mb-6">
+                <span className="px-3 py-1 bg-primary/10 text-primary text-[10px] font-bold uppercase tracking-widest rounded-lg border border-primary/20">
+                  Снег • Болото • Вода
+                </span>
+                <span className="px-3 py-1 bg-white/5 text-muted-foreground text-[10px] font-bold uppercase tracking-widest rounded-lg border border-white/10">
+                  Без подготовки
+                </span>
+              </div>
+
+              <h2 className="text-4xl md:text-5xl font-display font-bold mb-6 leading-[1.1]">
+                Там, где другие встают — <br />
+                <span className="text-gradient">«Росомаха» идёт</span>
+              </h2>
+
+              <p className="text-muted-foreground text-lg mb-8 leading-relaxed">
+                Снегоболотоходы «Росомаха» созданы для настоящего бездорожья:
+                уверенно проходят рыхлый снег и топь, а водные преграды — без пауз
+                и «ритуалов» перед входом в воду.
+              </p>
+
+              {/* Tiles Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-10">
+                {points.map((point, idx) => (
+                  <motion.div
+                    key={idx}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={isInView ? { opacity: 1, scale: 1 } : {}}
+                    transition={{ duration: 0.4, delay: 0.4 + idx * 0.1 }}
+                    className={`p-4 rounded-xl border border-white/10 bg-surface/50 backdrop-blur-sm group hover:border-primary/30 hover:bg-surface transition-all duration-300 ${idx === 4 ? 'sm:col-span-2' : ''}`}
+                  >
+                    <div className="flex items-center gap-3 mb-1">
+                      <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
+                        <point.icon className="w-4 h-4" />
+                      </div>
+                      <h4 className="font-bold text-sm tracking-tight">{point.title}</h4>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-tight pl-11">
+                      {point.desc}
+                    </p>
+                  </motion.div>
+                ))}
+              </div>
+
+              {/* CTAs */}
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row gap-4">
+                  <Link to="/catalog" className="btn-primary py-4 px-8 text-base">
+                    Получить КП
+                    <ArrowRight className="ml-2 w-5 h-5" />
+                  </Link>
+                  <Link to="/contacts" className="btn-secondary py-4 px-8 text-base">
+                    Тест-драйв
+                  </Link>
+                </div>
+                <p className="text-[11px] text-muted-foreground/60 text-center sm:text-left">
+                  Ответим и подберём конфигурацию 4×4 или 6×6 под вашу задачу
+                </p>
+              </div>
+            </motion.div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }

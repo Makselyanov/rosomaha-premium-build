@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# local secrets
+.env
+# AntiGravity backups
+*.bak_*
+# local temp
+8080/

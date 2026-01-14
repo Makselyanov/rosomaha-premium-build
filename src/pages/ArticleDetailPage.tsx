@@ -26,14 +26,14 @@ export default function ArticleDetailPage() {
     return sections.map((section, index) => {
       if (section.startsWith('## ')) {
         return (
-          <h2 key={index} className="text-2xl font-display font-bold mt-10 mb-4">
+          <h2 key={index} className="text-xl font-semibold mt-8 mb-4">
             {section.replace('## ', '')}
           </h2>
         );
       }
       if (section.startsWith('### ')) {
         return (
-          <h3 key={index} className="text-xl font-display font-semibold mt-8 mb-3">
+          <h3 key={index} className="text-lg font-semibold mt-6 mb-3">
             {section.replace('### ', '')}
           </h3>
         );
@@ -41,7 +41,7 @@ export default function ArticleDetailPage() {
       if (section.startsWith('- ')) {
         const items = section.split('\n');
         return (
-          <ul key={index} className="list-disc list-inside space-y-2 my-4 text-muted-foreground">
+          <ul key={index} className="list-disc list-inside space-y-2 my-4">
             {items.map((item, i) => (
               <li key={i}>{item.replace('- ', '')}</li>
             ))}
@@ -49,7 +49,7 @@ export default function ArticleDetailPage() {
         );
       }
       return (
-        <p key={index} className="text-muted-foreground leading-relaxed my-4">
+        <p key={index} className="leading-relaxed my-4">
           {section}
         </p>
       );
@@ -75,63 +75,54 @@ export default function ArticleDetailPage() {
         </div>
       </div>
 
-      {/* Article Header */}
-      <section className="py-12 bg-gradient-to-b from-secondary/30 to-background">
-        <div className="container">
+      {/* Article Hero */}
+      <section className="relative h-[50vh] min-h-[400px] flex items-end overflow-hidden">
+        {/* Background Image with Overlay */}
+        <div className="absolute inset-0">
+          <img
+            src={article.coverImage || article.image || '/media/placeholder-article.jpg'}
+            alt={article.title}
+            className="w-full h-full object-cover"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent" />
+        </div>
+
+        <div className="container relative z-10 pb-12">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="max-w-4xl mx-auto"
+            className="max-w-4xl"
           >
-            <Link 
+            <Link
               to="/articles"
-              className="inline-flex items-center gap-2 text-muted-foreground hover:text-primary transition-colors mb-6"
+              className="inline-flex items-center gap-2 text-primary hover:text-primary/80 transition-colors mb-6 font-medium"
             >
               <ArrowLeft className="w-4 h-4" />
               Назад к статьям
             </Link>
 
-            <div className="flex items-center gap-4 mb-6">
-              <span className="px-3 py-1 bg-primary/10 text-primary text-sm font-medium rounded-full">
+            <div className="flex flex-wrap items-center gap-4 mb-6">
+              <span className="px-3 py-1 bg-primary text-primary-foreground text-sm font-medium rounded-full">
                 {article.category}
               </span>
-              <div className="flex items-center gap-1.5 text-muted-foreground text-sm">
+              <div className="flex items-center gap-1.5 text-foreground/80 text-sm">
                 <Calendar className="w-4 h-4" />
                 {article.date}
               </div>
-              <div className="flex items-center gap-1.5 text-muted-foreground text-sm">
+              <div className="flex items-center gap-1.5 text-foreground/80 text-sm">
                 <Clock className="w-4 h-4" />
                 {readingTime} мин чтения
               </div>
             </div>
 
-            <h1 className="text-3xl md:text-4xl lg:text-5xl font-display font-bold mb-6">
+            <h1 className="text-3xl md:text-5xl lg:text-6xl font-display font-bold mb-6 text-foreground drop-shadow-sm">
               {article.title}
             </h1>
 
-            <p className="text-xl text-muted-foreground">
+            <p className="text-xl text-muted-foreground max-w-2xl">
               {article.excerpt}
             </p>
           </motion.div>
-        </div>
-      </section>
-
-      {/* Featured Image */}
-      <section className="py-8">
-        <div className="container">
-          <div className="max-w-4xl mx-auto">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="aspect-[21/9] rounded-2xl overflow-hidden"
-            >
-              <img
-                src={article.image}
-                alt={article.title}
-                className="w-full h-full object-cover"
-              />
-            </motion.div>
-          </div>
         </div>
       </section>
 
@@ -143,7 +134,7 @@ export default function ArticleDetailPage() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
-              className="prose prose-invert prose-lg max-w-none"
+              className="prose prose-invert max-w-none"
             >
               {renderContent(article.content)}
             </motion.article>
@@ -157,7 +148,7 @@ export default function ArticleDetailPage() {
                     <Share2 className="w-5 h-5" />
                   </button>
                 </div>
-                <Link 
+                <Link
                   to="/articles"
                   className="text-primary hover:underline flex items-center gap-2"
                 >
@@ -186,7 +177,7 @@ export default function ArticleDetailPage() {
                 >
                   <div className="aspect-[16/10] overflow-hidden">
                     <img
-                      src={related.image}
+                      src={related.coverImage || related.image || '/media/placeholder-article.jpg'}
                       alt={related.title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     />

@@ -16,6 +16,11 @@ import DeliveryPage from "./pages/DeliveryPage";
 import OrderPage from "./pages/OrderPage";
 import ArticlesPage from "./pages/ArticlesPage";
 import ArticleDetailPage from "./pages/ArticleDetailPage";
+import ApplicationsPage from "./pages/ApplicationsPage";
+import ApplicationDetailPage from "./pages/ApplicationDetailPage";
+import PrivacyPage from "./pages/PrivacyPage";
+import CookieConsent from "./components/CookieConsent";
+import NewYearPromo from "./components/NewYearPromo";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -39,9 +44,15 @@ const App = () => (
           <Route path="/order" element={<OrderPage />} />
           <Route path="/articles" element={<ArticlesPage />} />
           <Route path="/articles/:slug" element={<ArticleDetailPage />} />
+          <Route path="/applications" element={<ApplicationsPage />} />
+          <Route path="/applications/:slug" element={<ApplicationDetailPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+          <Route path="/politika-konfidencialnosti" element={<PrivacyPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
         <Footer />
+        <CookieConsent />
+        <NewYearPromo />
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

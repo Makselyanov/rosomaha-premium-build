@@ -38,7 +38,7 @@ export default function ArticlesPage() {
               Статьи и полезные материалы
             </h1>
             <p className="text-xl text-muted-foreground">
-              Советы по эксплуатации, обслуживанию и выбору снегоболотоходов. 
+              Советы по эксплуатации, обслуживанию и выбору снегоболотоходов.
               Полезная информация для владельцев и тех, кто планирует покупку.
             </p>
           </motion.div>
@@ -53,11 +53,10 @@ export default function ArticlesPage() {
               <button
                 key={category}
                 onClick={() => setSelectedCategory(category)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${
-                  selectedCategory === category
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary hover:bg-secondary/80 text-foreground'
-                }`}
+                className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${selectedCategory === category
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-secondary hover:bg-secondary/80 text-foreground'
+                  }`}
               >
                 {category}
               </button>
@@ -83,7 +82,7 @@ export default function ArticlesPage() {
                     {/* Image */}
                     <div className="aspect-[16/10] overflow-hidden">
                       <img
-                        src={article.image}
+                        src={article.coverImage || article.image || '/media/placeholder-article.jpg'}
                         alt={article.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
@@ -103,7 +102,7 @@ export default function ArticlesPage() {
                       </div>
 
                       {/* Title */}
-                      <h2 className="text-xl font-display font-semibold mb-3 group-hover:text-primary transition-colors line-clamp-2">
+                      <h2 className="text-xl font-semibold mb-3 group-hover:text-primary transition-colors line-clamp-2">
                         {article.title}
                       </h2>
 
@@ -142,7 +141,7 @@ export default function ArticlesPage() {
               Остались вопросы?
             </h2>
             <p className="text-muted-foreground mb-8">
-              Наши специалисты готовы проконсультировать вас по любым вопросам 
+              Наши специалисты готовы проконсультировать вас по любым вопросам
               о снегоболотоходах РОСОМАХА
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
