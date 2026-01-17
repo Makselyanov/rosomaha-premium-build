@@ -106,7 +106,7 @@ export default function ArticleDetailPage() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
-              className="prose prose-invert max-w-none"
+              className="prose prose-invert max-w-none break-words"
             >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkBreaks]}
@@ -114,20 +114,15 @@ export default function ArticleDetailPage() {
                   a: ({ node, href, children, ...props }) => {
                     let finalHref = href;
                     if (href) {
-                      if (href === '../index.htm' || href === './index.htm' || href === 'index.htm') {
+                      if (href === '../index.htm' || href === './index.htm' || href === 'index.htm' || href === '../') {
                         finalHref = '/articles';
                       } else if (href.startsWith('../') && href.endsWith('/index.htm')) {
                         const match = href.match(/\.\.\/(.*?)\/index\.htm/);
                         if (match) {
                           finalHref = `/articles/${match[1]}`;
                         }
-                      } else if (href.includes('rosomaha-rus.ru/articles/')) {
-                        const match = href.match(/rosomaha-rus\.ru\/articles\/(.*?)\/?$/);
-                        if (match && match[1]) {
-                          finalHref = `/articles/${match[1].replace(/\/$/, '')}`;
-                        } else {
-                          finalHref = '/articles';
-                        }
+                      } else if (href.startsWith('https://rosomaha-rus.ru')) {
+                        finalHref = href.replace('https://rosomaha-rus.ru', 'https://xn--80aa8ahaki9a.site');
                       }
                     }
 
