@@ -828,7 +828,7 @@ export const applications: Application[] = [
         heroDescription: 'Уникальные кадры дикой природы, водопады, куда не доходят пешие туристы, заброшенные объекты. Росомаха расширяет горизонты ваших путешествий.',
         pain: 'Самые красивые места всегда труднодоступны',
         solution: 'Заброска с комфортом. Возможность взять много фототехники. Свобода маршрута',
-        image: '/media/applications/turizm.jpg',
+        image: '/media/applications/turizm-main.jpg',
 
         metaTitle: 'Вездеход для туризма и фототуров | Росомаха',
         metaDescription: 'Организация уникальных туристических маршрутов. Заброска фотографов и групп в труднодоступные места.',
@@ -836,11 +836,13 @@ export const applications: Application[] = [
         situations: [
             {
                 title: 'Фототур на плато',
-                description: 'Нужно поднять группу фотографов с тяжелой техникой на рассветную точку.'
+                description: 'Нужно поднять группу фотографов с тяжелой техникой на рассветную точку.',
+                image: '/media/applications/turizm-photo-tour.jpg'
             },
             {
                 title: 'Коммерческий туризм',
-                description: 'Организация платных туров "Сафари по-русски" для обеспеченных клиентов.'
+                description: 'Организация платных туров "Сафари по-русски" для обеспеченных клиентов.',
+                image: '/media/applications/turizm-expedition.jpg'
             }
         ],
 
@@ -889,7 +891,8 @@ export const applications: Application[] = [
         ],
 
         relatedApplications: ['zimnie-vyezdy', 'rybalka'],
-        relatedArticles: ['podgotovka-k-puteshestviyu-chto-vzyat-s-soboy-kak-podgotovit-tekhniku']
+        relatedArticles: ['podgotovka-k-puteshestviyu-chto-vzyat-s-soboy-kak-podgotovit-tekhniku'],
+        ctaBackground: '/media/applications/turizm-main.jpg'
     }
 ];
 
