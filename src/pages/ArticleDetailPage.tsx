@@ -1,6 +1,9 @@
 import { useParams, Link, Navigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Calendar, ChevronRight, ArrowLeft, Share2, Clock } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { articles } from '@/data/articles';
 
 export default function ArticleDetailPage() {
@@ -21,40 +24,8 @@ export default function ArticleDetailPage() {
   const readingTime = Math.ceil(wordCount / 200);
 
   // Convert markdown-like content to HTML sections
-  const renderContent = (content: string) => {
-    const sections = content.split('\n\n');
-    return sections.map((section, index) => {
-      if (section.startsWith('## ')) {
-        return (
-          <h2 key={index} className="text-xl font-semibold mt-8 mb-4">
-            {section.replace('## ', '')}
-          </h2>
-        );
-      }
-      if (section.startsWith('### ')) {
-        return (
-          <h3 key={index} className="text-lg font-semibold mt-6 mb-3">
-            {section.replace('### ', '')}
-          </h3>
-        );
-      }
-      if (section.startsWith('- ')) {
-        const items = section.split('\n');
-        return (
-          <ul key={index} className="list-disc list-inside space-y-2 my-4">
-            {items.map((item, i) => (
-              <li key={i}>{item.replace('- ', '')}</li>
-            ))}
-          </ul>
-        );
-      }
-      return (
-        <p key={index} className="leading-relaxed my-4">
-          {section}
-        </p>
-      );
-    });
-  };
+  // Using ReactMarkdown instead of custom renderContent
+
 
   return (
     <main className="min-h-screen pt-20">
@@ -136,7 +107,49 @@ export default function ArticleDetailPage() {
               transition={{ delay: 0.2 }}
               className="prose prose-invert max-w-none"
             >
-              {renderContent(article.content)}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBreaks]}
+                components={{
+                  a: ({ node, href, children, ...props }) => {
+                    let finalHref = href;
+                    if (href) {
+                      if (href === '../index.htm' || href === './index.htm' || href === 'index.htm') {
+                        finalHref = '/articles';
+                      } else if (href.startsWith('../') && href.endsWith('/index.htm')) {
+                        const match = href.match(/\.\.\/(.*?)\/index\.htm/);
+                        if (match) {
+                          finalHref = `/articles/${match[1]}`;
+                        }
+                      } else if (href.includes('rosomaha-rus.ru/articles/')) {
+                        const match = href.match(/rosomaha-rus\.ru\/articles\/(.*?)\/?$/);
+                        if (match && match[1]) {
+                          finalHref = `/articles/${match[1].replace(/\/$/, '')}`;
+                        } else {
+                          finalHref = '/articles';
+                        }
+                      }
+                    }
+
+                    const isInternal = finalHref?.startsWith('/') || finalHref?.startsWith('#');
+
+                    if (isInternal) {
+                      return (
+                        <Link to={finalHref || '#'} className="text-primary hover:underline" {...props}>
+                          {children}
+                        </Link>
+                      );
+                    }
+
+                    return (
+                      <a href={finalHref} className="text-primary hover:underline" target="_blank" rel="noopener noreferrer" {...props}>
+                        {children}
+                      </a>
+                    );
+                  }
+                }}
+              >
+                {article.content}
+              </ReactMarkdown>
             </motion.article>
 
             {/* Share */}
