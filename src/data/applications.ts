@@ -759,11 +759,13 @@ export const applications: Application[] = [
         situations: [
             {
                 title: 'Семейный выезд на природу',
-                description: 'Хочется пожарить шашлыки в красивом месте, но не хочется морозить детей.'
+                description: 'Хочется пожарить шашлыки в красивом месте, но не хочется морозить детей.',
+                image: '/media/applications/zimnie-family-portrait.jpg'
             },
             {
                 title: 'Катание на ватрушках',
-                description: 'Вездеход отлично тянет вереницу ватрушек по полю — дети в восторге (соблюдайте безопасность!).'
+                description: 'Вездеход отлично тянет вереницу ватрушек по полю — дети в восторге (соблюдайте безопасность!).',
+                image: '/media/applications/zimnie-vyezdy.jpg'
             }
         ],
 
@@ -811,8 +813,9 @@ export const applications: Application[] = [
             'Застрять с детьми в сугробе на машине.'
         ],
 
-        relatedApplications: ['turizm', 'okhot'],
-        relatedArticles: ['osobennosti-vozhdeniya-v-raznykh-usloviyakh-gory-lesa-bolota-pustyni']
+        relatedApplications: ['turizm', 'okhota'],
+        relatedArticles: ['osobennosti-vozhdeniya-v-raznykh-usloviyakh-gory-lesa-bolota-pustyni'],
+        ctaBackground: '/media/applications/zimnie-vyezdy.jpg'
     },
     {
         id: '11',
