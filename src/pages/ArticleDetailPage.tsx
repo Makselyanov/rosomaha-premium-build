@@ -1,6 +1,7 @@
 import { useParams, Link, Navigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Calendar, ChevronRight, ArrowLeft, Share2, Clock } from 'lucide-react';
+import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -157,7 +158,13 @@ export default function ArticleDetailPage() {
               <div className="flex items-center justify-between flex-wrap gap-4">
                 <div className="flex items-center gap-3">
                   <span className="text-muted-foreground">Поделиться:</span>
-                  <button className="p-2 bg-secondary hover:bg-primary/20 rounded-lg transition-colors">
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(window.location.href);
+                      toast.success("Ссылка скопирована");
+                    }}
+                    className="p-2 bg-secondary hover:bg-primary/20 rounded-lg transition-colors"
+                  >
                     <Share2 className="w-5 h-5" />
                   </button>
                 </div>
