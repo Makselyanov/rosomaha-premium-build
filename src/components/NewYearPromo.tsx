@@ -87,7 +87,7 @@ export default function NewYearPromo() {
                             stiffness: 100,
                             duration: 0.6
                         }}
-                        className="fixed left-4 md:left-8 top-1/2 -translate-y-1/2 z-[1000] max-w-[92vw] md:max-w-lg"
+                        className="fixed left-4 md:left-8 top-1/2 -translate-y-1/2 lg:-translate-y-[calc(50%+40px)] z-[1000] max-w-[92vw] md:max-w-lg"
                     >
                         <div className="relative bg-card border-2 border-primary rounded-xl shadow-2xl overflow-hidden">
                             {/* Крестик закрытия */}
