@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { articles } from '@/data/articles';
+import '@/assets/css/articles.css';
 
 export default function ArticleDetailPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -100,77 +101,75 @@ export default function ArticleDetailPage() {
 
       {/* Article Content */}
       <section className="py-8 pb-16">
-        <div className="container">
-          <div className="max-w-4xl mx-auto">
-            <motion.article
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="prose prose-invert max-w-none break-words"
-            >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkBreaks]}
-                components={{
-                  a: ({ node, href, children, ...props }) => {
-                    let finalHref = href;
-                    if (href) {
-                      if (href === '../index.htm' || href === './index.htm' || href === 'index.htm' || href === '../') {
-                        finalHref = '/articles';
-                      } else if (href.startsWith('../') && href.endsWith('/index.htm')) {
-                        const match = href.match(/\.\.\/(.*?)\/index\.htm/);
-                        if (match) {
-                          finalHref = `/articles/${match[1]}`;
-                        }
-                      } else if (href.startsWith('https://rosomaha-rus.ru')) {
-                        finalHref = href.replace('https://rosomaha-rus.ru', 'https://xn--80aa8ahaki9a.site');
+        <div className="article-container">
+          <motion.article
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className="article-content"
+          >
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkBreaks]}
+              components={{
+                a: ({ node, href, children, ...props }) => {
+                  let finalHref = href;
+                  if (href) {
+                    if (href === '../index.htm' || href === './index.htm' || href === 'index.htm' || href === '../') {
+                      finalHref = '/articles';
+                    } else if (href.startsWith('../') && href.endsWith('/index.htm')) {
+                      const match = href.match(/\.\.\/(.*?)\/index\.htm/);
+                      if (match) {
+                        finalHref = `/articles/${match[1]}`;
                       }
+                    } else if (href.startsWith('https://rosomaha-rus.ru')) {
+                      finalHref = href.replace('https://rosomaha-rus.ru', 'https://xn--80aa8ahaki9a.site');
                     }
+                  }
 
-                    const isInternal = finalHref?.startsWith('/') || finalHref?.startsWith('#');
+                  const isInternal = finalHref?.startsWith('/') || finalHref?.startsWith('#');
 
-                    if (isInternal) {
-                      return (
-                        <Link to={finalHref || '#'} className="text-primary hover:underline" {...props}>
-                          {children}
-                        </Link>
-                      );
-                    }
-
+                  if (isInternal) {
                     return (
-                      <a href={finalHref} className="text-primary hover:underline" target="_blank" rel="noopener noreferrer" {...props}>
+                      <Link to={finalHref || '#'} className="text-primary hover:underline" {...props}>
                         {children}
-                      </a>
+                      </Link>
                     );
                   }
-                }}
-              >
-                {article.content}
-              </ReactMarkdown>
-            </motion.article>
 
-            {/* Share */}
-            <div className="mt-12 pt-8 border-t border-border">
-              <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-muted-foreground">Поделиться:</span>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(window.location.href);
-                      toast.success("Ссылка скопирована");
-                    }}
-                    className="p-2 bg-secondary hover:bg-primary/20 rounded-lg transition-colors"
-                  >
-                    <Share2 className="w-5 h-5" />
-                  </button>
-                </div>
-                <Link
-                  to="/articles"
-                  className="text-primary hover:underline flex items-center gap-2"
+                  return (
+                    <a href={finalHref} className="text-primary hover:underline" target="_blank" rel="noopener noreferrer" {...props}>
+                      {children}
+                    </a>
+                  );
+                }
+              }}
+            >
+              {article.content}
+            </ReactMarkdown>
+          </motion.article>
+
+          {/* Share */}
+          <div className="mt-12 pt-8 border-t border-border">
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div className="flex items-center gap-3">
+                <span className="text-muted-foreground">Поделиться:</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(window.location.href);
+                    toast.success("Ссылка скопирована");
+                  }}
+                  className="p-2 bg-secondary hover:bg-primary/20 rounded-lg transition-colors"
                 >
-                  <ArrowLeft className="w-4 h-4" />
-                  Все статьи
-                </Link>
+                  <Share2 className="w-5 h-5" />
+                </button>
               </div>
+              <Link
+                to="/articles"
+                className="text-primary hover:underline flex items-center gap-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Все статьи
+              </Link>
             </div>
           </div>
         </div>
@@ -179,7 +178,7 @@ export default function ArticleDetailPage() {
       {/* Related Articles */}
       {relatedArticles.length > 0 && (
         <section className="py-16 bg-secondary/50">
-          <div className="container">
+          <div className="article-container">
             <h2 className="text-2xl font-display font-bold mb-8">
               Похожие статьи
             </h2>
@@ -215,22 +214,20 @@ export default function ArticleDetailPage() {
 
       {/* CTA */}
       <section className="py-16">
-        <div className="container">
-          <div className="max-w-3xl mx-auto text-center">
-            <h2 className="text-3xl font-display font-bold mb-4">
-              Готовы выбрать свой вездеход?
-            </h2>
-            <p className="text-muted-foreground mb-8">
-              Ознакомьтесь с нашим каталогом или свяжитесь с нами для консультации
-            </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link to="/catalog" className="btn-primary">
-                Смотреть каталог
-              </Link>
-              <Link to="/contacts" className="btn-outline">
-                Связаться с нами
-              </Link>
-            </div>
+        <div className="article-container text-center">
+          <h2 className="text-3xl font-display font-bold mb-4">
+            Готовы выбрать свой вездеход?
+          </h2>
+          <p className="text-muted-foreground mb-8 max-w-2xl mx-auto">
+            Ознакомьтесь с нашим каталогом или свяжитесь с нами для консультации
+          </p>
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            <Link to="/catalog" className="btn-primary">
+              Смотреть каталог
+            </Link>
+            <Link to="/contacts" className="btn-outline">
+              Связаться с нами
+            </Link>
           </div>
         </div>
       </section>

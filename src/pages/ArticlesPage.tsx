@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Calendar, ArrowRight, ChevronRight } from 'lucide-react';
 import { articles, articleCategories } from '@/data/articles';
+import '@/assets/css/articles.css';
 
 export default function ArticlesPage() {
   const [selectedCategory, setSelectedCategory] = useState('Все статьи');
