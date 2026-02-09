@@ -34,14 +34,21 @@ export default function ModelDetailPage() {
   );
 
   // Галерея изображений с учетом выбранного цвета
+  // Изображение цвета добавляется ТОЛЬКО если оно принадлежит данному товару (есть в gallery или thumbnails)
   const galleryImages = useMemo(() => {
-    // Если у выбранного цвета есть изображение, ставим его первым
     if (currentColor?.image) {
       const colorImage = currentColor.image;
-      // Проверяем, есть ли это изображение уже в галерее
-      const otherImages = product?.gallery.filter(img => img !== colorImage) || [];
-      return [colorImage, ...otherImages];
+      // Проверяем, принадлежит ли изображение цвета данному товару
+      const productOwnImages = [...(product?.gallery || []), ...(product?.thumbnails || [])];
+      const isOwnImage = productOwnImages.some(img => img === colorImage || img.includes(colorImage) || colorImage.includes(img.split('/').pop() || ''));
+
+      if (isOwnImage) {
+        // Изображение принадлежит товару — ставим в начало
+        const otherImages = product?.gallery.filter(img => img !== colorImage) || [];
+        return [colorImage, ...otherImages];
+      }
     }
+    // Если изображение цвета НЕ принадлежит товару — оставляем галерею как есть
     return product?.gallery || [];
   }, [product, currentColor]);
 
@@ -288,6 +295,7 @@ export default function ModelDetailPage() {
               variants={product.variants}
               selectedVariant={selectedVariant}
               onVariantChange={setSelectedVariant}
+              currentProductId={product.id}
             />
 
             {/* Color Selector */}
@@ -437,6 +445,9 @@ export default function ModelDetailPage() {
             options={product.options}
             selectedOptions={selectedOptions}
             onToggleOption={handleToggleOption}
+            product={product}
+            variant={currentVariant}
+            color={currentColor}
           />
         </section>
 

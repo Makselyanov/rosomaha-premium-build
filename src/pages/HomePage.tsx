@@ -51,7 +51,7 @@ const capabilities = [
 ];
 
 export default function HomePage() {
-  const featuredModels = models.slice(0, 6);
+  const featuredModels = models.slice(0, 12);
 
   return (
     <main>
