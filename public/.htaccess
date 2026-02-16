@@ -1,48 +1,115 @@
 # HTACCESS для SEO оптимизации
 # https://xn--80aa8ahaki9a.site/
+# UTF-8 encoding
 
+# Force HTTPS
 <IfModule mod_rewrite.c>
   RewriteEngine On
-
-  # Удаляем trailing slash
+  
+  # HTTPS redirect (http -> https)
+  RewriteCond %{HTTPS} off
+  RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+  
+  # Optional: Force non-www or www version (comment/uncomment as needed)
+  # Forcing non-www
+  RewriteCond %{HTTP_HOST} ^www\.(.*)$ [NC]
+  RewriteRule ^(.*)$ https://%1/$1 [R=301,L]
+  
+  # Remove trailing slash (except for directories)
   RewriteCond %{REQUEST_FILENAME} !-d
   RewriteRule ^(.+)/$ /$1 [L,R=301]
-
-  # Масштабиров в www версию (опционально)
-  # RewriteCond %{HTTP_HOST} !^www\.
-  # RewriteRule ^(.*)$ https://www.%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-
-  # 404 ошибки
-  ErrorDocument 404 /404.html
+  
+  # Add trailing slash for directories
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^(.+[^/])$ /$1/ [L,R=301]
+  
+  # SPA routing - rewrite to index.html for non-existent files
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(.*)$ /index.html [QSA,L]
 </IfModule>
 
-# Кэширование браузером для статических файлов
+# Browser Caching with 304 Not Modified and ETag
+<IfModule mod_headers.c>
+  # Add ETag header for better caching
+  Header unset ETag
+  FileETag None
+  
+  # Cache-Control headers for different file types
+  <FilesMatch "\.(html|htm)$">
+    Header set Cache-Control "public, max-age=86400, must-revalidate"
+    Header set Content-Type "text/html; charset=utf-8"
+  </FilesMatch>
+  
+  <FilesMatch "\.(js)$">
+    Header set Cache-Control "public, max-age=2592000, must-revalidate"
+    Header set Content-Type "text/javascript; charset=utf-8"
+  </FilesMatch>
+  
+  <FilesMatch "\.(css)$">
+    Header set Cache-Control "public, max-age=2592000, must-revalidate"
+    Header set Content-Type "text/css; charset=utf-8"
+  </FilesMatch>
+  
+  <FilesMatch "\.(jpg|jpeg|png|gif|svg|webp|ico)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+    Header set Content-Type "image/x-icon"
+  </FilesMatch>
+  
+  <FilesMatch "\.(woff|woff2|ttf|eot|otf)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+    Header set Access-Control-Allow-Origin "*"
+  </FilesMatch>
+  
+  <!-- Sitemaps and robots -->
+  <FilesMatch "\.(xml|json)$">
+    Header set Cache-Control "public, max-age=604800, must-revalidate"
+  </FilesMatch>
+  
+  <!-- Security headers -->
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set X-XSS-Protection "1; mode=block"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# File Expiration (Caching)
 <IfModule mod_expires.c>
   ExpiresActive On
   ExpiresDefault "access plus 1 year"
   
-  # На день
+  # HTML files - cache for 1 day
   ExpiresByType text/html "access plus 1 day"
-  ExpiresByType application/json "access plus 1 day"
   
-  # На месяц
-  ExpiresByType image/jpeg "access plus 1 month"
-  ExpiresByType image/gif "access plus 1 month"
-  ExpiresByType image/png "access plus 1 month"
-  ExpiresByType image/webp "access plus 1 month"
-  ExpiresByType image/x-icon "access plus 1 month"
+  # JSON - cache for 1 week
+  ExpiresByType application/json "access plus 1 week"
   
-  # На неделю
-  ExpiresByType text/css "access plus 1 week"
-  ExpiresByType application/javascript "access plus 1 week"
-  ExpiresByType text/javascript "access plus 1 week"
+  # CSS and JS - cache for 30 days
+  ExpiresByType text/css "access plus 30 days"
+  ExpiresByType text/javascript "access plus 30 days"
+  ExpiresByType application/javascript "access plus 30 days"
   
-  # Sitemaps
-  ExpiresByType application/xml "access plus 1 week"
+  # Images - cache for 1 year
+  ExpiresByType image/jpeg "access plus 1 year"
+  ExpiresByType image/gif "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/webp "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 year"
+  ExpiresByType image/x-icon "access plus 1 year"
+  
+  # Fonts - cache for 1 year
+  ExpiresByType font/ttf "access plus 1 year"
+  ExpiresByType font/otf "access plus 1 year"
+  ExpiresByType font/woff "access plus 1 year"
+  ExpiresByType font/woff2 "access plus 1 year"
+  
+  # Sitemaps and robots.txt
   ExpiresByType text/xml "access plus 1 week"
+  ExpiresByType application/xml "access plus 1 week"
+  ExpiresByType text/plain "access plus 1 week"
 </IfModule>
 
-# GZIP сжатие
+# GZIP compression
 <IfModule mod_deflate.c>
   AddOutputFilterByType DEFLATE text/plain
   AddOutputFilterByType DEFLATE text/html
@@ -55,6 +122,25 @@
   AddOutputFilterByType DEFLATE application/javascript
   AddOutputFilterByType DEFLATE application/x-javascript
   AddOutputFilterByType DEFLATE application/json
+  AddOutputFilterByType DEFLATE application/pdf
+  
+  # Handle deflate incompatibility
+  SetEnvIfNoCase Request_URI \.(?:gif|jpg|jpeg|png|svg)$ no-gzip dont-vary
+</IfModule>
+
+# Brotli compression (if available, replaces gzip)
+<IfModule mod_brotli.c>
+  AddOutputFilterByType BROTLI_COMPRESS text/plain
+  AddOutputFilterByType BROTLI_COMPRESS text/html
+  AddOutputFilterByType BROTLI_COMPRESS text/xml
+  AddOutputFilterByType BROTLI_COMPRESS text/css
+  AddOutputFilterByType BROTLI_COMPRESS text/javascript
+  AddOutputFilterByType BROTLI_COMPRESS application/xml
+  AddOutputFilterByType BROTLI_COMPRESS application/xhtml+xml
+  AddOutputFilterByType BROTLI_COMPRESS application/rss+xml
+  AddOutputFilterByType BROTLI_COMPRESS application/javascript
+  AddOutputFilterByType BROTLI_COMPRESS application/x-javascript
+  AddOutputFilterByType BROTLI_COMPRESS application/json
 </IfModule>
 
 # Disable directory listings
@@ -62,14 +148,20 @@
   Options -Indexes
 </IfModule>
 
-# Security: Disable access to .env and other config files
-<FilesMatch "\.(env|htpasswd|htaccess|sqlite|db|pem|key)$">
+# Security: Disable access to sensitive files
+<FilesMatch "\.(env|htpasswd|htaccess|sqlite|db|pem|key|yml|yaml|ts|tsx)$">
   Require all denied
 </FilesMatch>
 
-# CORS headers для изображений и медиа
-<IfModule mod_headers.c>
-  <FilesMatch "\.(jpg|jpeg|png|gif|ico|css|js|svg|webp|woff|woff2|ttf|eot)$">
-    Header set Access-Control-Allow-Origin "*"
-  </FilesMatch>
-</IfModule>
+# Disable access to upload and cache directories for direct file access
+<DirectoryMatch "^.*(/upload/|/resize_cache/|/admin/)">
+  Require all denied
+</DirectoryMatch>
+
+# UTF-8 encoding
+AddCharset UTF-8 .html .htm .xml .js .css .json
+
+# Prevent access to .git directory
+<DirectoryMatch "^.*\.git">
+  Require all denied
+</DirectoryMatch>
