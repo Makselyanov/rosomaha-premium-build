@@ -2145,7 +2145,7 @@ export const articles: Article[] = [
 		date: '6 февраля 2026 года',
 		category: 'Характеристики',
 		image: '/media/articles/rosomaha-forest.jpg',
-		coverImage: '/media/articles/unnamed (9).jpg',
+		coverImage: '/media/articles/pochemu-ne-podvodit.jpg',
 		content: `
 Для владельца вездехода уверенность в технике — это не просто комфорт, это вопрос безопасности. В условиях, когда до ближайшего населенного пункта десятки километров непролазной тайги или болота, цена поломки одного узла может быть слишком велика.
 
@@ -2198,7 +2198,7 @@ export const articles: Article[] = [
 		date: '7 февраля 2026',
 		category: 'Приключения',
 		image: '/media/articles/idealnye-vykhodnye.jpg',
-		coverImage: '/media/articles/unnamed.jpg',
+		coverImage: '/media/articles/idealnie vihodnie.jpg',
 		content: `Пятница — это маленький праздник. Но настоящий праздник начинается тогда, когда вы поворачиваете ключ зажигания своего вездехода. Как провести предстоящие выходные? Кто-то ищет адреналин в глухой тайге, кто-то медитирует с удочкой, а кто-то посвящает время технике в гараже.
 
 Мы разобрали 4 классических сценария выходного дня для владельца снегоболотохода «Росомаха». Какой из них выберете вы?
