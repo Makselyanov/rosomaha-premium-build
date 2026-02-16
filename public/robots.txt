@@ -1,14 +1,36 @@
-User-agent: Googlebot
+# Robots.txt для https://xn--80aa8ahaki9a.site/
+# Яндекс и Google bot rules
+
+User-agent: *
+Allow: /
+Disallow: /upload/
+Disallow: /resize_cache/
+Disallow: /admin/
+Allow: /public/
+
+# Яндекс
+User-agent: Yandex
+Crawl-delay: 1
 Allow: /
 
+# Google
+User-agent: Googlebot
+Crawl-delay: 1
+Allow: /
+
+# Bing
 User-agent: Bingbot
 Allow: /
 
+# Twitter, Facebook и другие социальные сети
 User-agent: Twitterbot
 Allow: /
 
 User-agent: facebookexternalhit
 Allow: /
 
-User-agent: *
-Allow: /
+# Sitemaps
+Sitemap: https://xn--80aa8ahaki9a.site/sitemap.xml
+Sitemap: https://xn--80aa8ahaki9a.site/sitemap-models.xml
+Sitemap: https://xn--80aa8ahaki9a.site/sitemap-applications.xml
+Sitemap: https://xn--80aa8ahaki9a.site/sitemap-articles.xml
