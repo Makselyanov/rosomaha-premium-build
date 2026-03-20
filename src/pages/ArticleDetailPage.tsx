@@ -102,6 +102,46 @@ export default function ArticleDetailPage() {
       {/* Article Content */}
       <section className="py-8 pb-16">
         <div className="article-container">
+          {article.video && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="mb-10"
+            >
+              <div className="rounded-[2rem] border border-border bg-card/80 p-4 shadow-sm backdrop-blur-sm md:p-6">
+                <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-primary">
+                      Видео
+                    </p>
+                    <h2 className="mt-2 text-2xl font-display font-semibold text-foreground">
+                      С выставочной площадки
+                    </h2>
+                  </div>
+                  <span className="text-sm text-muted-foreground">{article.date}</span>
+                </div>
+
+                <div className={article.videoIsPortrait ? 'mx-auto w-full max-w-[420px]' : 'w-full'}>
+                  <div
+                    className="overflow-hidden rounded-[1.6rem] bg-black shadow-2xl"
+                    style={{ aspectRatio: article.videoIsPortrait ? '9 / 16' : '16 / 9' }}
+                  >
+                    <video
+                      controls
+                      playsInline
+                      preload="metadata"
+                      poster={article.coverImage || article.image}
+                      className="h-full w-full object-cover"
+                    >
+                      <source src={article.video} type="video/mp4" />
+                    </video>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           <motion.article
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}

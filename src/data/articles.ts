@@ -1,3 +1,5 @@
+import { tyumenExhibitionArticle } from './tyumen-exhibition';
+
 export interface Article {
 	id: string;
 	slug: string;
@@ -7,10 +9,13 @@ export interface Article {
 	date: string;
 	image?: string;
 	coverImage?: string;
+	video?: string;
+	videoIsPortrait?: boolean;
 	category: string;
 }
 
 export const articles: Article[] = [
+	tyumenExhibitionArticle,
 	{
 		id: '1',
 		slug: 'osobennosti-podgotovki-tekhniki-i-ekipirovki-dlya-sporta',
@@ -2261,6 +2266,7 @@ export const articles: Article[] = [
 ];
 export const articleCategories = [
 	'Все статьи',
+	'Новости',
 	'Подготовка',
 	'Вождение',
 	'Обслуживание',
