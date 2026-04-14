@@ -4,7 +4,10 @@ import { Link } from 'react-router-dom';
 import { Send, Check, Loader2 } from 'lucide-react';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
-import emailjs from '@emailjs/browser';
+import { trackLeadSubmit } from '@/lib/metrika';
+import { getAttribution } from '@/lib/attribution';
+
+const CRM_WEBHOOK_URL = 'https://rosomaha.centrlp.ru/api/webhooks/site-form';
 
 export default function OrderPage() {
   const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
@@ -23,6 +26,7 @@ export default function OrderPage() {
     e.preventDefault();
     setIsSending(true);
 
+    // Детализация корзины — читаемый текст в комментарий к заявке
     const orderDetails = items.map((item, index) => {
       const options = item.options.length > 0
         ? `\n   Опции: ${item.options.map(o => `${o.name} (+${formatPrice(o.price)})`).join(', ')}`
@@ -32,37 +36,58 @@ export default function OrderPage() {
    Цена: ${formatPrice(getItemTotal(item))}${options}`;
     }).join('\n\n');
 
-    const templateParams = {
-      customer_name: formData.name,
-      customer_phone: formData.phone,
-      message: formData.comment,
-      order_details: orderDetails,
-      total_price: formatPrice(getTotalPrice()),
-      subject: 'заявка с сайта росомаха.site',
-      to_email: 'rosomaha-rus999@yandex.ru, rosomaha-rus@mail.ru'
-    };
+    const totalStr = formatPrice(getTotalPrice());
+    const commentWithOrder = [
+      formData.comment?.trim(),
+      orderDetails ? `\n\n--- Заказ ---\n${orderDetails}\n\nИтого: ${totalStr}` : '',
+    ].filter(Boolean).join('');
+
+    // Первая позиция корзины (если есть) → в структурированные поля сделки
+    const firstItem = items[0];
+    const modelText = firstItem
+      ? `${firstItem.product.name} (${firstItem.variant.name})`
+      : undefined;
+    const colorName = firstItem?.color?.name;
 
     try {
-      const serviceId = import.meta.env.VITE_EMAILJS_SERVICE_ID;
-      const templateId = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
-      const publicKey = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+      const attribution = await getAttribution();
 
-      if (!serviceId || !templateId || !publicKey) {
-        throw new Error('EmailJS configuration missing');
+      const payload = {
+        name: formData.name,
+        phone: formData.phone,
+        comment: commentWithOrder,
+        source: 'rosomaha.site',
+        form_name: 'order_page',
+        model_text: modelText,
+        color: colorName,
+        deal_amount: getTotalPrice() || undefined,
+        ...attribution,
+      };
+
+      const response = await fetch(CRM_WEBHOOK_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`CRM webhook ${response.status}: ${errorText.slice(0, 200)}`);
       }
 
-      await emailjs.send(
-        serviceId,
-        templateId,
-        templateParams,
-        publicKey
-      );
+      trackLeadSubmit({
+        source: 'order_page',
+        items_count: items.length,
+      });
 
       setIsSubmitted(true);
       clearCart();
       toast({ title: 'Заявка отправлена!', description: 'Мы свяжемся с вами в ближайшее время.' });
     } catch (error) {
-      console.error('Email sending failed:', error);
+      console.error('Lead submission failed:', error);
       toast({
         title: 'Ошибка отправки',
         description: 'Не удалось отправить заявку. Пожалуйста, проверьте соединение или свяжитесь с нами по телефону.',
