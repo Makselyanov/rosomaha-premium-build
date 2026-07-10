@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { Building2, Users, Award, Target } from 'lucide-react';
+import { officePhone, primaryPhone } from '@/data/contactInfo';
 // Images now loaded from public/media
 
 
@@ -186,7 +187,8 @@ export default function CompanyPage() {
                   { label: 'ИНН/КПП', value: '7224087219/722401001' },
                   { label: 'ОГРН', value: '1237200009133' },
                   { label: 'Юридический адрес', value: '625501, Тюменская область, М.Р-Н ТЮМЕНСКИЙ, С.П. МОСКОВСКОЕ, П МОСКОВСКИЙ, УЛ БУРЛАКИ, ЗД. 29В, ОФИС 3' },
-                  { label: 'Телефон', value: '+7 (3452) 63-88-70' },
+                  { label: 'Телефон / WhatsApp / Telegram', value: primaryPhone.display },
+                  { label: 'Офис', value: officePhone.display },
                 ].map((row) => (
                   <tr key={row.label}>
                     <td className="py-4 pr-8 text-muted-foreground font-medium whitespace-nowrap">

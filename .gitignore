@@ -29,3 +29,35 @@ dist-ssr
 *.bak_*
 # local temp
 8080/
+.codex_tmp/
+.playwright-mcp/
+.local-artifacts/
+tmp_*
+
+# generated operational reports
+marketing-audits/
+seo-reports/
+
+# local/reference archives and upload scratchpads
+live-domain-*/
+acts/
+codex_uploads/
+freelance-upload/
+plans/
+
+# local screenshots, profiles, VPN/mobile artifacts
+max-*.png
+max-current.png
+max-dialog*.png
+crm-*.png
+contra_*.png
+pph_profile_photo.*
+maxim_makselyanov_cv.pdf
+vpn-*
+vitaly-*
+*.mobileconfig
+
+# local one-off audit/status files
+YANDEX_DIRECT_AUDIT_*.md
+LEGAL_*_STATUS_*.md
+Текстовый документ.txt

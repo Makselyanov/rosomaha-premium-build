@@ -1,3 +1,6 @@
+import { tyumenExhibitionArticle } from './tyumen-exhibition';
+import { czArticles } from './articles-cz';
+
 export interface Article {
 	id: string;
 	slug: string;
@@ -6,11 +9,16 @@ export interface Article {
 	content: string;
 	date: string;
 	image?: string;
+	heroImage?: string;
 	coverImage?: string;
+	video?: string;
+	videoIsPortrait?: boolean;
 	category: string;
 }
 
 export const articles: Article[] = [
+	tyumenExhibitionArticle,
+	...czArticles,
 	{
 		id: '1',
 		slug: 'osobennosti-podgotovki-tekhniki-i-ekipirovki-dlya-sporta',
@@ -2084,8 +2092,8 @@ export const articles: Article[] = [
 Хотите узнать актуальную стоимость, сроки изготовления или записаться на тест-драйв? Свяжитесь с нами удобным вам способом:
 
 **Контакты:**
-- 📞 Телефон: +7 (3452) 564-164
-- 📱 WhatsApp: +7 (3452) 564-164
+- 📞 Телефон: +7 (922) 071 11-74
+- 📱 WhatsApp: +7 (922) 071 11-74
 - 📱 Telegram: +7 (922) 071 11-74 или [@RosomahaTZVT](https://t.me/RosomahaTZVT)
 - 📝 Заполните форму на сайте для расчета стоимости и индивидуальной комплектации
 		`,
@@ -2261,6 +2269,7 @@ export const articles: Article[] = [
 ];
 export const articleCategories = [
 	'Все статьи',
+	'Новости',
 	'Подготовка',
 	'Вождение',
 	'Обслуживание',

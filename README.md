@@ -1,73 +1,118 @@
-# Welcome to your Lovable project
+# Rosomaha
 
-## Project info
+Фронтенд сайта [https://xn--80aa8ahaki9a.site/](https://xn--80aa8ahaki9a.site/), который размещается на сервере `90.156.168.115`.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Стек
 
-## How can I edit this code?
+- Vite
+- React
+- TypeScript
+- Tailwind CSS
+- shadcn/ui
 
-There are several ways of editing your application.
+## Локальный запуск
 
-**Use Lovable**
+Требования:
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+- Node.js 20+
+- npm
 
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+Команды:
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+По умолчанию dev-сервер поднимается на `http://localhost:8080`.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Продакшн-сборка
 
-**Use GitHub Codespaces**
+```sh
+npm run build
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+Готовый статический сайт собирается в папку `dist/`.
 
-## What technologies are used for this project?
+## Актуальная схема продакшна
 
-This project is built with:
+Проект больше не использует GitHub Pages. Боевой сайт работает напрямую с сервера `90.156.168.115`.
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+Текущая серверная структура:
 
-## How can I deploy this project?
+- исходный проект: `/var/www/rosomaha`
+- собранный фронтенд: `/var/www/rosomaha/dist`
+- каталог релизов: `/var/www/rosomaha/_releases`
+- активная версия сайта: `/var/www/rosomaha/current`
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+`nginx` отдает сайт не из `dist/`, а из симлинка `current`, который переключается на конкретный каталог релиза в `_releases/`.
 
-## Can I connect a custom domain to my Lovable project?
+## Деплой на сервер
 
-Yes, you can!
+Рекомендуемая схема публикации:
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+1. Обновить исходники проекта в `/var/www/rosomaha`.
+2. На сервере выполнить сборку:
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+```sh
+cd /var/www/rosomaha
+npm run build
+```
+
+3. Создать новый релиз и переключить `current`:
+
+```sh
+/var/www/rosomaha/scripts/server-release.sh
+```
+
+Можно передать свой ярлык релиза:
+
+```sh
+/var/www/rosomaha/scripts/server-release.sh my-label
+```
+
+Скрипт возьмет содержимое `dist/`, создаст новый каталог в `_releases/` и обновит симлинк `current`.
+
+## Откат релиза
+
+Откат на предыдущий релиз:
+
+```sh
+/var/www/rosomaha/scripts/server-rollback.sh
+```
+
+Откат на конкретный релиз:
+
+```sh
+/var/www/rosomaha/scripts/server-rollback.sh <release_name>
+```
+
+Примеры имен релизов можно посмотреть так:
+
+```sh
+ls -1 /var/www/rosomaha/_releases
+```
+
+## Что важно для nginx
+
+Так как это SPA на React Router, сервер должен:
+
+- отдавать `index.html` для клиентских маршрутов;
+- напрямую отдавать статику из `/assets`, `/media`, `/api`;
+- не ломать `robots.txt` и `sitemap*.xml` в корне домена.
+
+## Быстрая проверка после деплоя
+
+После публикации полезно проверить:
+
+- главную страницу `/`
+- список статей `/articles`
+- нужную карточку или статью
+- `robots.txt`
+- `sitemap-index.xml`
+
+## Полезные материалы
+
+- SEO-конфигурация и текущие замечания: `SEO_CONFIGURATION.md`
+- исторический снимок продакшна на 19 марта 2026: `live-domain-2026-03-19/`
+- серверные скрипты релиза и отката: `scripts/server-release.sh`, `scripts/server-rollback.sh`

@@ -5,12 +5,11 @@
 User-agent: *
 Allow: /
 Allow: /public/
-Disallow: /upload/
-Disallow: /resize_cache/
+Allow: /upload/
+Allow: /resize_cache/
 Disallow: /admin/
 Disallow: /api/
 Disallow: /*.json$
-Disallow: /*.xml$
 Disallow: /*?*
 Crawl-delay: 1
 
@@ -18,8 +17,8 @@ Crawl-delay: 1
 User-agent: Googlebot
 Allow: /
 Allow: /public/
-Disallow: /upload/
-Disallow: /resize_cache/
+Allow: /upload/
+Allow: /resize_cache/
 Disallow: /admin/
 Disallow: /api/
 Crawl-delay: 1
@@ -29,18 +28,19 @@ Request-rate: 30/1s
 User-agent: Yandex
 Allow: /
 Allow: /public/
-Disallow: /upload/
-Disallow: /resize_cache/
+Allow: /upload/
+Allow: /resize_cache/
 Disallow: /admin/
 Disallow: /api/
+Clean-param: utm_source&utm_medium&utm_campaign&utm_content&utm_term&utm_id&yclid&ysclid&ymclid&gclid&vkclid&vk_click_id&fbclid&roistat&openstat&_openstat&from&ref&referer&clid /
 Crawl-delay: 1
 Request-rate: 30/1s
 
 # Bing
 User-agent: Bingbot
 Allow: /
-Disallow: /upload/
-Disallow: /resize_cache/
+Allow: /upload/
+Allow: /resize_cache/
 Disallow: /admin/
 
 # Twitter, Facebook, social networks

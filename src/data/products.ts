@@ -13,6 +13,20 @@ import modelHunter from '@/assets/model-hunter.jpg';
 import modelRosomaha from '@/assets/model-rosomaha.jpg';
 import modelPikap18l from '@/assets/model-pikap-18l.jpg';
 import modelPikapToyota from '@/assets/model-pikap-toyota.jpg';
+import modelPro1 from '@/assets/model-pro-1.jpg';
+import modelPro2 from '@/assets/model-pro-2.jpg';
+import modelPro3 from '@/assets/model-pro-3.jpg';
+import modelPro4 from '@/assets/model-pro-4.jpg';
+import modelPro5 from '@/assets/model-pro-5.jpg';
+import modelPro6 from '@/assets/model-pro-6.jpg';
+import modelPro7 from '@/assets/model-pro-7.jpg';
+import modelPro8 from '@/assets/model-pro-8.jpg';
+import modelPro9 from '@/assets/model-pro-9.jpg';
+import modelPro10 from '@/assets/model-pro-10.jpg';
+import modelPro11 from '@/assets/model-pro-11.jpg';
+import modelPro12 from '@/assets/model-pro-12.jpg';
+import modelPro13 from '@/assets/model-pro-13.jpg';
+import modelPro14 from '@/assets/model-pro-14.jpg';
 
 export interface ProductVariant {
   id: string;
@@ -228,17 +242,17 @@ export const productOptions: ProductOption[] = [
   },
   {
     id: 'seat-heat-driver',
-    name: 'Подогрев сидения (водитель)',
-    price: 5000,
-    priceFormatted: '5 000 ₽',
-    image: '',
+    name: 'Сидение с подогревом (водитель)',
+    price: 25000,
+    priceFormatted: '25 000 ₽',
+    image: '/upload/iblock/4e1/cl14j2bidjgk6os41usx3v0234x7cdfu.jpg',
   },
   {
     id: 'seat-heat-both',
-    name: 'Подогрев сидения (водитель+пассажир)',
-    price: 10000,
-    priceFormatted: '10 000 ₽',
-    image: '',
+    name: 'Сидение с подогревом (водитель+пассажир)',
+    price: 29000,
+    priceFormatted: '29 000 ₽',
+    image: '/upload/iblock/4e1/cl14j2bidjgk6os41usx3v0234x7cdfu.jpg',
   },
   {
     id: 'radiator-mount',
@@ -266,35 +280,35 @@ export const productOptions: ProductOption[] = [
     name: 'Комплект пневмо блокировок на оба моста',
     price: 130000,
     priceFormatted: '130 000 ₽',
-    image: '',
+    image: '/media/options/pnevmo-lock-both-generated.png',
   },
   {
     id: 'pnevmo-lock-one',
     name: 'Комплект пневмо блокировок на один мост',
     price: 65000,
     priceFormatted: '65 000 ₽',
-    image: '',
+    image: '/media/options/pnevmo-lock-one-generated.png',
   },
   {
     id: 'electric-lock-both',
     name: 'Электрическая блокировка дифференциала на оба моста',
     price: 130000,
     priceFormatted: '130 000 ₽',
-    image: '',
+    image: '/media/options/electric-lock-both-generated.png',
   },
   {
     id: 'electric-lock-rear',
     name: 'Электрическая блокировка дифференциала заднего моста',
     price: 65000,
     priceFormatted: '65 000 ₽',
-    image: '',
+    image: '/media/options/electric-lock-rear-generated.png',
   },
   {
     id: 'mech-lock-rear',
     name: 'Механическая самоблокировка дифференциала заднего моста ИЖ Техно',
     price: 40000,
     priceFormatted: '40 000 ₽',
-    image: '',
+    image: '/media/options/mech-lock-rear-generated.png',
   },
   {
     id: 'tent-parking',
@@ -308,7 +322,7 @@ export const productOptions: ProductOption[] = [
     name: 'ЗИП (запасные инструменты)',
     price: 15000,
     priceFormatted: '15 000 ₽',
-    image: '',
+    image: '/media/options/zip-generated.png',
   },
   {
     id: 'preheater',
@@ -345,6 +359,122 @@ export const productOptions: ProductOption[] = [
     priceFormatted: '20 000 ₽',
     image: '/upload/iblock/48d/uug7xlkn53lquoage0yufljq57f6ve1n.jpg',
   },
+  {
+    id: 'frame-tent-trailer',
+    name: 'Каркас металлический + тент (прицеп плавающий)',
+    price: 40000,
+    priceFormatted: '40 000 ₽',
+    image: '/upload/iblock/b6e/jm7k3um291ds41m52watt14ei7xet5ck.jpg',
+  },
+  {
+    id: 'frame-tent-eger-cabin',
+    name: 'Каркас металлический + тент для Егеря (кабина)',
+    price: 64000,
+    priceFormatted: '64 000 ₽',
+    image: '/upload/resize_cache/iblock/706/520_520_140cd750bba9870f18aada2478b24840a/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg',
+  },
+  {
+    id: 'frame-tent-eger-bed',
+    name: 'Каркас металлический + тент для Егеря (кузов)',
+    price: 62000,
+    priceFormatted: '62 000 ₽',
+    image: '',
+  },
+  {
+    id: 'frame-tent-pickup',
+    name: 'Каркас металлический + тент для Росомахи (пикап)',
+    price: 120000,
+    priceFormatted: '120 000 ₽',
+    image: '/upload/iblock/601/p4vopcgsru6wiiv2h6hspncvhaauuwxe.jpg',
+  },
+  {
+    id: 'frame-tent-sixwheel',
+    name: 'Каркас металлический + тент для Росомахи (Шестиколёсник)',
+    price: 180000,
+    priceFormatted: '180 000 ₽',
+    image: '/upload/iblock/4ef/1m6l7v3hye2tr24rgxcqn73tj0d7o0ol.jpg',
+  },
+  {
+    id: 'winch-stationary-6000',
+    name: 'Электрическая лебедка стационарная (6000 LBS)',
+    price: 60000,
+    priceFormatted: '60 000 ₽',
+    image: '/upload/iblock/ae2/a1wo9g0qs2hc0jyuvp7ulq5r0nw045b2.jpg',
+    specs: { 'Тяговое усилие (lbs)': '6000' },
+  },
+  {
+    id: 'winch-stationary-8000',
+    name: 'Электрическая лебедка стационарная (8000 LBS)',
+    price: 75000,
+    priceFormatted: '75 000 ₽',
+    image: '/upload/iblock/b83/nq2aurtz4wwmbj5tezo3y1sblucbivo9.jpg',
+    specs: { 'Тяговое усилие (lbs)': '8000' },
+  },
+  {
+    id: 'winch-removable-6000',
+    name: 'Электрическая лебедка съемная (6000 LBS)',
+    price: 70000,
+    priceFormatted: '70 000 ₽',
+    image: '/upload/iblock/2bc/r7nerg1as2vd772rsi5ml0byuhml3hyl.jpg',
+    specs: { 'Тяговое усилие (lbs)': '6000' },
+  },
+  {
+    id: 'winch-removable-8000',
+    name: 'Электрическая лебедка съемная (8000 LBS)',
+    price: 80000,
+    priceFormatted: '80 000 ₽',
+    image: '/upload/iblock/21e/cpk6xegjud7wodvxpbsy5tbj8wpe4y4c.jpg',
+    specs: { 'Тяговое усилие (lbs)': '8000' },
+  },
+  {
+    id: 'radiator-double',
+    name: 'Радиатор двойной',
+    price: 50000,
+    priceFormatted: '50 000 ₽',
+    image: '/upload/iblock/21f/e9kdyfnnfgjsxfprd0zuh66c7qrx7hmx.jpg',
+  },
+  {
+    id: 'mech-lock-front',
+    name: 'Механическая самоблокировка дифференциала переднего моста',
+    price: 65000,
+    priceFormatted: '65 000 ₽',
+    image: '/media/options/mech-lock-front-generated.png',
+  },
+  {
+    id: 'autonomous-air-heater',
+    name: 'Отопитель воздушный автономный',
+    price: 95000,
+    priceFormatted: '95 000 ₽',
+    image: '/media/options/autonomous-air-heater-generated.png',
+  },
+  {
+    id: 'side-seats-wings',
+    name: 'Сидения боковые (на крылья 2 шт)',
+    price: 17000,
+    priceFormatted: '17 000 ₽',
+    image: '/upload/iblock/f6b/mkmqc06oo9qrxfmu0cc7eqeg5mx13n7i.JPG',
+  },
+  {
+    id: 'rear-soft-seats-sleeper',
+    name: 'Сидения со спинкой мягкие + спальное место',
+    price: 45000,
+    priceFormatted: '45 000 ₽',
+    image: '/media/options/rear-soft-seats-sleeper-generated.png',
+  },
+  {
+    id: 'rear-soft-seats-bed',
+    name: 'Сидения со спинкой мягкие в кузов (2 шт.)',
+    price: 22000,
+    priceFormatted: '22 000 ₽',
+    image: '',
+  },
+  {
+    id: 'folding-table',
+    name: 'Стол откидной',
+    price: 23000,
+    priceFormatted: '23 000 ₽',
+    image: '/upload/iblock/d72/p1ttqc7ar7b825elymyen3066fh49fvq.jpg',
+  },
 ];
 
 // Базовая комплектация Стандарт ПЛЮС
@@ -365,6 +495,66 @@ const standardPlusEquipment = [
 
 // Каталог товаров
 export const products: Product[] = [
+  {
+    id: 'pro-4x4-toyota',
+    slug: 'rosomaha-pro-4x4',
+    name: 'Росомаха ПРО 4х4 (1.8 литра, мосты Toyota)',
+    category: 'classic',
+    categoryName: 'Классические модели',
+    basePrice: 4800000,
+    priceFormatted: 'от 4 800 000 ₽',
+    available: true,
+    badge: 'new',
+    gallery: [
+      modelPro1, modelPro2, modelPro3, modelPro4,
+      modelPro5, modelPro6, modelPro7, modelPro8,
+      modelPro9, modelPro10, modelPro11, modelPro12,
+      modelPro13, modelPro14,
+    ],
+    thumbnails: [
+      modelPro1, modelPro2, modelPro3, modelPro4, modelPro5,
+    ],
+    variants: [
+      { id: 'pro-4x4-toyota', name: 'ПРО 4х4 (Toyota 1.8л)', slug: 'snegobolotokhod-rosomakha-model-pro-4kh4-s-dvs-1zz-fe-1-8-litra-mosty-toyota', price: 4800000, priceFormatted: 'от 4 800 000 ₽' },
+    ],
+    colors: productColors,
+    options: [
+      { id: 'winch-rear', name: 'Электрическая лебёдка задняя (6000–8000 LBS)', price: 55000, priceFormatted: '55 000 ₽', image: '/upload/iblock/21e/cpk6xegjud7wodvxpbsy5tbj8wpe4y4c.jpg' },
+      { id: 'winch-front', name: 'Электрическая лебёдка передняя (6000–8000 LBS)', price: 55000, priceFormatted: '55 000 ₽', image: '/upload/iblock/e77/cvm3ayx4rtsye2ua6l2hrurhhivcei1d.jpg' },
+      { id: 'light-bar-led', name: 'Балка светодиодная', price: 8000, priceFormatted: '8 000 ₽', image: '/upload/iblock/b92/wa1abwd0kc4f1gqfp4aj4fnzz1ubbaep.jpg' },
+      { id: 'air-conditioner', name: 'Кондиционер', price: 120000, priceFormatted: '120 000 ₽', image: '' },
+      { id: 'rear-camera', name: 'Камеры заднего вида', price: 15000, priceFormatted: '15 000 ₽', image: '' },
+      { id: 'additional-heater', name: 'Дополнительный обогреватель', price: 25000, priceFormatted: '25 000 ₽', image: '/media/options/additional-heater-generated.png' },
+      { id: 'heated-mirrors', name: 'Зеркала с подогревом', price: 10000, priceFormatted: '10 000 ₽', image: '' },
+      { id: 'roof-hatch', name: 'Пластиковый люк в крыше (600×750 мм)', price: 35000, priceFormatted: '35 000 ₽', image: '' },
+      { id: 'preheater-autonomous', name: 'Автономный воздушный обогреватель', price: 60000, priceFormatted: '60 000 ₽', image: '/media/options/autonomous-air-heater-generated.png' },
+    ],
+    specs: {
+      length: '4850',
+      width: '2400',
+      height: '2750',
+      wheelDiameter: '1450',
+      clearance: '500',
+      weight: '1999',
+      speed: 'до 80',
+      engine: '1ZZ-FE (Toyota)',
+      engineVolume: '1794',
+      power: '140',
+      axles: 'Toyota',
+      configuration: 'ПРО 4х4 (Toyota)',
+    },
+    baseEquipment: [
+      'Шины AVTOROS SALAMANDRA (1450×650)',
+      'Электронный паспорт самоходной машины (ЭПСМ)',
+      'Шланг подкачки колёс',
+      'Расширители для арок',
+      'Светотехника полная (фары, повороты, задний ход)',
+      'Электронная блокировка дифференциала (2 моста)',
+      'Раздаточная коробка',
+      'Зеркала заднего вида (2 шт.)',
+    ],
+    description: 'Флагманская модель с двигателем Toyota 1ZZ-FE 1.8 литра и мостами Toyota. Максимальная проходимость и надёжность для самых сложных условий. Клиренс 500 мм, скорость до 80 км/ч.',
+  },
   {
     id: 'standart-plus-suzuki',
     slug: 'rosomaha-standart-plus',

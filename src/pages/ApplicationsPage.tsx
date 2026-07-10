@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, Briefcase, Palmtree, ChevronRight, Home } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { applications, applicationCategories } from '@/data/applications';
+import { resolveMediaUrl } from '@/lib/media';
 
 export default function ApplicationsPage() {
     const [activeTab, setActiveTab] = useState<'all' | 'professional' | 'leisure'>('all');
@@ -93,9 +94,12 @@ export default function ApplicationsPage() {
                         >
                             <Link to={`/applications/${app.slug}`} className="block relative aspect-[16/10] overflow-hidden">
                                 <img
-                                    src={app.image || '/media/placeholder-application.jpg'}
+                                    src={resolveMediaUrl(app.image) || '/media/placeholder-application.jpg'}
                                     alt={app.title}
                                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                                    onError={(e) => {
+                                        (e.target as HTMLImageElement).src = '/media/placeholder-application.jpg';
+                                    }}
                                 />
                                 <div className="absolute inset-0 bg-gradient-to-t from-background/90 via-transparent to-transparent opacity-60 group-hover:opacity-40 transition-opacity" />
 

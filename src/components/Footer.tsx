@@ -1,5 +1,7 @@
 import { Link } from 'react-router-dom';
 import { Phone, Mail, MapPin, Clock, MessageCircle, Youtube, CreditCard } from 'lucide-react';
+import { officePhone, primaryPhone } from '@/data/contactInfo';
+import { trackPhoneClick, trackTelegramClick } from '@/lib/metrika';
 
 export default function Footer() {
   return (
@@ -31,7 +33,9 @@ export default function Footer() {
               {[
                 { name: 'О компании', href: '/company' },
                 { name: 'Каталог моделей', href: '/catalog' },
+                { name: 'Дополнительные опции', href: '/options' },
                 { name: 'Статьи', href: '/articles' },
+                { name: 'Видео', href: '/media' },
                 { name: 'Доставка и оплата', href: '/delivery' },
                 { name: 'Дилеры', href: '/dealers' },
                 { name: 'Контакты', href: '/contacts' },
@@ -80,9 +84,23 @@ export default function Footer() {
             <ul className="space-y-3">
               <li>
                 <a
+                  href="https://max.ru/u/f9LHodD0cOL3V4NXRmtmYF2IZjxHXKlaVXudIXvPuAhApJSxwS2OhFH8Id4"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-muted-foreground hover:text-primary transition-colors text-sm"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 42 42" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <path fillRule="evenodd" clipRule="evenodd" d="M21.47 41.88c-4.11 0-6.02-.6-9.34-3-2.1 2.7-8.75 4.81-9.04 1.2 0-2.71-.6-5-1.28-7.5C1 29.5.08 26.07.08 21.1.08 9.23 9.82.3 21.36.3c11.55 0 20.6 9.37 20.6 20.91a20.6 20.6 0 0 1-20.49 20.67m.17-31.32c-5.62-.29-10 3.6-10.97 9.7-.8 5.05.62 11.2 1.83 11.52.58.14 2.04-1.04 2.95-1.95a10.4 10.4 0 0 0 5.08 1.81 10.7 10.7 0 0 0 11.19-9.97 10.7 10.7 0 0 0-10.08-11.1Z" />
+                  </svg>
+                  MAX
+                </a>
+              </li>
+              <li>
+                <a
                   href="https://t.me/rosomaha_site"
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => trackTelegramClick('footer')}
                   className="flex items-center gap-2 text-muted-foreground hover:text-primary transition-colors text-sm"
                 >
                   <MessageCircle className="w-4 h-4" />
@@ -154,16 +172,18 @@ export default function Footer() {
                 <Phone className="w-5 h-5 text-primary mt-0.5 flex-shrink-0" />
                 <div>
                   <a
-                    href="tel:+73452564164"
+                    href={primaryPhone.href}
+                    onClick={() => trackPhoneClick('footer_primary')}
                     className="text-foreground hover:text-primary transition-colors block"
                   >
-                    +7 (3452) 564-164
+                    {primaryPhone.display}
                   </a>
                   <a
-                    href="tel:+79220711174"
+                    href={officePhone.href}
+                    onClick={() => trackPhoneClick('footer_office')}
                     className="text-muted-foreground hover:text-primary transition-colors text-sm"
                   >
-                    +7 (922) 071 11-74 (WhatsApp)
+                    {officePhone.label}: {officePhone.display}
                   </a>
                 </div>
               </li>

@@ -20,6 +20,7 @@ export interface VehicleModel {
 
 export interface Dealer {
   id: string;
+  type?: 'factory' | 'partner';
   region: string;
   city: string;
   address: string;
@@ -44,7 +45,34 @@ export const vehicleCategories = [
   { id: 'sixwheel', name: 'Шестиколёсники' },
 ];
 
+// Импорты изображений ПРО 4х4
+import modelPro1 from '@/assets/model-pro-1.jpg';
+import modelPro2 from '@/assets/model-pro-2.jpg';
+import modelPro3 from '@/assets/model-pro-3.jpg';
+import modelPro4 from '@/assets/model-pro-4.jpg';
+import modelPro5 from '@/assets/model-pro-5.jpg';
+
 export const models: VehicleModel[] = [
+  // ПРО 4х4 — первым
+  {
+    id: 'pro-4x4-toyota',
+    slug: 'rosomaha-pro-4x4',
+    name: 'Росомаха ПРО 4х4',
+    category: 'classic',
+    categoryName: 'Классические модели',
+    price: 4800000,
+    priceFormatted: 'от 4 800 000 ₽',
+    available: true,
+    badge: 'new',
+    image: modelPro1,
+    images: [modelPro1, modelPro2, modelPro3, modelPro4, modelPro5],
+    specs: {
+      engine: '1.8 литра',
+      power: '1ZZ-FE',
+      axles: 'Мосты Toyota',
+    },
+    description: 'Флагманская модель с двигателем Toyota 1ZZ-FE 1.8л и мостами Toyota. Клиренс 500 мм, скорость до 80 км/ч.',
+  },
   {
     id: 'eger-1',
     slug: 'rosomaha-eger-1',
@@ -305,6 +333,7 @@ export const models: VehicleModel[] = [
     },
     description: 'Шесть колёс = максимальная проходимость. Для самых сложных маршрутов и тяжёлых грузов.',
   },
+  // Прицеп — в конце
   {
     id: 'trailer',
     slug: 'rosomaha-trailer',
@@ -330,24 +359,26 @@ export const models: VehicleModel[] = [
 export const dealers: Dealer[] = [
   {
     id: 'factory',
+    type: 'factory',
     region: 'Тюменская область',
     city: 'п. Московский',
     address: 'ул. Бурлаки 29В',
-    phone: '+7 (922) 071 11-74',
+    phone: '+7 (922) 071-11-74',
     phone2: '+7 (3452) 564-164',
-    workHours: 'Пн-Пт с 9:00 до 18:00',
-    coordinates: { lat: 57.1058, lng: 68.1231 },
+    email: 'rosomaha-rus@mail.ru',
+    workHours: 'Пн-Пт: 9:00-18:00',
+    coordinates: { lat: 57.1063, lng: 65.4417 },
   },
   {
     id: 'tyumen-club',
+    type: 'partner',
     region: 'Тюменская область',
     city: 'Тюмень',
     address: 'Кипарисовый проезд, 12',
     phone: '+7 (952) 678-66-66',
     email: 'rosomaha_club@icloud.com',
-    website: 'https://www.rosomaha-club.ru',
-    workHours: 'Пн-Пт с 9:00 до 18:00',
-    coordinates: { lat: 57.1522, lng: 68.2583 },
+    workHours: 'Пн-Пт: 9:00-18:00',
+    coordinates: { lat: 57.1380, lng: 65.5915 },
   },
   {
     id: 'barnaul',
@@ -355,8 +386,8 @@ export const dealers: Dealer[] = [
     city: 'Барнаул',
     address: 'ул. Павловский тракт, 52',
     phone: '+7 (3852) 205-596',
-    workHours: 'Пн-Чт: 08:00-21:00, Пт-Сб: 10:00-18:00',
-    coordinates: { lat: 53.3547, lng: 83.7697 },
+    workHours: 'Пн-Чт: 8:00-21:00, Пт-Сб: 10:00-18:00',
+    coordinates: { lat: 53.3610, lng: 83.7050 },
   },
   {
     id: 'blagoveshchensk',
@@ -364,8 +395,8 @@ export const dealers: Dealer[] = [
     city: 'Благовещенск',
     address: 'ул. Промышленная, 10',
     phone: '+7 (962) 284-81-55',
-    workHours: 'Пн-Пт: 08:00-21:00',
-    coordinates: { lat: 50.2905, lng: 127.5272 },
+    workHours: 'Пн-Пт: 8:00-21:00',
+    coordinates: { lat: 50.2907, lng: 127.5272 },
   },
   {
     id: 'krasnoyarsk',
@@ -374,7 +405,7 @@ export const dealers: Dealer[] = [
     address: 'ул. Брянская, 11',
     phone: '+7 (913) 181-91-97',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 56.0097, lng: 92.8525 },
+    coordinates: { lat: 56.0237, lng: 92.8790 },
   },
   {
     id: 'murmansk',
@@ -382,8 +413,8 @@ export const dealers: Dealer[] = [
     city: 'Мурманск',
     address: 'Верхне-Ростинское шоссе, д. 55А',
     phone: '+7 (8152) 24-50-40',
-    workHours: 'Пн-Пт: 08:00-21:00',
-    coordinates: { lat: 68.9730, lng: 33.0945 },
+    workHours: 'Пн-Пт: 8:00-21:00',
+    coordinates: { lat: 68.9706, lng: 33.0850 },
   },
   {
     id: 'perm',
@@ -392,44 +423,65 @@ export const dealers: Dealer[] = [
     address: 'ул. Борцов Революции, 154',
     phone: '+7 (342) 257-69-69',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 58.0297, lng: 56.2668 },
+    coordinates: { lat: 58.0062, lng: 56.2571 },
   },
   {
     id: 'ufa',
     region: 'Республика Башкортостан',
     city: 'Уфа',
-    address: 'п. Зинино, ул. Пригородная, 55, ТК "Караван"',
+    address: 'п. Зинино, ул. Пригородная, 55, ТК «Караван»',
     phone: '+7 (905) 181-42-22',
     website: 'http://aktivniy-otdyh.com/',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 54.7388, lng: 55.9721 },
+    coordinates: { lat: 54.7600, lng: 56.0100 },
   },
   {
     id: 'ekaterinburg',
     region: 'Свердловская область',
     city: 'Екатеринбург',
-    address: 'Екатеринбург',
-    phone: '+7 (343) 000-00-00',
+    address: 'пос. Северка, СОК «Песчаное», КВАДРО ДРАЙВ',
+    phone: '+7 (908) 902-12-34',
+    website: 'https://drivekvadro.ru/',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 56.8389, lng: 60.6057 },
+    coordinates: { lat: 56.9222, lng: 60.3030 },
+  },
+  {
+    id: 'irbit',
+    region: 'Свердловская область',
+    city: 'Ирбит',
+    address: 'ул. Советская, 102 Г',
+    phone: '+7 (982) 632-25-75',
+    workHours: 'Круглосуточно',
+    coordinates: { lat: 57.6832, lng: 63.0595 },
+  },
+  {
+    id: 'tver',
+    region: 'Тверская область',
+    city: 'Тверь',
+    address: 'Парк Приключений Павлова, 155-й км трассы М10',
+    phone: '+7 (920) 162-77-77',
+    phone2: '+7 (4822) 710-900',
+    website: 'https://www.4x4sport.ru',
+    workHours: 'Круглосуточно, без выходных',
+    coordinates: { lat: 56.6450, lng: 35.6220 },
   },
   {
     id: 'chelyabinsk',
     region: 'Челябинская область',
     city: 'Челябинск',
-    address: 'Челябинск',
-    phone: '+7 (351) 000-00-00',
+    address: 'ул. Блюхера, 96',
+    phone: '+7 (351) 200-21-61',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 55.1644, lng: 61.4368 },
+    coordinates: { lat: 55.1520, lng: 61.4322 },
   },
   {
     id: 'salekhard',
     region: 'Ямало-Ненецкий АО',
     city: 'Салехард',
-    address: 'Салехард',
-    phone: '+7 (34922) 0-00-00',
+    address: 'ул. Ленина, 4а/1',
+    phone: '+7 (902) 816-19-01',
     workHours: 'Пн-Пт: 9:00-18:00',
-    coordinates: { lat: 66.5300, lng: 66.6019 },
+    coordinates: { lat: 66.5356, lng: 66.6033 },
   },
 ];
 

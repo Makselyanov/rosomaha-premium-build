@@ -1,33 +1,43 @@
 import { useParams, Link, Navigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Calendar, ChevronRight, ArrowLeft, Share2, Clock } from 'lucide-react';
+import { Calendar, ChevronRight, ArrowLeft, Share2, Clock, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { articles } from '@/data/articles';
+
 import '@/assets/css/articles.css';
+import { useArticles } from '@/hooks/use-articles';
+import { getArticleHeroImage } from '@/lib/article-media';
+import { resolveMediaUrl } from '@/lib/media';
 
 export default function ArticleDetailPage() {
   const { slug } = useParams<{ slug: string }>();
-  const article = articles.find(a => a.slug === slug);
+  const { articles, findBySlug, loading } = useArticles();
+  const article = findBySlug(slug);
+
+  if (loading && !article) {
+    return (
+      <main className="min-h-screen pt-20">
+        <div className="container flex items-center justify-center py-24 text-muted-foreground">
+          <Loader2 className="mr-3 h-5 w-5 animate-spin" />
+          Загрузка статьи...
+        </div>
+      </main>
+    );
+  }
 
   if (!article) {
     return <Navigate to="/articles" replace />;
   }
 
-  // Get related articles
   const relatedArticles = articles
-    .filter(a => a.category === article.category && a.id !== article.id)
+    .filter((candidate) => candidate.category === article.category && candidate.slug !== article.slug)
     .slice(0, 3);
 
-  // Estimate reading time (roughly 200 words per minute)
   const wordCount = article.content.split(/\s+/).length;
   const readingTime = Math.ceil(wordCount / 200);
-
-  // Convert markdown-like content to HTML sections
-  // Using ReactMarkdown instead of custom renderContent
-
+  const heroImage = resolveMediaUrl(getArticleHeroImage(article)) || '/media/placeholder-article.jpg';
 
   return (
     <main className="min-h-screen pt-20">
@@ -49,32 +59,37 @@ export default function ArticleDetailPage() {
       </div>
 
       {/* Article Hero */}
-      <section className="relative h-[50vh] min-h-[400px] flex items-end overflow-hidden">
+      <section className="article-hero relative h-[50vh] min-h-[400px] flex items-end overflow-hidden">
         {/* Background Image with Overlay */}
-        <div className="absolute inset-0">
+        <div className="article-hero-media absolute inset-0">
           <img
-            src={article.coverImage || article.image || '/media/placeholder-article.jpg'}
+            src={heroImage}
             alt={article.title}
-            className="w-full h-full object-cover"
+            className="article-hero-image w-full h-full object-cover"
+            decoding="async"
+            fetchPriority="high"
+            onError={(e) => {
+              (e.target as HTMLImageElement).src = '/media/placeholder-article.jpg';
+            }}
           />
-          <div className="absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent" />
+          <div className="article-hero-scrim absolute inset-0" />
         </div>
 
         <div className="container relative z-10 pb-12">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="max-w-4xl"
+            className="article-hero-copy max-w-5xl"
           >
             <Link
               to="/articles"
-              className="inline-flex items-center gap-2 text-primary hover:text-primary/80 transition-colors mb-6 font-medium"
+              className="article-hero-back inline-flex items-center gap-2 text-primary hover:text-primary/80 transition-colors mb-6 font-medium"
             >
               <ArrowLeft className="w-4 h-4" />
               Назад к статьям
             </Link>
 
-            <div className="flex flex-wrap items-center gap-4 mb-6">
+            <div className="article-hero-meta flex flex-wrap items-center gap-4 mb-6">
               <span className="px-3 py-1 bg-primary text-primary-foreground text-sm font-medium rounded-full">
                 {article.category}
               </span>
@@ -88,11 +103,11 @@ export default function ArticleDetailPage() {
               </div>
             </div>
 
-            <h1 className="text-3xl md:text-5xl lg:text-6xl font-display font-bold mb-6 text-foreground drop-shadow-sm">
+            <h1 className="article-hero-title text-3xl md:text-5xl lg:text-6xl font-display font-bold mb-6 text-foreground">
               {article.title}
             </h1>
 
-            <p className="text-xl text-muted-foreground max-w-2xl">
+            <p className="article-hero-excerpt text-xl text-muted-foreground max-w-3xl">
               {article.excerpt}
             </p>
           </motion.div>
@@ -102,6 +117,46 @@ export default function ArticleDetailPage() {
       {/* Article Content */}
       <section className="py-8 pb-16">
         <div className="article-container">
+          {article.video && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="mb-10"
+            >
+              <div className="rounded-[2rem] border border-border bg-card/80 p-4 shadow-sm backdrop-blur-sm md:p-6">
+                <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-primary">
+                      Видео
+                    </p>
+                    <h2 className="mt-2 text-2xl font-display font-semibold text-foreground">
+                      С выставочной площадки
+                    </h2>
+                  </div>
+                  <span className="text-sm text-muted-foreground">{article.date}</span>
+                </div>
+
+                <div className={article.videoIsPortrait ? 'mx-auto w-full max-w-[420px]' : 'w-full'}>
+                  <div
+                    className="overflow-hidden rounded-[1.6rem] bg-black shadow-2xl"
+                    style={{ aspectRatio: article.videoIsPortrait ? '9 / 16' : '16 / 9' }}
+                  >
+                    <video
+                      controls
+                      playsInline
+                      preload="metadata"
+                      poster={heroImage}
+                      className="h-full w-full object-cover"
+                    >
+                      <source src={article.video} type="video/mp4" />
+                    </video>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           <motion.article
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -111,8 +166,9 @@ export default function ArticleDetailPage() {
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkBreaks]}
               components={{
-                a: ({ node, href, children, ...props }) => {
+                a: ({ href, children, ...props }) => {
                   let finalHref = href;
+
                   if (href) {
                     if (href === '../index.htm' || href === './index.htm' || href === 'index.htm' || href === '../') {
                       finalHref = '/articles';
@@ -156,7 +212,7 @@ export default function ArticleDetailPage() {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(window.location.href);
-                    toast.success("Ссылка скопирована");
+                    toast.success('Ссылка скопирована');
                   }}
                   className="p-2 bg-secondary hover:bg-primary/20 rounded-lg transition-colors"
                 >
@@ -185,15 +241,18 @@ export default function ArticleDetailPage() {
             <div className="grid md:grid-cols-3 gap-6">
               {relatedArticles.map((related) => (
                 <Link
-                  key={related.id}
+                  key={related.slug}
                   to={`/articles/${related.slug}`}
                   className="group bg-card rounded-xl overflow-hidden border border-border hover:border-primary/50 transition-all"
                 >
                   <div className="aspect-[16/10] overflow-hidden">
                     <img
-                      src={related.coverImage || related.image || '/media/placeholder-article.jpg'}
+                      src={resolveMediaUrl(related.coverImage || related.image) || '/media/placeholder-article.jpg'}
                       alt={related.title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = '/media/placeholder-article.jpg';
+                      }}
                     />
                   </div>
                   <div className="p-5">
@@ -225,7 +284,7 @@ export default function ArticleDetailPage() {
             <Link to="/catalog" className="btn-primary">
               Смотреть каталог
             </Link>
-            <Link to="/contacts" className="btn-outline">
+            <Link to="/contacts" className="btn-secondary">
               Связаться с нами
             </Link>
           </div>

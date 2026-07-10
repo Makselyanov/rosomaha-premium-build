@@ -61,11 +61,39 @@
 
   html {
     scroll-behavior: smooth;
+    overflow-x: hidden;
   }
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Source Sans 3', system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+
+  #root {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  img,
+  video,
+  iframe,
+  canvas,
+  svg {
+    max-width: 100%;
+  }
+
+  p,
+  li,
+  a,
+  span,
+  td,
+  th {
+    overflow-wrap: anywhere;
+  }
+
+  table {
+    max-width: 100%;
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -111,6 +139,9 @@
     @apply transition-all duration-300 ease-out;
     @apply hover:translate-y-[-2px] hover:shadow-lg;
     font-family: 'Oswald', sans-serif;
+    min-width: 0;
+    white-space: normal;
+    text-align: center;
   }
 
   .btn-primary:hover {
@@ -123,6 +154,9 @@
     @apply transition-all duration-300 ease-out;
     @apply hover:border-primary hover:text-primary;
     font-family: 'Oswald', sans-serif;
+    min-width: 0;
+    white-space: normal;
+    text-align: center;
   }
 
   .section-title {

@@ -23,11 +23,14 @@
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^(.+[^/])$ /$1/ [L,R=301]
   
-  # SPA routing - rewrite to index.html for non-existent files
+  # Unknown prerendered routes must be real 404 for search engines.
+  # Known routes are generated as real files/directories during build.
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
-  RewriteRule ^(.*)$ /index.html [QSA,L]
+  RewriteRule ^ - [R=404,L]
 </IfModule>
+
+ErrorDocument 404 /404.html
 
 # Browser Caching with 304 Not Modified and ETag
 <IfModule mod_headers.c>
@@ -53,7 +56,6 @@
   
   <FilesMatch "\.(jpg|jpeg|png|gif|svg|webp|ico)$">
     Header set Cache-Control "public, max-age=31536000, immutable"
-    Header set Content-Type "image/x-icon"
   </FilesMatch>
   
   <FilesMatch "\.(woff|woff2|ttf|eot|otf)$">
@@ -61,12 +63,12 @@
     Header set Access-Control-Allow-Origin "*"
   </FilesMatch>
   
-  <!-- Sitemaps and robots -->
+  # Sitemaps and robots
   <FilesMatch "\.(xml|json)$">
     Header set Cache-Control "public, max-age=604800, must-revalidate"
   </FilesMatch>
   
-  <!-- Security headers -->
+  # Security headers
   Header always set X-Content-Type-Options "nosniff"
   Header always set X-Frame-Options "SAMEORIGIN"
   Header always set X-XSS-Protection "1; mode=block"
@@ -152,11 +154,6 @@
 <FilesMatch "\.(env|htpasswd|htaccess|sqlite|db|pem|key|yml|yaml|ts|tsx)$">
   Require all denied
 </FilesMatch>
-
-# Disable access to upload and cache directories for direct file access
-<DirectoryMatch "^.*(/upload/|/resize_cache/|/admin/)">
-  Require all denied
-</DirectoryMatch>
 
 # UTF-8 encoding
 AddCharset UTF-8 .html .htm .xml .js .css .json

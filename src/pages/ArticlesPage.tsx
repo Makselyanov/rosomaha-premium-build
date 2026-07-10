@@ -1,16 +1,17 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Calendar, ArrowRight, ChevronRight } from 'lucide-react';
-import { articles, articleCategories } from '@/data/articles';
+import { Calendar, ArrowRight, ChevronRight, Loader2 } from 'lucide-react';
+
 import '@/assets/css/articles.css';
+import { useArticles } from '@/hooks/use-articles';
+import { resolveMediaUrl } from '@/lib/media';
 
 export default function ArticlesPage() {
-  const [selectedCategory, setSelectedCategory] = useState('Все статьи');
+  const { allCategory, categories, filterByCategory, loading } = useArticles();
+  const [selectedCategory, setSelectedCategory] = useState(allCategory);
 
-  const filteredArticles = selectedCategory === 'Все статьи'
-    ? articles
-    : articles.filter(article => article.category === selectedCategory);
+  const filteredArticles = filterByCategory(selectedCategory);
 
   return (
     <main className="min-h-screen pt-20">
@@ -49,19 +50,21 @@ export default function ArticlesPage() {
       {/* Categories */}
       <section className="border-b border-border sticky top-20 bg-background/95 backdrop-blur-md z-40">
         <div className="container">
-          <div className="flex gap-2 py-4 overflow-x-auto scrollbar-hide">
-            {articleCategories.map((category) => (
-              <button
-                key={category}
-                onClick={() => setSelectedCategory(category)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${selectedCategory === category
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-secondary hover:bg-secondary/80 text-foreground'
-                  }`}
-              >
-                {category}
-              </button>
-            ))}
+          <div className="article-categories-track">
+            <div className="article-categories-scroll">
+              {categories.map((category) => (
+                <button
+                  key={category}
+                  onClick={() => setSelectedCategory(category)}
+                  className={`article-category-button shrink-0 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${selectedCategory === category
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary hover:bg-secondary/80 text-foreground'
+                    }`}
+                >
+                  {category}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </section>
@@ -70,9 +73,15 @@ export default function ArticlesPage() {
       <section className="py-16">
         <div className="container">
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+            {loading && filteredArticles.length === 0 && (
+              <div className="col-span-full flex items-center justify-center py-12 text-muted-foreground">
+                <Loader2 className="mr-3 h-5 w-5 animate-spin" />
+                Загрузка статей...
+              </div>
+            )}
             {filteredArticles.map((article, index) => (
               <motion.article
-                key={article.id}
+                key={article.slug}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.1 }}
@@ -83,9 +92,12 @@ export default function ArticlesPage() {
                     {/* Image */}
                     <div className="aspect-[16/10] overflow-hidden">
                       <img
-                        src={article.coverImage || article.image || '/media/placeholder-article.jpg'}
+                        src={resolveMediaUrl(article.coverImage || article.image) || '/media/placeholder-article.jpg'}
                         alt={article.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).src = '/media/placeholder-article.jpg';
+                        }}
                       />
                     </div>
 
@@ -124,7 +136,7 @@ export default function ArticlesPage() {
             ))}
           </div>
 
-          {filteredArticles.length === 0 && (
+          {filteredArticles.length === 0 && !loading && (
             <div className="text-center py-16">
               <p className="text-muted-foreground text-lg">
                 В этой категории пока нет статей
@@ -149,7 +161,7 @@ export default function ArticlesPage() {
               <Link to="/contacts" className="btn-primary">
                 Связаться с нами
               </Link>
-              <Link to="/catalog" className="btn-outline">
+              <Link to="/catalog" className="btn-secondary">
                 Смотреть каталог
               </Link>
             </div>

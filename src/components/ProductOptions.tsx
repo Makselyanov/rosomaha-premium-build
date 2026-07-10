@@ -1,17 +1,32 @@
-import { Plus, Check, ShoppingCart } from 'lucide-react';
+import { useState } from 'react';
+import { Plus, Check, ShoppingCart, Wrench } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { ProductOption, Product, ProductVariant, ProductColor } from '@/data/products';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
+import { resolveMediaUrl } from '@/lib/media';
 
 interface ProductOptionsProps {
   options: ProductOption[];
   selectedOptions: string[];
   onToggleOption: (optionId: string) => void;
-  // Дополнительные пропсы для добавления опции в корзину
   product?: Product;
   variant?: ProductVariant;
   color?: ProductColor;
 }
+
+const LABELS = {
+  heading: '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435 \u043e\u043f\u0446\u0438\u0438',
+  selected: '\u0412\u044b\u0431\u0440\u0430\u043d\u043e',
+  select: '\u0412\u044b\u0431\u0440\u0430\u0442\u044c',
+  addToCart: '\u0412 \u043a\u043e\u0440\u0437\u0438\u043d\u0443',
+  removeFromConfig: '\u0423\u0431\u0440\u0430\u0442\u044c \u0438\u0437 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438',
+  addToConfig: '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0432 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044e',
+  addToCartTitle: '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0432 \u043a\u043e\u0440\u0437\u0438\u043d\u0443',
+  toastTitle: '\u041e\u043f\u0446\u0438\u044f \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0430 \u0432 \u043a\u043e\u0440\u0437\u0438\u043d\u0443',
+  viewAll: '\u0412\u0441\u0435 \u043e\u043f\u0446\u0438\u0438',
+  optionBadge: 'Option',
+};
 
 export default function ProductOptions({
   options,
@@ -19,22 +34,20 @@ export default function ProductOptions({
   onToggleOption,
   product,
   variant,
-  color
+  color,
 }: ProductOptionsProps) {
   const { addItem, toggleCart } = useCartStore();
   const { toast } = useToast();
+  const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
   if (!options.length) return null;
 
-  // Функция для добавления опции напрямую в корзину
   const handleAddOptionToCart = (option: ProductOption) => {
     if (!product || !variant || !color) {
-      // Если контекст товара не передан, просто переключаем выбор
       onToggleOption(option.id);
       return;
     }
 
-    // Добавляем товар в корзину только с этой опцией
     addItem({
       product,
       variant,
@@ -43,8 +56,8 @@ export default function ProductOptions({
     });
 
     toast({
-      title: 'Опция добавлена в корзину',
-      description: `${option.name} — ${option.priceFormatted}`,
+      title: LABELS.toastTitle,
+      description: `${option.name} - ${option.priceFormatted}`,
     });
 
     toggleCart();
@@ -52,71 +65,90 @@ export default function ProductOptions({
 
   return (
     <div className="space-y-4">
-      <h3 className="font-display text-lg uppercase tracking-wider">Дополнительные опции</h3>
+      <div className="flex items-center justify-between gap-4">
+        <h3 className="font-display text-lg uppercase tracking-wider">{LABELS.heading}</h3>
+        <Link to="/options" className="text-sm font-semibold text-primary transition-colors hover:text-primary/80">
+          {LABELS.viewAll}
+        </Link>
+      </div>
       <div className="grid gap-3">
         {options.map((option) => {
           const isSelected = selectedOptions.includes(option.id);
+          const optionImage = resolveMediaUrl(option.image);
+          const useFallbackImage = !optionImage || brokenImages[option.id];
+
           return (
             <div
               key={option.id}
-              className={`flex items-center gap-4 p-4 rounded-lg border transition-all ${isSelected ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
-                }`}
+              className={`flex flex-col items-stretch gap-4 rounded-lg border p-4 transition-all sm:flex-row sm:items-center ${
+                isSelected ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
+              }`}
             >
-              {option.image ? (
+              {!useFallbackImage ? (
                 <img
-                  src={option.image}
+                  src={optionImage}
                   alt={option.name}
-                  className="w-16 h-16 object-cover rounded"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).src = '/placeholder.svg';
+                  className="h-36 w-full shrink-0 rounded border border-border/60 bg-secondary/20 object-cover sm:h-16 sm:w-16"
+                  onError={() => {
+                    setBrokenImages((prev) => ({ ...prev, [option.id]: true }));
                   }}
                 />
               ) : (
-                <div className="w-16 h-16 bg-secondary rounded flex items-center justify-center">
-                  <span className="text-2xl text-muted-foreground">🔧</span>
+                <div className="relative flex h-24 w-full shrink-0 items-center justify-center overflow-hidden rounded border border-border/60 bg-gradient-to-br from-secondary via-secondary/80 to-background sm:h-16 sm:w-16">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(249,115,22,0.18),transparent_60%)]" />
+                  <div className="relative flex flex-col items-center justify-center">
+                    <Wrench className="h-6 w-6 text-primary/80" />
+                    <span className="mt-1 text-[8px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                      {LABELS.optionBadge}
+                    </span>
+                  </div>
                 </div>
               )}
-              <div className="flex-1 min-w-0">
-                <p className="font-medium truncate">{option.name}</p>
+
+              <div className="min-w-0 flex-1">
+                <p className="font-medium leading-snug sm:truncate">{option.name}</p>
                 {option.specs && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {Object.entries(option.specs).map(([k, v]) => `${k}: ${v}`).join(' | ')}
+                  <p className="mt-1 break-words text-xs text-muted-foreground">
+                    {Object.entries(option.specs)
+                      .map(([key, value]) => `${key}: ${value}`)
+                      .join(' | ')}
                   </p>
                 )}
               </div>
-              <div className="text-right flex flex-col gap-2">
+
+              <div className="flex w-full flex-col gap-2 text-left sm:w-auto sm:text-right">
                 <p className="font-bold text-primary">{option.priceFormatted}</p>
-                <div className="flex gap-2">
-                  {/* Кнопка выбора опции (для включения в конфигурацию) */}
+                <div className="grid grid-cols-2 gap-2 sm:flex">
                   <button
                     onClick={() => onToggleOption(option.id)}
-                    className={`px-3 py-1.5 text-sm rounded transition-all flex items-center gap-1 ${isSelected
+                    className={`flex min-w-0 items-center justify-center gap-1 rounded px-3 py-1.5 text-sm transition-all ${
+                      isSelected
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-secondary hover:bg-secondary/80'
-                      }`}
-                    title={isSelected ? 'Убрать из конфигурации' : 'Добавить в конфигурацию'}
+                    }`}
+                    title={isSelected ? LABELS.removeFromConfig : LABELS.addToConfig}
                   >
                     {isSelected ? (
                       <>
-                        <Check className="w-4 h-4" />
-                        Выбрано
+                        <Check className="h-4 w-4" />
+                        {LABELS.selected}
                       </>
                     ) : (
                       <>
-                        <Plus className="w-4 h-4" />
-                        Выбрать
+                        <Plus className="h-4 w-4" />
+                        {LABELS.select}
                       </>
                     )}
                   </button>
-                  {/* Кнопка добавления в корзину */}
+
                   {product && variant && color && (
                     <button
                       onClick={() => handleAddOptionToCart(option)}
-                      className="px-3 py-1.5 text-sm rounded bg-green-600 hover:bg-green-700 text-white transition-all flex items-center gap-1"
-                      title="Добавить в корзину"
+                      className="flex min-w-0 items-center justify-center gap-1 rounded bg-green-600 px-3 py-1.5 text-sm text-white transition-all hover:bg-green-700"
+                      title={LABELS.addToCartTitle}
                     >
-                      <ShoppingCart className="w-4 h-4" />
-                      В корзину
+                      <ShoppingCart className="h-4 w-4" />
+                      {LABELS.addToCart}
                     </button>
                   )}
                 </div>

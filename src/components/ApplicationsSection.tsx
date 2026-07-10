@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, Play, Briefcase, Palmtree } from 'lucide-react';
 import { useState } from 'react';
 import { applications } from '@/data/applications';
+import { resolveMediaUrl } from '@/lib/media';
 
 export default function ApplicationsSection() {
     const [activeTab, setActiveTab] = useState<'professional' | 'leisure'>('professional');
@@ -67,9 +68,12 @@ export default function ApplicationsSection() {
                             {/* Image Preview */}
                             <div className="relative aspect-[16/10] overflow-hidden bg-secondary">
                                 <img
-                                    src={app.image || '/media/placeholder-application.jpg'}
+                                    src={resolveMediaUrl(app.image) || '/media/placeholder-application.jpg'}
                                     alt={app.title}
                                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                                    onError={(e) => {
+                                        (e.target as HTMLImageElement).src = '/media/placeholder-application.jpg';
+                                    }}
                                 />
                                 <div className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent" />
                                 {app.video && (
@@ -106,7 +110,7 @@ export default function ApplicationsSection() {
                                         <ArrowRight className="w-4 h-4 ml-2" />
                                     </Link>
                                     <Link
-                                        to={`/applications/${app.slug}#cases`}
+                                        to={`/applications/${app.slug}#situations`}
                                         className="w-full inline-flex items-center justify-center px-4 py-2.5 border border-border hover:border-primary/50 rounded-lg font-medium transition-colors">
                                         Смотреть кейсы
                                     </Link>

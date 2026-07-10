@@ -491,7 +491,7 @@ export const applications: Application[] = [
                 name: 'Росомаха Экстрим (МЧС версия)',
                 description: 'Для оперативной разведки и доставки врачей в труднодоступные точки',
                 features: ['Колёса 1300 мм', 'Сирены и спецсигналы', 'Рация'],
-                modelSlug: 'rosomaha-extreme'
+                modelSlug: 'rosomaha-extrime-uaz'
             }
         ],
 
@@ -598,7 +598,7 @@ export const applications: Application[] = [
                 name: 'Росомаха Экстрим + Прицеп',
                 description: 'Для оперативной доставки малых и средних партий грузов',
                 features: ['Колеса 1300мм', 'Самосвальный прицеп', 'Лебедка 6000lb', 'Экспедиционный багажник'],
-                modelSlug: 'rosomaha-extreme'
+                modelSlug: 'rosomaha-extrime-uaz'
             }
         ],
 
@@ -705,7 +705,7 @@ export const applications: Application[] = [
                 name: 'Росомаха Экстрим Рыболов',
                 description: 'Оптимальный баланс маневренности и оснащения для одиночной или парной рыбалки',
                 features: ['Колеса 1300мм', 'Верхний багажник для лодки', 'Светодиодная балка 240W', 'Автономный отопитель 2кВт'],
-                modelSlug: 'rosomaha-extreme'
+                modelSlug: 'rosomaha-extrime-uaz'
             },
             {
                 name: 'Росомаха 6х6 Экспедиция',

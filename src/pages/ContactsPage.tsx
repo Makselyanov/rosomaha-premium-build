@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { Phone, Mail, MapPin, Clock, MessageCircle } from 'lucide-react';
+import { officePhone, primaryPhone } from '@/data/contactInfo';
 
 export default function ContactsPage() {
   return (
@@ -22,7 +23,7 @@ export default function ContactsPage() {
         <div className="grid lg:grid-cols-2 gap-12">
           <div className="space-y-8">
             {[
-              { icon: Phone, title: 'Телефоны', content: <><a href="tel:+73452564164" className="block hover:text-primary">+7 (3452) 564-164 (офис)</a><a href="tel:+79220711174" className="block hover:text-primary">+7 (922) 071 11-74 (WhatsApp, Telegram)</a></> },
+              { icon: Phone, title: 'Телефоны', content: <><a href={primaryPhone.href} className="block hover:text-primary">{primaryPhone.display} ({primaryPhone.label})</a><a href={officePhone.href} className="block hover:text-primary">{officePhone.display} ({officePhone.label})</a></> },
               { icon: Mail, title: 'Email', content: <a href="mailto:rosomaha-rus@mail.ru" className="hover:text-primary">rosomaha-rus@mail.ru</a> },
               { icon: MapPin, title: 'Адрес', content: 'Тюменская область, п. Московский, ул. Бурлаки 29В' },
               { icon: Clock, title: 'Режим работы', content: 'Пн – Пт: 9:00 – 18:00' },

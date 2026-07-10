@@ -1,14 +1,20 @@
 import { useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, ShoppingCart, Check, Phone, Printer } from 'lucide-react';
+import { ArrowLeft, ShoppingCart, Check, Phone, Printer, ArrowRight, Compass, Newspaper } from 'lucide-react';
+import { applications } from '@/data/applications';
+import { articles } from '@/data/articles';
 import { products, productColors } from '@/data/products';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
 import ProductGallery from '@/components/ProductGallery';
+import ProductPhotoGallerySection from '@/components/ProductPhotoGallerySection';
+import ProductDetailTabs from '@/components/ProductDetailTabs';
 import ColorSelector from '@/components/ColorSelector';
 import VariantSelector from '@/components/VariantSelector';
 import ProductOptions from '@/components/ProductOptions';
+import { officePhone, primaryPhone } from '@/data/contactInfo';
+import { trackAddToCart, trackPhoneClick } from '@/lib/metrika';
 
 export default function ModelDetailPage() {
   const { slug } = useParams();
@@ -67,6 +73,27 @@ export default function ModelDetailPage() {
     [currentVariant, optionsTotal]
   );
 
+  const relatedApplications = useMemo(() => {
+    if (!product) {
+      return [];
+    }
+
+    return applications
+      .filter((application) =>
+        application.recommendedConfigurations.some((configuration) => configuration.modelSlug === product.slug)
+      )
+      .slice(0, 3);
+  }, [product]);
+
+  const relatedArticles = useMemo(() => {
+    const articleSlugs = new Set(relatedApplications.flatMap((application) => application.relatedArticles));
+
+    return Array.from(articleSlugs)
+      .map((articleSlug) => articles.find((article) => article.slug === articleSlug))
+      .filter((article): article is (typeof articles)[number] => Boolean(article))
+      .slice(0, 3);
+  }, [relatedApplications]);
+
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('ru-RU').format(price) + ' ₽';
 
@@ -99,6 +126,13 @@ export default function ModelDetailPage() {
       variant: currentVariant,
       color: currentColor,
       options: selectedOptionsData,
+    });
+
+    trackAddToCart({
+      product: product.slug,
+      variant: currentVariant.id,
+      options_count: selectedOptionsData.length,
+      value: totalPrice,
     });
 
     toast({
@@ -181,8 +215,9 @@ export default function ModelDetailPage() {
           
           <p style="margin-top: 40px; color: #999; font-size: 12px;">
             Дата: ${new Date().toLocaleDateString('ru-RU')}<br/>
-            Телефон: +7 (3452) 564-164<br/>
-            rosomaha-rus.ru
+            Телефон / WhatsApp: ${primaryPhone.display}<br/>
+            Офис: ${officePhone.display}<br/>
+            xn--80aa8ahaki9a.site
           </p>
         </body>
       </html>
@@ -323,11 +358,20 @@ export default function ModelDetailPage() {
                 Есть вопросы по модели?
               </p>
               <a
-                href="tel:+73452564164"
+                href={primaryPhone.href}
+                onClick={() => trackPhoneClick('model_detail_primary')}
                 className="flex items-center gap-2 text-lg font-medium hover:text-primary transition-colors"
               >
                 <Phone className="w-5 h-5 text-primary" />
-                +7 (3452) 564-164
+                {primaryPhone.display}
+              </a>
+              <p className="mt-1 text-sm text-muted-foreground">{primaryPhone.label}</p>
+              <a
+                href={officePhone.href}
+                onClick={() => trackPhoneClick('model_detail_office')}
+                className="mt-2 inline-flex text-sm text-muted-foreground hover:text-primary transition-colors"
+              >
+                {officePhone.label}: {officePhone.display}
               </a>
             </div>
           </motion.div>
@@ -460,6 +504,98 @@ export default function ModelDetailPage() {
             {product.description}
           </p>
         </section>
+
+        <section className="mt-12">
+          <ProductPhotoGallerySection images={galleryImages} productName={product.name} />
+        </section>
+
+        <section className="mt-12">
+          <ProductDetailTabs productName={product.name} />
+        </section>
+
+        {(relatedApplications.length > 0 || relatedArticles.length > 0) && (
+          <section className="mt-12 grid xl:grid-cols-2 gap-8">
+            {relatedApplications.length > 0 && (
+              <div className="rounded-2xl border border-border bg-card p-6 md:p-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                    <Compass className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.25em] text-primary font-bold">
+                      Сферы применения
+                    </p>
+                    <h3 className="font-display text-xl uppercase tracking-wider">
+                      Где эта модель раскрывается лучше всего
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {relatedApplications.map((application) => (
+                    <Link
+                      key={application.slug}
+                      to={`/applications/${application.slug}`}
+                      className="group block rounded-xl border border-border/70 bg-secondary/20 p-5 transition-colors hover:border-primary/40 hover:bg-secondary/40"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h4 className="text-lg font-semibold mb-2 group-hover:text-primary transition-colors">
+                            {application.title}
+                          </h4>
+                          <p className="text-sm text-muted-foreground leading-relaxed">
+                            {application.tagline}
+                          </p>
+                        </div>
+                        <ArrowRight className="w-5 h-5 text-primary shrink-0 transition-transform group-hover:translate-x-1" />
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {relatedArticles.length > 0 && (
+              <div className="rounded-2xl border border-border bg-card p-6 md:p-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                    <Newspaper className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.25em] text-primary font-bold">
+                      Полезные материалы
+                    </p>
+                    <h3 className="font-display text-xl uppercase tracking-wider">
+                      Что почитать перед покупкой
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {relatedArticles.map((article) => (
+                    <Link
+                      key={article.slug}
+                      to={`/articles/${article.slug}`}
+                      className="group block rounded-xl border border-border/70 bg-secondary/20 p-5 transition-colors hover:border-primary/40 hover:bg-secondary/40"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h4 className="text-lg font-semibold mb-2 group-hover:text-primary transition-colors">
+                            {article.title}
+                          </h4>
+                          <p className="text-sm text-muted-foreground leading-relaxed">
+                            {article.excerpt}
+                          </p>
+                        </div>
+                        <ArrowRight className="w-5 h-5 text-primary shrink-0 transition-transform group-hover:translate-x-1" />
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </main>
   );

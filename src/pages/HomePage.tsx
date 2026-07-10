@@ -6,11 +6,13 @@ import modelStandard from '@/assets/model-standard.jpg';
 import modelExtreme from '@/assets/model-extreme.jpg';
 import modelPickup from '@/assets/model-pickup.jpg';
 import model6x6 from '@/assets/model-6x6.jpg';
-import { models } from '@/data/models';
+import { featuredCatalogModels } from '@/data/catalog';
 import ModelCard from '@/components/ModelCard';
 import MagneticButton from '@/components/MagneticButton';
 import ProductShowcase from '@/components/ProductShowcase';
 import ApplicationsSection from '@/components/ApplicationsSection';
+import { officePhone, primaryPhone } from '@/data/contactInfo';
+import { trackOrderCtaClick, trackPhoneClick } from '@/lib/metrika';
 
 const stats = [
   { value: '1000+', label: 'Машин реализовано' },
@@ -51,12 +53,13 @@ const capabilities = [
 ];
 
 export default function HomePage() {
-  const featuredModels = models.slice(0, 12);
+  const featuredModels = featuredCatalogModels;
 
   return (
     <main>
       {/* Hero Section */}
-      <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
+      <section className="relative min-h-[100svh] flex flex-col overflow-hidden">
+        {/* Video background */}
         <div className="absolute inset-0">
           <video
             autoPlay
@@ -64,54 +67,64 @@ export default function HomePage() {
             loop
             playsInline
             preload="auto"
-            className="absolute inset-0 w-full h-full object-cover"
+            className="absolute inset-0 w-full h-full object-cover object-center"
           >
             <source src="/media/hero.mp4" type="video/mp4" />
           </video>
           <div className="hero-overlay absolute inset-0 z-[1]" />
         </div>
 
-        <div className="container relative z-10 pt-20">
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8 }}
-            className="max-w-4xl"
-          >
-            <h1 className="text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-display font-bold mb-6 leading-tight">
-              Ваши возможности —{' '}
-              <span className="text-gradient">безграничны!</span>
-            </h1>
-            <p className="text-xl md:text-2xl text-muted-foreground mb-8 max-w-2xl">
-              Квадроциклы-вездеходы РОСОМАХА. Российское производство,
-              японская надёжность, проходимость без компромиссов.
-            </p>
+        {/* Fixed header clearance — pushes content below the sticky nav */}
+        <div className="h-20 shrink-0" />
 
-            <div className="flex flex-col sm:flex-row gap-4 mb-16">
-              <Link to="/catalog" className="btn-primary">
-                Смотреть каталог
-                <ArrowRight className="ml-2 w-5 h-5" />
-              </Link>
-              <Link to="/order" className="btn-secondary">
-                Заказать расчёт
-              </Link>
-            </div>
+        {/* Content — fills remaining height, vertically centered in safe zone */}
+        <div className="flex-1 flex items-center relative z-10">
+          <div className="container py-4">
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8 }}
+              className="max-w-4xl"
+            >
+              <h1 className="text-[1.75rem] sm:text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-display font-bold mb-3 sm:mb-6 leading-tight">
+                Ваши возможности —{' '}
+                <span className="text-gradient">безграничны!</span>
+              </h1>
+              <p className="text-sm sm:text-xl md:text-2xl text-muted-foreground mb-4 sm:mb-8 max-w-2xl">
+                Квадроциклы-вездеходы РОСОМАХА. Российское производство,
+                японская надёжность, проходимость без компромиссов.
+              </p>
 
-            {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
-              {stats.map((stat, index) => (
-                <motion.div
-                  key={stat.label}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.4 + index * 0.1, duration: 0.5 }}
+              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6 sm:mb-16">
+                <Link to="/catalog" className="btn-primary w-full px-6 text-base sm:w-auto sm:px-8 sm:text-lg">
+                  Смотреть каталог
+                  <ArrowRight className="ml-2 w-5 h-5" />
+                </Link>
+                <Link
+                  to="/order"
+                  onClick={() => trackOrderCtaClick('home_hero')}
+                  className="btn-secondary w-full px-6 text-base sm:w-auto sm:px-8 sm:text-lg"
                 >
-                  <p className="stats-number mb-2">{stat.value}</p>
-                  <p className="text-sm text-muted-foreground">{stat.label}</p>
-                </motion.div>
-              ))}
-            </div>
-          </motion.div>
+                  Заказать расчёт
+                </Link>
+              </div>
+
+              {/* Stats */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-8">
+                {stats.map((stat, index) => (
+                  <motion.div
+                    key={stat.label}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.4 + index * 0.1, duration: 0.5 }}
+                  >
+                    <p className="stats-number mb-1 sm:mb-2">{stat.value}</p>
+                    <p className="text-xs sm:text-sm text-muted-foreground">{stat.label}</p>
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
+          </div>
         </div>
 
         {/* Scroll Indicator */}
@@ -119,7 +132,7 @@ export default function HomePage() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 1.5 }}
-          className="absolute bottom-8 left-1/2 -translate-x-1/2"
+          className="hidden sm:flex absolute bottom-8 left-1/2 -translate-x-1/2 z-10"
         >
           <div className="w-6 h-10 border-2 border-muted-foreground/30 rounded-full flex justify-center pt-2">
             <motion.div
@@ -218,12 +231,29 @@ export default function HomePage() {
               Расскажите нам о ваших задачах — мы найдём оптимальное решение
               и подберём технику под ваши потребности.
             </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link to="/order" className="btn-primary">
-                Оставить заявку
-              </Link>
-              <a href="tel:+73452564164" className="btn-secondary">
-                +7 (3452) 564-164
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                <Link
+                  to="/order"
+                  onClick={() => trackOrderCtaClick('home_final_cta')}
+                  className="btn-primary"
+                >
+                  Оставить заявку
+                </Link>
+                <a
+                  href={primaryPhone.href}
+                  onClick={() => trackPhoneClick('home_final_primary')}
+                  className="btn-secondary"
+                >
+                  {primaryPhone.display}
+                </a>
+              </div>
+              <a
+                href={officePhone.href}
+                onClick={() => trackPhoneClick('home_final_office')}
+                className="text-sm text-muted-foreground hover:text-primary transition-colors"
+              >
+                {officePhone.label}: {officePhone.display}
               </a>
             </div>
           </motion.div>
@@ -285,7 +315,7 @@ function CapabilitiesSection() {
             transition={{ duration: 0.8, ease: "easeOut" }}
             className="lg:col-span-7 w-full relative group"
           >
-            <div className="relative aspect-video rounded-[2rem] overflow-hidden shadow-2xl border border-white/10">
+            <div className="relative aspect-[4/3] sm:aspect-video rounded-xl sm:rounded-[2rem] overflow-hidden shadow-2xl border border-white/10">
               <video
                 src="/media/Robot.mp4"
                 autoPlay
@@ -293,7 +323,7 @@ function CapabilitiesSection() {
                 loop
                 playsInline
                 preload="metadata"
-                className="w-full h-full object-cover scale-105 group-hover:scale-100 transition-transform duration-700"
+                className="w-full h-full object-cover object-right sm:object-center sm:scale-105 sm:group-hover:scale-100 transition-transform duration-700"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20" />
 

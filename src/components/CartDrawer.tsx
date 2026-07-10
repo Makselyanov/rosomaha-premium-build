@@ -2,6 +2,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Plus, Minus, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useCartStore } from '@/store/cartStore';
+import { resolveMediaUrl } from '@/lib/media';
+import { trackOrderCtaClick } from '@/lib/metrika';
 
 export default function CartDrawer() {
   const { items, isOpen, closeCart, updateQuantity, removeItem, removeOption, getTotalPrice, getItemTotal } = useCartStore();
@@ -64,9 +66,12 @@ export default function CartDrawer() {
                     >
                       <div className="flex gap-4">
                         <img
-                          src={item.product.gallery[0]}
+                          src={resolveMediaUrl(item.product.gallery[0]) || '/placeholder.svg'}
                           alt={item.product.name}
                           className="w-20 h-20 object-cover rounded-lg"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/placeholder.svg';
+                          }}
                         />
                         <div className="flex-1 min-w-0">
                           <h3 className="font-display text-sm uppercase tracking-wider mb-1 truncate">
@@ -149,7 +154,10 @@ export default function CartDrawer() {
                 </div>
                 <Link
                   to="/order"
-                  onClick={closeCart}
+                  onClick={() => {
+                    trackOrderCtaClick('cart_drawer');
+                    closeCart();
+                  }}
                   className="btn-primary w-full text-center"
                 >
                   Оформить заявку

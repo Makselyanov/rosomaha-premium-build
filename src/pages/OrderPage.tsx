@@ -6,8 +6,50 @@ import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
 import { trackLeadSubmit } from '@/lib/metrika';
 import { getAttribution } from '@/lib/attribution';
+import { PRIVACY_CONSENT_VERSION } from '@/lib/consent';
 
 const CRM_WEBHOOK_URL = 'https://rosomaha.centrlp.ru/api/webhooks/site-form';
+const USER_COMMENT_LIMIT = 700;
+const CRM_COMMENT_LIMIT = 2400;
+
+function normalizeRussianPhone(value: string) {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) return `7${digits.slice(1)}`;
+  if (digits.length === 10) return `7${digits}`;
+  return digits || undefined;
+}
+
+function isValidRussianPhone(value: string | undefined) {
+  return Boolean(value && /^7\d{10}$/.test(value));
+}
+
+function createLeadSubmissionId() {
+  const randomPart = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+  return `rosomaha-${Date.now()}-${randomPart}`;
+}
+
+function extractCrmResponseId(responseBody: unknown) {
+  if (!responseBody || typeof responseBody !== 'object') return undefined;
+  const data = responseBody as Record<string, unknown>;
+  const id = data.id ?? data.deal_id ?? data.dealId ?? data.lead_id ?? data.leadId;
+  return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined;
+}
+
+function writeLeadReceipt(receipt: Record<string, unknown>) {
+  try {
+    sessionStorage.setItem('rosomaha_last_lead_receipt', JSON.stringify(receipt));
+  } catch {
+    // Receipt is diagnostic only; form submission must not fail because storage is unavailable.
+  }
+}
+
+function limitCrmText(value: string | undefined, limit: number) {
+  const text = value?.trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit - 24).trimEnd()}\n...[сокращено]` : text;
+}
 
 export default function OrderPage() {
   const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
@@ -18,12 +60,26 @@ export default function OrderPage() {
     name: '',
     phone: '',
     comment: '',
+    privacyAccepted: false,
   });
 
   const formatPrice = (price: number) => new Intl.NumberFormat('ru-RU').format(price) + ' ₽';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const normalizedPhone = normalizeRussianPhone(formData.phone);
+    const customerName = formData.name.trim();
+
+    if (customerName.length < 2 || !isValidRussianPhone(normalizedPhone)) {
+      toast({
+        title: 'Проверьте контакты',
+        description: 'Нужны имя и телефон в формате +7, чтобы мы могли связаться.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setIsSending(true);
 
     // Детализация корзины — читаемый текст в комментарий к заявке
@@ -37,10 +93,10 @@ export default function OrderPage() {
     }).join('\n\n');
 
     const totalStr = formatPrice(getTotalPrice());
-    const commentWithOrder = [
-      formData.comment?.trim(),
+    const commentWithOrder = limitCrmText([
+      limitCrmText(formData.comment, USER_COMMENT_LIMIT),
       orderDetails ? `\n\n--- Заказ ---\n${orderDetails}\n\nИтого: ${totalStr}` : '',
-    ].filter(Boolean).join('');
+    ].filter(Boolean).join(''), CRM_COMMENT_LIMIT);
 
     // Первая позиция корзины (если есть) → в структурированные поля сделки
     const firstItem = items[0];
@@ -51,13 +107,20 @@ export default function OrderPage() {
 
     try {
       const attribution = await getAttribution();
+      const leadSubmissionId = createLeadSubmissionId();
 
       const payload = {
-        name: formData.name,
+        name: customerName,
         phone: formData.phone,
+        phone_normalized: normalizedPhone,
+        lead_submission_id: leadSubmissionId,
         comment: commentWithOrder,
-        source: 'rosomaha.site',
+        source: 'росомаха.site',
         form_name: 'order_page',
+        privacy_accepted: formData.privacyAccepted ? '1' : '0',
+        privacy_accepted_at: new Date().toISOString(),
+        privacy_version: PRIVACY_CONSENT_VERSION,
+        consent_source: 'росомаха.site/order',
         model_text: modelText,
         color: colorName,
         deal_amount: getTotalPrice() || undefined,
@@ -78,9 +141,42 @@ export default function OrderPage() {
         throw new Error(`CRM webhook ${response.status}: ${errorText.slice(0, 200)}`);
       }
 
+      const responseText = await response.text().catch(() => '');
+      let crmResponse: Record<string, unknown> | undefined;
+      try {
+        crmResponse = responseText ? JSON.parse(responseText) as Record<string, unknown> : undefined;
+      } catch {
+        crmResponse = undefined;
+      }
+      const crmResponseId = extractCrmResponseId(crmResponse);
+
+      writeLeadReceipt({
+        lead_submission_id: leadSubmissionId,
+        crm_response_id: crmResponseId,
+        sent_at: new Date().toISOString(),
+        form_name: payload.form_name,
+        phone_normalized: normalizedPhone,
+        source_platform: attribution.source_platform,
+        source_channel: attribution.source_channel,
+        utm_source: attribution.utm_source,
+        utm_medium: attribution.utm_medium,
+        utm_campaign: attribution.utm_campaign,
+        yclid: attribution.yclid,
+        ym_client_id: attribution.ym_client_id,
+      });
+
       trackLeadSubmit({
         source: 'order_page',
         items_count: items.length,
+        lead_submission_id: leadSubmissionId,
+        crm_response_id: crmResponseId || '',
+        source_platform: attribution.source_platform || '',
+        source_channel: attribution.source_channel || '',
+        utm_source: attribution.utm_source || '',
+        utm_medium: attribution.utm_medium || '',
+        utm_campaign: attribution.utm_campaign || '',
+        yclid: attribution.yclid || '',
+        ym_client_id: attribution.ym_client_id || '',
       });
 
       setIsSubmitted(true);
@@ -120,12 +216,12 @@ export default function OrderPage() {
           <ol className="flex items-center gap-2 text-sm text-muted-foreground">
             <li><Link to="/" className="hover:text-foreground">Главная</Link></li>
             <li>/</li>
-            <li className="text-foreground">Оформление заявки</li>
+            <li className="text-foreground">Получить расчёт</li>
           </ol>
         </nav>
 
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="section-title text-3xl mb-8">Оформление заявки</h1>
+          <h1 className="section-title text-3xl mb-8">Получить расчёт снегоболотохода</h1>
 
           {items.length > 0 && (
             <div className="bg-card p-6 rounded-lg border border-border mb-8">
@@ -178,15 +274,32 @@ export default function OrderPage() {
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">Комментарий</label>
-              <textarea value={formData.comment} onChange={(e) => setFormData({ ...formData, comment: e.target.value })} className="input-premium min-h-[120px]" placeholder="Интересующая модель, вопросы..." />
+              <textarea value={formData.comment} onChange={(e) => setFormData({ ...formData, comment: e.target.value })} className="input-premium min-h-[120px]" placeholder="Маршрут, сезон, людей/груза, интересующая модель..." />
             </div>
+            <label className="flex items-start gap-3 rounded-lg border border-border bg-card/60 px-4 py-3 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                required
+                checked={formData.privacyAccepted}
+                onChange={(e) => setFormData({ ...formData, privacyAccepted: e.target.checked })}
+                className="mt-1 h-4 w-4 rounded border-border"
+              />
+              <span>
+                Я даю согласие ООО ТПК «РОСОМАХА» на обработку моих персональных данных для обработки заявки, связи со мной и подготовки предложения.
+                {" "}
+                <Link to="/privacy" className="text-primary underline underline-offset-4">
+                  Политика обработки персональных данных
+                </Link>
+                .
+              </span>
+            </label>
             <button type="submit" className="btn-primary w-full" disabled={isSending}>
               {isSending ? (
                 <Loader2 className="mr-2 w-5 h-5 animate-spin" />
               ) : (
                 <Send className="mr-2 w-5 h-5" />
               )}
-              {isSending ? 'Отправка...' : 'Отправить заявку'}
+              {isSending ? 'Отправка...' : 'Получить расчёт'}
             </button>
           </form>
         </motion.div>

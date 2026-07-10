@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
+import { resolveMediaUrls } from '@/lib/media';
 
 interface ProductGalleryProps {
   images: string[];
@@ -8,16 +9,17 @@ interface ProductGalleryProps {
 
 export default function ProductGallery({ images, productName }: ProductGalleryProps) {
   const [activeIndex, setActiveIndex] = useState(0);
+  const galleryImages = useMemo(() => resolveMediaUrls(images), [images]);
 
   const handlePrev = () => {
-    setActiveIndex((prev) => (prev > 0 ? prev - 1 : images.length - 1));
+    setActiveIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
   };
 
   const handleNext = () => {
-    setActiveIndex((prev) => (prev < images.length - 1 ? prev + 1 : 0));
+    setActiveIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0));
   };
 
-  if (!images.length) return null;
+  if (!galleryImages.length) return null;
 
   return (
     <div className="flex gap-4">
@@ -30,7 +32,7 @@ export default function ProductGallery({ images, productName }: ProductGalleryPr
           <ChevronUp className="w-5 h-5" />
         </button>
         <div className="flex flex-col gap-2 overflow-hidden">
-          {images.slice(0, 5).map((img, idx) => (
+          {galleryImages.slice(0, 5).map((img, idx) => (
             <button
               key={idx}
               onClick={() => setActiveIndex(idx)}
@@ -60,7 +62,7 @@ export default function ProductGallery({ images, productName }: ProductGalleryPr
       {/* Основное изображение */}
       <div className="flex-1 relative aspect-[4/3] rounded-lg overflow-hidden bg-secondary/30">
         <img
-          src={images[activeIndex]}
+          src={galleryImages[activeIndex]}
           alt={productName}
           className="w-full h-full object-contain"
           onError={(e) => {
@@ -70,7 +72,7 @@ export default function ProductGallery({ images, productName }: ProductGalleryPr
         
         {/* Мобильные точки */}
         <div className="md:hidden absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2">
-          {images.map((_, idx) => (
+          {galleryImages.map((_, idx) => (
             <button
               key={idx}
               onClick={() => setActiveIndex(idx)}

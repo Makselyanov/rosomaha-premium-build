@@ -1,10 +1,11 @@
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Eye } from 'lucide-react';
-import { VehicleModel } from '@/data/models';
+import { ArrowRight, Eye } from 'lucide-react';
+import type { CatalogCardModel } from '@/data/catalog';
+import { resolveMediaUrl } from '@/lib/media';
 
 interface ModelCardProps {
-  model: VehicleModel;
+  model: CatalogCardModel;
   index?: number;
 }
 
@@ -34,9 +35,12 @@ export default function ModelCard({ model, index = 0 }: ModelCardProps) {
           {/* Image */}
           <div className="relative aspect-[4/3] overflow-hidden">
             <img
-              src={model.image}
+              src={resolveMediaUrl(model.image) || '/media/company/rosomaha-deep-mud.jpg'}
               alt={model.name}
               className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+              onError={(e) => {
+                (e.target as HTMLImageElement).src = '/media/company/rosomaha-deep-mud.jpg';
+              }}
             />
             <div className="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent opacity-60" />
 
@@ -56,6 +60,9 @@ export default function ModelCard({ model, index = 0 }: ModelCardProps) {
             <h3 className="text-lg font-display uppercase tracking-wider mb-3 group-hover:text-primary transition-colors">
               {model.name}
             </h3>
+            <p className="text-sm text-muted-foreground leading-relaxed line-clamp-3 min-h-[4.5rem] mb-4">
+              {model.description}
+            </p>
 
             {/* Specs */}
             <div className="flex flex-wrap gap-2 mb-4">
@@ -78,6 +85,10 @@ export default function ModelCard({ model, index = 0 }: ModelCardProps) {
                 )}
                 <p className="price-tag text-2xl">{model.priceFormatted}</p>
               </div>
+              <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">
+                Подробнее
+                <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+              </span>
             </div>
           </div>
         </div>

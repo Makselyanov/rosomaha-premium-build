@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useParams, Link, Navigate } from 'react-router-dom';
+import { useParams, Link, Navigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
     ArrowRight,
@@ -24,18 +24,50 @@ import {
     Truck
 } from 'lucide-react';
 import { applications } from '@/data/applications';
+import { articles } from '@/data/articles';
+import { resolveMediaUrl } from '@/lib/media';
 
 export default function ApplicationDetailPage() {
     const { slug } = useParams();
+    const location = useLocation();
     const application = applications.find(app => app.slug === slug);
 
     useEffect(() => {
-        window.scrollTo(0, 0);
-    }, [slug]);
+        if (!location.hash) {
+            window.scrollTo(0, 0);
+            return;
+        }
+
+        const timer = window.setTimeout(() => {
+            const target = document.getElementById(location.hash.slice(1));
+            if (!target) {
+                return;
+            }
+
+            const headerOffset = 96;
+            const top = target.getBoundingClientRect().top + window.scrollY - headerOffset;
+            window.scrollTo({ top, behavior: 'smooth' });
+        }, 100);
+
+        return () => window.clearTimeout(timer);
+    }, [slug, location.hash]);
 
     if (!application) {
         return <Navigate to="/applications" replace />;
     }
+
+    const relatedApplications = application.relatedApplications
+        .map((relatedSlug) => applications.find((entry) => entry.slug === relatedSlug))
+        .filter((entry): entry is (typeof applications)[number] => Boolean(entry))
+        .slice(0, 3);
+
+    const relatedArticles = application.relatedArticles
+        .map((relatedSlug) => articles.find((entry) => entry.slug === relatedSlug))
+        .filter((entry): entry is (typeof articles)[number] => Boolean(entry))
+        .slice(0, 3);
+    const heroImage = resolveMediaUrl(application.image) || '/media/placeholder-hero.jpg';
+    const featureImage = resolveMediaUrl(application.image) || '/media/placeholder-application.jpg';
+    const ctaImage = resolveMediaUrl(application.ctaBackground || application.image) || '/media/placeholder-hero.jpg';
 
     return (
         <main className="min-h-screen bg-background pt-20">
@@ -58,9 +90,12 @@ export default function ApplicationDetailPage() {
             <section className="relative min-h-[70vh] flex items-center overflow-hidden">
                 <div className="absolute inset-0 z-0">
                     <img
-                        src={application.image || '/media/placeholder-hero.jpg'}
+                        src={heroImage}
                         alt={application.heroTitle}
                         className="w-full h-full object-cover grayscale-[0.2] brightness-[0.4] contrast-[1.1]"
+                        onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/media/placeholder-hero.jpg';
+                        }}
                     />
                     <div className="absolute inset-0 bg-gradient-to-r from-background via-background/60 to-transparent" />
                     <div className="absolute inset-0 bg-background/20" />
@@ -86,12 +121,12 @@ export default function ApplicationDetailPage() {
                             {application.heroDescription}
                         </p>
 
-                        <div className="flex flex-col sm:flex-row gap-6">
-                            <Link to="/catalog" className="btn-primary group">
+                        <div className="flex flex-col sm:flex-row gap-4 sm:gap-6">
+                            <Link to="/catalog" className="btn-primary group w-full px-6 text-base sm:w-auto sm:px-8 sm:text-lg">
                                 Рассчитать стоимость
                                 <ArrowRight className="ml-2 w-5 h-5 group-hover:translate-x-1 transition-transform" />
                             </Link>
-                            <Link to="/contacts" className="btn-secondary">
+                            <Link to="/contacts" className="btn-secondary w-full px-6 text-base sm:w-auto sm:px-8 sm:text-lg">
                                 Проконсультироваться
                             </Link>
                         </div>
@@ -196,8 +231,8 @@ export default function ApplicationDetailPage() {
                                     </>
                                 )}
                             </div>
-                            <div className="mt-8">
-                                <Link to="/catalog" className="btn-primary">
+                        <div className="mt-8">
+                                <Link to="/catalog" className="btn-primary w-full px-6 text-base sm:w-auto sm:px-8 sm:text-lg">
                                     Выбрать свою Росомаху
                                     <ArrowRight className="ml-2 w-5 h-5" />
                                 </Link>
@@ -206,9 +241,12 @@ export default function ApplicationDetailPage() {
                         <div className="flex-1 order-1 md:order-2 relative">
                             <div className="relative z-10 rounded-3xl overflow-hidden shadow-2xl border border-white/10 aspect-video">
                                 <img
-                                    src={application.image}
+                                    src={featureImage}
                                     className="w-full h-full object-cover"
                                     alt="Technical Excellence"
+                                    onError={(e) => {
+                                        (e.target as HTMLImageElement).src = '/media/placeholder-application.jpg';
+                                    }}
                                 />
                                 <div className="absolute inset-0 bg-gradient-to-tr from-primary/20 to-transparent" />
                             </div>
@@ -236,9 +274,12 @@ export default function ApplicationDetailPage() {
                                 {situation.image && (
                                     <div className="aspect-[16/10] overflow-hidden relative">
                                         <img
-                                            src={situation.image}
+                                            src={resolveMediaUrl(situation.image) || '/media/placeholder-application.jpg'}
                                             alt={situation.title}
                                             className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+                                            onError={(e) => {
+                                                (e.target as HTMLImageElement).src = '/media/placeholder-application.jpg';
+                                            }}
                                         />
                                         <div className="absolute inset-0 bg-gradient-to-t from-card/80 via-transparent to-transparent opacity-80" />
                                         <div className="absolute bottom-4 left-4 right-4 text-white">
@@ -474,9 +515,9 @@ export default function ApplicationDetailPage() {
                                     ))}
                                 </ul>
 
-                                <Link
+                            <Link
                                     to={config.modelSlug ? `/catalog/${config.modelSlug}` : "/catalog"}
-                                    className="btn-secondary w-full justify-center"
+                                    className="btn-secondary w-full justify-center px-5 text-base sm:px-8 sm:text-lg"
                                 >
                                     Собрать такую
                                 </Link>
@@ -485,6 +526,86 @@ export default function ApplicationDetailPage() {
                     </div>
                 </div>
             </section>
+
+            {(relatedApplications.length > 0 || relatedArticles.length > 0) && (
+                <section className="py-20 bg-background">
+                    <div className="container">
+                        <div className="grid xl:grid-cols-2 gap-8">
+                            {relatedApplications.length > 0 && (
+                                <div className="rounded-3xl border border-border bg-surface/40 p-6 md:p-8">
+                                    <div className="flex items-center gap-3 mb-6">
+                                        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                                            <Map className="w-5 h-5" />
+                                        </div>
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.25em] text-primary font-bold">Смежные задачи</p>
+                                            <h2 className="text-2xl font-display font-bold">Где еще работает эта техника</h2>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {relatedApplications.map((entry) => (
+                                            <Link
+                                                key={entry.slug}
+                                                to={`/applications/${entry.slug}`}
+                                                className="group block rounded-2xl border border-border bg-card p-5 transition-all duration-300 hover:border-primary/30 hover:shadow-xl hover:shadow-primary/5"
+                                            >
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div>
+                                                        <h3 className="text-lg font-bold mb-2 group-hover:text-primary transition-colors">
+                                                            {entry.title}
+                                                        </h3>
+                                                        <p className="text-sm text-muted-foreground leading-relaxed">
+                                                            {entry.tagline}
+                                                        </p>
+                                                    </div>
+                                                    <ArrowRight className="w-5 h-5 text-primary shrink-0 transition-transform group-hover:translate-x-1" />
+                                                </div>
+                                            </Link>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {relatedArticles.length > 0 && (
+                                <div className="rounded-3xl border border-border bg-surface/40 p-6 md:p-8">
+                                    <div className="flex items-center gap-3 mb-6">
+                                        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                                            <Search className="w-5 h-5" />
+                                        </div>
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.25em] text-primary font-bold">Полезные статьи</p>
+                                            <h2 className="text-2xl font-display font-bold">Что изучить по теме</h2>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {relatedArticles.map((article) => (
+                                            <Link
+                                                key={article.slug}
+                                                to={`/articles/${article.slug}`}
+                                                className="group block rounded-2xl border border-border bg-card p-5 transition-all duration-300 hover:border-primary/30 hover:shadow-xl hover:shadow-primary/5"
+                                            >
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div>
+                                                        <h3 className="text-lg font-bold mb-2 group-hover:text-primary transition-colors">
+                                                            {article.title}
+                                                        </h3>
+                                                        <p className="text-sm text-muted-foreground leading-relaxed">
+                                                            {article.excerpt}
+                                                        </p>
+                                                    </div>
+                                                    <ArrowRight className="w-5 h-5 text-primary shrink-0 transition-transform group-hover:translate-x-1" />
+                                                </div>
+                                            </Link>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </section>
+            )}
 
             {/* FAQ */}
             <section className="py-24 bg-background">
@@ -525,9 +646,12 @@ export default function ApplicationDetailPage() {
             <section className="py-32 relative overflow-hidden text-white">
                 <div className="absolute inset-0 z-0">
                     <img
-                        src={application.ctaBackground || application.image}
+                        src={ctaImage}
                         alt="Background"
                         className="w-full h-full object-cover grayscale brightness-[0.3] contrast-[1.2]"
+                        onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/media/placeholder-hero.jpg';
+                        }}
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
                     <div className="absolute inset-0 bg-primary/20 mix-blend-multiply" />
@@ -545,12 +669,12 @@ export default function ApplicationDetailPage() {
                         <p className="text-xl md:text-2xl text-white/80 mb-12 max-w-3xl mx-auto leading-relaxed">
                             Оставьте заявку сегодня, и мы поможем подобрать идеальную комплектацию, которая прослужит вам десятилетиями.
                         </p>
-                        <div className="flex flex-col sm:flex-row justify-center gap-6">
-                            <Link to="/catalog" className="btn-primary px-12 py-6 text-xl shadow-2xl shadow-primary/40">
+                        <div className="flex flex-col sm:flex-row justify-center gap-4 sm:gap-6">
+                            <Link to="/catalog" className="btn-primary mx-auto w-full max-w-sm px-6 py-4 text-base shadow-2xl shadow-primary/40 sm:w-auto sm:max-w-none sm:px-12 sm:py-6 sm:text-xl">
                                 Рассчитать стоимость
                                 <ArrowRight className="ml-2 w-6 h-6" />
                             </Link>
-                            <Link to="/contacts" className="btn-secondary px-12 py-6 text-xl">
+                            <Link to="/contacts" className="btn-secondary mx-auto w-full max-w-sm px-6 py-4 text-base sm:w-auto sm:max-w-none sm:px-12 sm:py-6 sm:text-xl">
                                 Связаться с менеджером
                             </Link>
                         </div>
