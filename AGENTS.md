@@ -30,6 +30,14 @@
 - Content Zavod writes its canonical server export to
   `/var/www/rosomaha/public/api/articles.json` and
   `/var/www/rosomaha/src/data/articles-cz/`.
+- `/var/www/rosomaha` is a mutable build-and-content staging directory, not a
+  Git checkout. Its former `.git` metadata is archived under
+  `/var/backups/rosomaha/source-workspace-legacy-20260710/` so CRM publication
+  cannot create a misleading dirty production worktree.
+- The only canonical Git checkout for application code is this project
+  workspace. Deploy committed code to the server staging directory, let CRM
+  own its generated article export there, and keep release artifacts under
+  `/var/www/rosomaha/_releases`.
 - The local Git checkout can lag behind that export. Before every manual site
   build or deployment, merge the current server export into an isolated
   temporary worktree; do not overwrite the main local checkout just to build.
