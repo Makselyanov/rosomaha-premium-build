@@ -48,6 +48,10 @@ export default function DealersPage() {
             Официальные дилеры снегоболотоходов «Росомаха» в регионах России.
             Найдите ближайший центр продаж и обслуживания.
           </p>
+          <Link to="/dealers/tyumen" className="mt-6 inline-flex items-center gap-2 text-primary font-semibold hover:underline">
+            Производство и подбор в Тюмени
+            <ExternalLink className="h-4 w-4" />
+          </Link>
         </div>
 
         {/* Dealers by Region */}
@@ -150,8 +154,8 @@ export default function DealersPage() {
 
                     {dealer.type === 'factory' && (
                       <div className="mt-5 pt-4 border-t border-border">
-                        <Link to="/contacts" className="btn-primary w-full text-center block">
-                          Заказать напрямую
+                        <Link to="/dealers/tyumen" className="btn-primary w-full text-center block">
+                          Производство в Тюмени
                         </Link>
                       </div>
                     )}

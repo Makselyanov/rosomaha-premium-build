@@ -296,11 +296,11 @@ function buildCatalogSchema(meta, items) {
   ];
 }
 
-function buildDealerListSchema(dealers) {
+function buildDealerListSchema(dealers, listName = "Дилеры и представительства РОСОМАХА") {
   return {
     "@context": "https://schema.org",
     "@type": "ItemList",
-    name: "Дилеры и представительства РОСОМАХА",
+    name: listName,
     itemListElement: dealers.map((dealer, index) => ({
       "@type": "ListItem",
       position: index + 1,
@@ -316,7 +316,7 @@ function buildDealerListSchema(dealers) {
         },
         telephone: [dealer.phone, dealer.phone2].filter(Boolean),
         email: dealer.email,
-        url: dealer.website || `${baseUrl}/dealers`,
+        url: dealer.website || `${baseUrl}${dealer.region === "Тюменская область" ? "/dealers/tyumen" : "/dealers"}`,
         geo: dealer.coordinates
           ? {
               "@type": "GeoCoordinates",
@@ -608,9 +608,9 @@ const routes = [
     robots: "index,follow",
     schema: buildCatalogSchema(
       {
-        title: "РљР°С‚Р°Р»РѕРі СЃРЅРµРіРѕР±РѕР»РѕС‚РѕС…РѕРґРѕРІ В«Р РѕСЃРѕРјР°С…Р°В» | РњРѕРґРµР»Рё Рё С†РµРЅС‹",
+        title: "Каталог снегоболотоходов «Росомаха» | Модели и цены",
         description:
-          "РљР°С‚Р°Р»РѕРі РјРѕРґРµР»РµР№ В«Р РѕСЃРѕРјР°С…Р°В»: СЃРЅРµРіРѕР±РѕР»РѕС‚РѕС…РѕРґС‹, РїРёРєР°РїС‹, С€РµСЃС‚РёРєРѕР»РµСЃРЅРёРєРё Рё РїСЂРёС†РµРїС‹. РЎСЂР°РІРЅРёС‚Рµ РєРѕРјРїР»РµРєС‚Р°С†РёРё Рё С†РµРЅС‹.",
+          "Каталог моделей «Росомаха»: снегоболотоходы, пикапы, шестиколёсники и прицепы. Сравните комплектации и цены.",
         canonical: `${baseUrl}/catalog`,
       },
       products,
@@ -678,6 +678,30 @@ const routes = [
         canonical: `${baseUrl}/dealers`,
       }),
       buildDealerListSchema(dealers),
+    ],
+  },
+  {
+    path: "/dealers/tyumen",
+    title: "Снегоболотоходы «Росомаха» в Тюмени | Завод и партнёр",
+    description: "Где купить снегоболотоход «Росомаха» в Тюмени: производство в посёлке Московский, партнёр в городе, телефоны, адреса и заявка на подбор.",
+    image: defaultImage,
+    ogType: "website",
+    robots: "index,follow",
+    schema: [
+      buildWebPageSchema({
+        title: "Снегоболотоходы «Росомаха» в Тюмени | Завод и партнёр",
+        description: "Где купить снегоболотоход «Росомаха» в Тюмени: производство в посёлке Московский, партнёр в городе, телефоны, адреса и заявка на подбор.",
+        canonical: `${baseUrl}/dealers/tyumen`,
+      }),
+      buildBreadcrumbSchema([
+        { name: "Главная", path: "/" },
+        { name: "Дилеры", path: "/dealers" },
+        { name: "Тюмень", path: "/dealers/tyumen" },
+      ]),
+      buildDealerListSchema(
+        dealers.filter((dealer) => dealer.region === "Тюменская область"),
+        "Производство и партнёры РОСОМАХА в Тюменской области",
+      ),
     ],
   },
   {

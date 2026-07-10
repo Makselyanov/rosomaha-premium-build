@@ -174,6 +174,24 @@ export default function CatalogPage() {
           </div>
         </section>
 
+        <section className="mt-10 rounded-[2rem] border border-primary/20 bg-primary/5 p-6 md:p-8 lg:p-10">
+          <div className="grid gap-8 lg:grid-cols-[1.1fr,0.9fr] lg:items-center">
+            <div>
+              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-primary">Покупка без неопределённости</p>
+              <h2 className="mb-4 text-3xl font-display font-bold md:text-4xl">Модель, актуальная цена и комплектация — в одном расчёте</h2>
+              <p className="leading-relaxed text-muted-foreground">
+                Цены в карточках помогают сравнить линейку, но итог зависит от двигателя, мостов, кузова и выбранных опций.
+                Отправьте задачу — менеджер зафиксирует конкретную комплектацию, стоимость, срок готовности и вариант доставки.
+              </p>
+            </div>
+            <div className="grid gap-3">
+              <Link to="/order" className="btn-primary justify-center">Получить расчёт комплектации</Link>
+              <Link to="/dealers/tyumen" className="btn-secondary justify-center">Производство и подбор в Тюмени</Link>
+              <Link to="/delivery" className="text-center text-sm font-semibold text-primary hover:underline">Условия доставки по России</Link>
+            </div>
+          </div>
+        </section>
+
         <section className="mt-10 grid lg:grid-cols-4 gap-4">
           {catalogUseCases.map((useCase, index) => (
             <motion.div

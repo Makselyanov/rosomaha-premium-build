@@ -111,7 +111,7 @@ const gates = [
     "Run one approved real CRM POST test and save artifact",
   ),
   ok(
-    metrikaVerification?.ok && metrikaVerification?.hardGoalId === "517599639" && metrikaVerification?.totals?.hardGoalReachesByUtmCampaign >= 1,
+    metrikaVerification?.ok && metrikaVerification?.hardGoalId === "517600157" && metrikaVerification?.totals?.hardGoalReachesByUtmCampaign >= 1,
     "Metrika API confirms hard goal for real test",
     metrikaVerification?.totals ? `Metrika verification artifact confirms ${metrikaVerification.totals.hardGoalReachesByUtmCampaign} hard goal reach(es)` : undefined,
     "Run scripts/rosomaha-metrika-real-test-verifier.mjs after approved real CRM POST test",

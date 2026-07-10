@@ -4,7 +4,7 @@ import os from "node:os";
 
 const rootDir = process.cwd();
 const counterId = process.env.ROSOMAHA_METRIKA_COUNTER_ID || process.env.YANDEX_METRIKA_COUNTER_ID || "107139619";
-const hardGoalId = process.env.ROSOMAHA_METRIKA_HARD_GOAL_ID || "517599639";
+const hardGoalId = process.env.ROSOMAHA_METRIKA_HARD_GOAL_ID || "517600157";
 const leadChainDir = path.join(rootDir, "marketing-audits", "lead-chain");
 const outDir = path.join(rootDir, "marketing-audits", "metrika-verification");
 const tokenEnvPath = path.join(os.homedir(), ".codex", "automations", "automation-2", "secrets", "yandex_oauth_token.env");

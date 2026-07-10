@@ -241,8 +241,8 @@ function buildOrganizationSchema() {
   };
 }
 
-function buildDealerListSchema() {
-  const dealerItems = dealers.map((dealer, index) => ({
+function buildDealerListSchema(dealerEntries = dealers, listName = "Дилеры и представительства РОСОМАХА") {
+  const dealerItems = dealerEntries.map((dealer, index) => ({
     "@type": "ListItem",
     position: index + 1,
     item: {
@@ -257,7 +257,7 @@ function buildDealerListSchema() {
       },
       telephone: [dealer.phone, dealer.phone2].filter(Boolean),
       email: dealer.email,
-      url: dealer.website || `${SITE_URL}/dealers`,
+      url: dealer.website || `${SITE_URL}${dealer.region === "Тюменская область" ? "/dealers/tyumen" : "/dealers"}`,
       geo: {
         "@type": "GeoCoordinates",
         latitude: dealer.coordinates.lat,
@@ -270,7 +270,7 @@ function buildDealerListSchema() {
   return {
     "@context": "https://schema.org",
     "@type": "ItemList",
-    name: "Дилеры и представительства РОСОМАХА",
+    name: listName,
     itemListElement: dealerItems,
   };
 }
@@ -462,6 +462,14 @@ function getStaticSeo(pathname: string): SeoPayload | null {
       ogType: "website",
       robots: "index,follow",
     },
+    "/dealers/tyumen": {
+      title: "Снегоболотоходы «Росомаха» в Тюмени | Завод и партнёр",
+      description: "Где купить снегоболотоход «Росомаха» в Тюмени: производство в посёлке Московский, партнёр в городе, телефоны, адреса и заявка на подбор.",
+      canonicalPath: "/dealers/tyumen",
+      image: DEFAULT_IMAGE,
+      ogType: "website",
+      robots: "index,follow",
+    },
     "/contacts": {
       title: "Контакты «Росомаха» | Связаться с производителем",
       description: "Контакты компании «Росомаха»: телефоны, адрес, форма связи и информация для заказа снегоболотоходов.",
@@ -553,6 +561,27 @@ function getStaticSeo(pathname: string): SeoPayload | null {
           schema: {},
         }),
         buildDealerListSchema(),
+      ],
+    };
+  }
+
+  if (pathname === "/dealers/tyumen") {
+    return {
+      ...staticPayload,
+      schema: [
+        buildWebPageSchema({
+          ...staticPayload,
+          schema: {},
+        }),
+        buildBreadcrumbSchema([
+          { name: "Главная", path: "/" },
+          { name: "Дилеры", path: "/dealers" },
+          { name: "Тюмень", path: "/dealers/tyumen" },
+        ]),
+        buildDealerListSchema(
+          dealers.filter((dealer) => dealer.region === "Тюменская область"),
+          "Производство и партнёры РОСОМАХА в Тюменской области",
+        ),
       ],
     };
   }

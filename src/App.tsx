@@ -15,6 +15,7 @@ import OptionsPage from "./pages/OptionsPage";
 import ModelDetailPage from "./pages/ModelDetailPage";
 import CompanyPage from "./pages/CompanyPage";
 import DealersPage from "./pages/DealersPage";
+import TyumenDealersPage from "./pages/TyumenDealersPage";
 import ContactsPage from "./pages/ContactsPage";
 import DeliveryPage from "./pages/DeliveryPage";
 import MediaPage from "./pages/MediaPage";
@@ -52,6 +53,7 @@ const App = () => (
           <Route path="/catalog/:slug" element={<ModelDetailPage />} />
           <Route path="/company" element={<CompanyPage />} />
           <Route path="/dealers" element={<DealersPage />} />
+          <Route path="/dealers/tyumen" element={<TyumenDealersPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
           <Route path="/delivery" element={<DeliveryPage />} />
           <Route path="/media" element={<MediaPage />} />

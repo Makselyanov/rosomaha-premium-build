@@ -7,6 +7,10 @@
   merge its content, analytics, or lead conclusions with the main site.
 - Yandex work is API-only unless the user gives new explicit browser
   permission. Use only the isolated `rosomaha-rus999` project credentials.
+- For the main site, the hard lead goal is Metrika goal `517600157`
+  (`crm_conversion`), fired only after CRM confirms the deal and submission id.
+  Goal `517599639` is an older DOM form signal and must not be counted as a
+  confirmed lead.
 
 ## Clean Git tree
 

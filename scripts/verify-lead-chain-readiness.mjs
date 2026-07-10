@@ -10,6 +10,9 @@ const checks = [
       "normalizeRussianPhone",
       "isValidRussianPhone",
       "lead_submission_id",
+      "pendingSubmissionId",
+      "crmSubmissionId !== leadSubmissionId",
+      "CRM did not confirm the submitted lead id",
       "rosomaha_last_lead_receipt",
       "trackLeadSubmit",
       "response.ok",
@@ -56,7 +59,7 @@ const checks = [
     file: "scripts/rosomaha-metrika-real-test-verifier.mjs",
     required: [
       "ROSOMAHA_LEAD_CHAIN_REAL_",
-      "517599639",
+      "517600157",
       "api-metrika.yandex.net/stat/v1/data",
       "No REAL lead-chain artifact exists",
       "process.exit(2)",

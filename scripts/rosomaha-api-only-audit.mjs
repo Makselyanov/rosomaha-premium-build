@@ -10,7 +10,7 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const directLoginDefault = "rosomaha-rus999";
 const campaigns = ["708505950", "705770573", "710087376"];
 const counters = [
-  { name: "catalog", id: "107139619", hardGoalId: "517599639", site: "xn--80aa8ahaki9a.site" },
+  { name: "catalog", id: "107139619", hardGoalId: "517600157", site: "xn--80aa8ahaki9a.site" },
   { name: "quiz", id: "105918356", hardGoalId: "496461698", site: "rosomaha.site" },
 ];
 
@@ -252,7 +252,7 @@ function buildMarkdown(report) {
     "## Что проверено",
     "",
     "- Яндекс Директ: кампании 708505950, 705770573, 710087376 через campaigns.get и Reports API.",
-    "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517599639 / 496461698 за 1, 7, 30 дней.",
+    "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517600157 (crm_conversion после ответа CRM) / 496461698 за 1, 7, 30 дней. Старую DOM-цель формы 517599639 считать мягкой.",
     "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
     "- Google Search Console: только наличие проектного API-конфига, без браузера и OAuth UI.",
     "",
@@ -336,7 +336,7 @@ function buildMarkdown(report) {
     "## Спор ролей",
     "",
     "- Директолог: каталоговая 708505950 не должна запускаться без заявки; квиз 705770573 можно анализировать как намеренно работающий, но чистить мусорные запросы нужно до масштабирования.",
-    "- Аналитик Метрики/CRM: заявкой считаются только 517599639 для каталога и 496461698 для квиза; Direct conversions, телефоны, открытия квиза и мессенджеры отдельно.",
+    "- Аналитик Метрики/CRM: заявкой считаются только 517600157 для каталога и 496461698 для квиза; DOM-цель формы 517599639, Direct conversions, телефоны, открытия квиза и мессенджеры отдельно.",
     "- SEO/Webmaster-аудитор: основной SEO-актив только xn--80aa8ahaki9a.site; rosomaha.site остается рекламной квиз-воронкой.",
     "- Маркетолог-стратег: главный следующий шаг не бюджет, а связка spend -> hard goal -> CRM unique lead.",
     "- Критик рисков: GSC нельзя объявлять рабочим, пока нет project-specific refresh token; это конфиг-пробел, а не рыночный ноль.",

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { Send, Check, Loader2 } from 'lucide-react';
@@ -37,6 +37,12 @@ function extractCrmResponseId(responseBody: unknown) {
   return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined;
 }
 
+function extractCrmSubmissionId(responseBody: unknown) {
+  if (!responseBody || typeof responseBody !== 'object') return undefined;
+  const value = (responseBody as Record<string, unknown>).lead_submission_id;
+  return typeof value === 'string' ? value : undefined;
+}
+
 function writeLeadReceipt(receipt: Record<string, unknown>) {
   try {
     sessionStorage.setItem('rosomaha_last_lead_receipt', JSON.stringify(receipt));
@@ -54,6 +60,7 @@ function limitCrmText(value: string | undefined, limit: number) {
 export default function OrderPage() {
   const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
   const { toast } = useToast();
+  const pendingSubmissionId = useRef<string>();
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [formData, setFormData] = useState({
@@ -107,7 +114,8 @@ export default function OrderPage() {
 
     try {
       const attribution = await getAttribution();
-      const leadSubmissionId = createLeadSubmissionId();
+      const leadSubmissionId = pendingSubmissionId.current || createLeadSubmissionId();
+      pendingSubmissionId.current = leadSubmissionId;
 
       const payload = {
         name: customerName,
@@ -149,6 +157,11 @@ export default function OrderPage() {
         crmResponse = undefined;
       }
       const crmResponseId = extractCrmResponseId(crmResponse);
+      const crmSubmissionId = extractCrmSubmissionId(crmResponse);
+
+      if (!crmResponseId || crmSubmissionId !== leadSubmissionId) {
+        throw new Error('CRM did not confirm the submitted lead id');
+      }
 
       writeLeadReceipt({
         lead_submission_id: leadSubmissionId,
@@ -179,6 +192,7 @@ export default function OrderPage() {
         ym_client_id: attribution.ym_client_id || '',
       });
 
+      pendingSubmissionId.current = undefined;
       setIsSubmitted(true);
       clearCart();
       toast({ title: 'Заявка отправлена!', description: 'Мы свяжемся с вами в ближайшее время.' });
