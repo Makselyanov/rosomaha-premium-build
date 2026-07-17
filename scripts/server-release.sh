@@ -7,6 +7,31 @@ CURRENT_LINK="$APP_ROOT/current"
 CONTENT_SOURCE="${CONTENT_SOURCE:-$APP_ROOT/public/api/articles.json}"
 CONTENT_CANDIDATE="$APP_ROOT/dist/api/articles.json"
 
+usage() {
+  cat <<'EOF'
+Usage: server-release.sh [release-label]
+
+Creates a guarded release from APP_ROOT/dist and switches APP_ROOT/current.
+The optional label must not start with a dash.
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if (( $# > 1 )); then
+  usage >&2
+  exit 2
+fi
+
+if [[ "${1:-}" == -* ]]; then
+  echo "Release blocked: unknown option: $1" >&2
+  usage >&2
+  exit 2
+fi
+
 # Content Zavod writes its canonical export into the server source tree. A
 # manually uploaded SEO build may be based on an older local checkout, so block
 # the release if it would silently remove already exported CRM articles.
