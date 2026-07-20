@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
 import CartDrawer from "./components/CartDrawer";
@@ -59,6 +59,7 @@ const App = () => (
           <Route path="/media" element={<MediaPage />} />
           <Route path="/order" element={<OrderPage />} />
           <Route path="/articles" element={<ArticlesPage />} />
+          <Route path="/instagram" element={<Navigate to="/articles" replace />} />
           <Route path="/articles/:slug" element={<ArticleDetailPage />} />
           <Route path="/applications" element={<ApplicationsPage />} />
           <Route path="/applications/:slug" element={<ApplicationDetailPage />} />
