@@ -639,6 +639,15 @@ const routes = [
     canonicalPath: "/articles",
   },
   {
+    path: "/instagram",
+    title: "Статьи о снегоболотоходах «Росомаха» | Эксплуатация и выбор",
+    description: "Статьи о выборе, эксплуатации, обслуживании и реальном использовании снегоболотоходов «Росомаха».",
+    image: defaultImage,
+    ogType: "website",
+    robots: "noindex,follow",
+    canonicalPath: "/articles",
+  },
+  {
     path: "/media",
     title: "Видео и обзоры техники «Росомаха» | Rosomaha Club, Telegram и RUTUBE",
     description: "Видеообзоры, тест-драйвы и полевые материалы о вездеходах «Росомаха»: YouTube Rosomaha Club, Telegram и RUTUBE.",
