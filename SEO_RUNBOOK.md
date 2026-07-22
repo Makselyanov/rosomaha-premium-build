@@ -46,9 +46,17 @@ This matters because search bots must receive correct `title`, `description`, `c
 
 ## Current known SEO risks
 
-- Yandex diagnostic `NOT_IN_SPRAV` is active.
-  - This is not a code bug.
-  - The site should also be added or confirmed in Yandex Business.
+- `https://rosomaha-rus.ru/` still returns `200` with self-canonical pages.
+  - The legacy domain has not transferred its accumulated search signals.
+  - Complete a path-to-path `301` migration only after server access and a reviewed URL map are available.
+  - Do not redirect every legacy URL to the homepage; models and categories must land on their closest equivalents.
+- Yandex has indexed parameter and trailing-slash variants beyond the canonical sitemap set.
+  - Keep tracking/filter parameters in `Clean-param`.
+  - Production nginx must redirect non-root trailing-slash routes to their no-slash canonical.
+- Yandex diagnostic `NOT_MOBILE_FRIENDLY` is still active even though current responsive smoke tests pass.
+  - Recheck it after the updated HTML and priority routes are recrawled; do not treat the recommendation as closed until Webmaster clears it.
+- Google Search Console OAuth can be revoked independently of the saved config.
+  - `invalid_grant` requires a new project-specific refresh token before current Google positions can be confirmed.
 - The OAuth token expires every 6 months.
   - Refresh OAuth and update `.env.seo.local` before expiry.
 
@@ -67,6 +75,7 @@ This matters because search bots must receive correct `title`, `description`, `c
   - route-specific `og:image`
 - Run:
   - `npm run seo:report`
+  - Confirm the report contains numeric `TOTAL_SHOWS`, `TOTAL_CLICKS`, and average positions for popular Yandex queries.
 
 ## Safe automatic actions
 

@@ -151,11 +151,6 @@ function buildWebSiteSchema() {
     publisher: {
       "@id": `${baseUrl}/#organization`,
     },
-    potentialAction: {
-      "@type": "SearchAction",
-      target: `${baseUrl}/catalog?search={search_term_string}`,
-      "query-input": "required name=search_term_string",
-    },
   };
 }
 
@@ -251,9 +246,9 @@ function buildCatalogSchema(meta, items) {
     {
       "@context": "https://schema.org",
       "@type": "OfferCatalog",
-      name: "Снегоболотоходы и вездеходы Росомаха",
+      name: "Квадроциклы-вездеходы и снегоболотоходы Росомаха",
       url: `${baseUrl}/catalog`,
-      itemListElement: items.slice(0, 12).map((item) => ({
+      itemListElement: items.map((item) => ({
         "@type": "Offer",
         itemOffered: {
           "@type": "Product",
@@ -274,8 +269,8 @@ function buildCatalogSchema(meta, items) {
     {
       "@context": "https://schema.org",
       "@type": "ItemList",
-      name: "Каталог снегоболотоходов Росомаха",
-      itemListElement: items.slice(0, 12).map((item, index) => ({
+      name: "Каталог квадроциклов-вездеходов Росомаха",
+      itemListElement: items.map((item, index) => ({
         "@type": "ListItem",
         position: index + 1,
         url: toAbsoluteUrl(`/catalog/${item.slug}`),
@@ -531,6 +526,7 @@ function parseProducts() {
       const descriptionMatch = block.match(/description:\s*'([^']+)'/);
       const basePriceMatch = block.match(/basePrice:\s*(\d+)/);
       const availableMatch = block.match(/available:\s*(true|false)/);
+      const categoryMatch = block.match(/category:\s*'([^']+)'/);
       const galleryMatch = block.match(/gallery:\s*\[([\s\S]*?)\],\s*thumbnails:/);
 
       if (!slugMatch || !nameMatch || !descriptionMatch) {
@@ -551,6 +547,7 @@ function parseProducts() {
         description: descriptionMatch[1],
         basePrice: basePriceMatch ? Number.parseInt(basePriceMatch[1], 10) : 0,
         available: availableMatch ? availableMatch[1] === "true" : true,
+        category: categoryMatch?.[1] || "classic",
         image: image || defaultImage,
       };
     })
@@ -565,6 +562,111 @@ function replaceAll(template, replacements) {
   }
 
   return result;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function markdownToPlainText(value) {
+  return String(value || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[([^\]]*)]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/[*_~`>]/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function renderParagraphs(value, maxParagraphs = 80) {
+  const paragraphs = markdownToPlainText(value)
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, maxParagraphs);
+
+  return paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("\n");
+}
+
+function renderStaticLinks(items) {
+  return items
+    .filter((item) => item?.href && item?.label)
+    .map((item) => `<li><a href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a>${item.note ? ` — ${escapeHtml(item.note)}` : ""}</li>`)
+    .join("\n");
+}
+
+function buildStaticBody(routePath, route) {
+  const heading = route.heading || route.title.split(" | ")[0];
+  const siteLinks = [
+    { href: "/", label: "Официальный сайт завода «Росомаха»" },
+    { href: "/catalog", label: "Квадроциклы-вездеходы: модели и цены" },
+    { href: "/applications", label: "Сферы применения" },
+    { href: "/delivery", label: "Доставка по России" },
+    { href: "/dealers", label: "Дилеры" },
+    { href: "/contacts", label: "Контакты производителя" },
+  ];
+  const sections = [];
+
+  if (routePath === "/" || routePath === "/catalog") {
+    sections.push(`
+      <section>
+        <h2>Модели квадроциклов-вездеходов «Росомаха»</h2>
+        <ul>${renderStaticLinks(products.map((product) => ({
+          href: `/catalog/${product.slug}`,
+          label: product.name,
+          note: product.basePrice ? `от ${product.basePrice.toLocaleString("ru-RU")} ₽` : "",
+        })))}</ul>
+      </section>`);
+  }
+
+  if (routePath === "/articles") {
+    sections.push(`
+      <section>
+        <h2>Статьи о выборе и эксплуатации техники</h2>
+        <ul>${renderStaticLinks(articles.map((article) => ({ href: `/articles/${article.slug}`, label: article.title })))}</ul>
+      </section>`);
+  }
+
+  if (routePath === "/applications") {
+    sections.push(`
+      <section>
+        <h2>Техника под задачу</h2>
+        <ul>${renderStaticLinks(applications.map((application) => ({ href: `/applications/${application.slug}`, label: application.title })))}</ul>
+      </section>`);
+  }
+
+  if (route.article) {
+    sections.push(`<article>${renderParagraphs(route.article.content || route.article.excerpt, 120)}</article>`);
+  } else if (route.product) {
+    sections.push(`
+      <section>
+        <h2>Описание модели</h2>
+        ${renderParagraphs(route.product.description)}
+        <p><a href="/order">Получить расчёт комплектации</a></p>
+      </section>`);
+  } else if (route.application) {
+    sections.push(`<section><h2>Решение для задачи</h2>${renderParagraphs(route.application.description)}</section>`);
+  }
+
+  return `
+    <main id="seo-prerender" data-prerendered-route="${escapeHtml(routePath)}" style="max-width:1180px;margin:0 auto;padding:32px 20px;font-family:Arial,sans-serif;line-height:1.55;color:#1f2937">
+      <nav aria-label="Основная навигация"><ul>${renderStaticLinks(siteLinks)}</ul></nav>
+      <header>
+        <p>ООО ТПК «РОСОМАХА» — завод-изготовитель в Тюменской области</p>
+        <h1>${escapeHtml(heading)}</h1>
+        ${renderParagraphs(route.bodyText || route.description, 8)}
+      </header>
+      ${sections.join("\n")}
+    </main>`;
 }
 
 function writeRoute(routePath, html) {
@@ -588,29 +690,33 @@ const products = parseProducts();
 const routes = [
   {
     path: "/",
-    title: "Снегоболотоходы «Росомаха» — каталог и калькулятор",
-    description: "Снегоболотоходы «Росомаха»: модели, комплектации, статьи, контакты и доставка от производителя.",
+    title: "Квадроциклы-вездеходы «Росомаха» | Официальный сайт завода",
+    description: "Официальный сайт завода «Росомаха»: квадроциклы-вездеходы и снегоболотоходы, актуальные модели, цены, комплектации и доставка по России.",
+    heading: "Квадроциклы-вездеходы «Росомаха» от завода-изготовителя",
+    bodyText: "Российский производитель техники на шинах низкого давления. Сравните модели и актуальные цены, подберите комплектацию под охоту, рыбалку, работу, вахту или экспедицию и получите расчёт с доставкой по России.",
     image: defaultImage,
     ogType: "website",
     robots: "index,follow",
     schema: buildWebPageSchema({
-      title: "Снегоболотоходы «Росомаха» — каталог и калькулятор",
-      description: "Снегоболотоходы «Росомаха»: модели, комплектации, статьи, контакты и доставка от производителя.",
+      title: "Квадроциклы-вездеходы «Росомаха» | Официальный сайт завода",
+      description: "Официальный сайт завода «Росомаха»: квадроциклы-вездеходы и снегоболотоходы, актуальные модели, цены, комплектации и доставка по России.",
       canonical: `${baseUrl}/`,
     }),
   },
   {
     path: "/catalog",
-    title: "Каталог снегоболотоходов «Росомаха» | Модели и цены",
-    description: "Каталог моделей «Росомаха»: снегоболотоходы, пикапы, шестиколесники и прицепы. Сравните комплектации и цены.",
+    title: "Квадроциклы-вездеходы «Росомаха» — модели и цены",
+    description: "Каталог квадроциклов-вездеходов «Росомаха» от завода: снегоболотоходы, пикапы, шестиколёсники и прицепы. Сравните модели, комплектации и цены.",
+    heading: "Квадроциклы-вездеходы «Росомаха»: модели и цены",
+    bodyText: "Официальный каталог завода «Росомаха». Выберите квадроцикл-вездеход или снегоболотоход по двигателю, мостам, грузоподъёмности и условиям эксплуатации.",
     image: defaultImage,
     ogType: "website",
     robots: "index,follow",
     schema: buildCatalogSchema(
       {
-        title: "Каталог снегоболотоходов «Росомаха» | Модели и цены",
+        title: "Квадроциклы-вездеходы «Росомаха» — модели и цены",
         description:
-          "Каталог моделей «Росомаха»: снегоболотоходы, пикапы, шестиколёсники и прицепы. Сравните комплектации и цены.",
+          "Каталог квадроциклов-вездеходов «Росомаха» от завода: снегоболотоходы, пикапы, шестиколёсники и прицепы. Сравните модели, комплектации и цены.",
         canonical: `${baseUrl}/catalog`,
       },
       products,
@@ -769,6 +875,7 @@ for (const article of articles) {
     image: getArticleHeroImage(article) || defaultImage,
     ogType: "article",
     robots: "index,follow",
+    article,
     schema: [
       buildArticleSchema(
       {
@@ -795,6 +902,7 @@ for (const application of applications) {
     image: application.image || defaultImage,
     ogType: "website",
     robots: "index,follow",
+    application,
     schema: [
       buildWebPageSchema({
         title: application.title,
@@ -812,7 +920,9 @@ for (const application of applications) {
 
 for (const product of products) {
   const pathName = `/catalog/${product.slug}`;
-  const title = `${product.name} | Купить снегоболотоход «Росомаха»`;
+  const title = product.category === "trailer"
+    ? `${product.name} | Купить прицеп «Росомаха»`
+    : `${product.name} | Купить квадроцикл-вездеход «Росомаха»`;
   const description = truncateDescription(product.description || `Модель ${product.name} из каталога «Росомаха».`);
 
   routes.push({
@@ -822,6 +932,7 @@ for (const product of products) {
     image: product.image || defaultImage,
     ogType: "product",
     robots: "index,follow",
+    product,
     schema: [
       buildProductSchema(
       {
@@ -867,6 +978,7 @@ for (const route of routes) {
     "__SEO_TWITTER_DESCRIPTION__": description,
     "__SEO_TWITTER_IMAGE__": image,
     "__SEO_JSON_LD__": JSON.stringify(schema),
+    "__SEO_BODY__": buildStaticBody(routePath, route),
   });
 
   writeRoute(routePath, html);

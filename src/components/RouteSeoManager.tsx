@@ -158,11 +158,6 @@ function buildWebSiteSchema() {
     publisher: {
       "@id": `${SITE_URL}/#organization`,
     },
-    potentialAction: {
-      "@type": "SearchAction",
-      target: `${SITE_URL}/catalog?search={search_term_string}`,
-      "query-input": "required name=search_term_string",
-    },
   };
 }
 
@@ -172,9 +167,9 @@ function buildOrganizationSchema() {
     "@type": ["Organization", "LocalBusiness"],
     "@id": `${SITE_URL}/#organization`,
     name: SITE_NAME,
-    alternateName: "Росомаха",
+    alternateName: "Тюменский завод вездеходной техники «Росомаха»",
     legalName: "ООО ТПК «РОСОМАХА»",
-    description: "Тюменский производитель снегоболотоходов и вездеходов на шинах низкого давления с доставкой по России.",
+    description: "Завод-изготовитель квадроциклов-вездеходов и снегоболотоходов «Росомаха» на шинах низкого давления с доставкой по России.",
     url: `${SITE_URL}/`,
     logo: `${SITE_URL}/favicon.ico`,
     image: toAbsoluteUrl(DEFAULT_IMAGE),
@@ -207,6 +202,7 @@ function buildOrganizationSchema() {
       },
     ],
     knowsAbout: [
+      "квадроциклы-вездеходы",
       "снегоболотоходы",
       "болотоходы",
       "вездеходы на шинах низкого давления",
@@ -233,9 +229,7 @@ function buildOrganizationSchema() {
     ],
     sameAs: [
       "https://t.me/rosomaha_site",
-      "https://t.me/rosomahaclub",
       "https://vk.com/rosomaha_service",
-      "https://www.youtube.com/@Rosomaha_Club",
       "https://rutube.ru/channel/54061535/",
     ],
   };
@@ -375,9 +369,9 @@ function buildCatalogSchema(payload: SeoPayload) {
     {
       "@context": "https://schema.org",
       "@type": "OfferCatalog",
-      name: "Снегоболотоходы и вездеходы Росомаха",
+      name: "Квадроциклы-вездеходы и снегоболотоходы Росомаха",
       url: toAbsoluteUrl("/catalog"),
-      itemListElement: catalogModels.slice(0, 12).map((model) => ({
+      itemListElement: catalogModels.map((model) => ({
         "@type": "Offer",
         itemOffered: {
           "@type": "Product",
@@ -398,8 +392,8 @@ function buildCatalogSchema(payload: SeoPayload) {
     {
       "@context": "https://schema.org",
       "@type": "ItemList",
-      name: "Каталог снегоболотоходов Росомаха",
-      itemListElement: catalogModels.slice(0, 12).map((model, index) => ({
+      name: "Каталог квадроциклов-вездеходов Росомаха",
+      itemListElement: catalogModels.map((model, index) => ({
         "@type": "ListItem",
         position: index + 1,
         url: toAbsoluteUrl(`/catalog/${model.slug}`),
@@ -423,16 +417,16 @@ function buildCatalogSchema(payload: SeoPayload) {
 function getStaticSeo(pathname: string): SeoPayload | null {
   const staticRoutes: Record<string, Omit<SeoPayload, "schema">> = {
     "/": {
-      title: "Снегоболотоходы «Росомаха» — каталог и калькулятор",
-      description: "Снегоболотоходы «Росомаха»: модели, комплектации, статьи, контакты и доставка от производителя.",
+      title: "Квадроциклы-вездеходы «Росомаха» | Официальный сайт завода",
+      description: "Официальный сайт завода «Росомаха»: квадроциклы-вездеходы и снегоболотоходы, актуальные модели, цены, комплектации и доставка по России.",
       canonicalPath: "/",
       image: DEFAULT_IMAGE,
       ogType: "website",
       robots: "index,follow",
     },
     "/catalog": {
-      title: "Каталог снегоболотоходов «Росомаха» | Модели и цены",
-      description: "Каталог моделей «Росомаха»: снегоболотоходы, пикапы, шестиколесники и прицепы. Сравните комплектации и цены.",
+      title: "Квадроциклы-вездеходы «Росомаха» — модели и цены",
+      description: "Каталог квадроциклов-вездеходов «Росомаха» от завода: снегоболотоходы, пикапы, шестиколёсники и прицепы. Сравните модели, комплектации и цены.",
       canonicalPath: "/catalog",
       image: DEFAULT_IMAGE,
       ogType: "website",
@@ -663,8 +657,11 @@ function getDynamicSeo(pathname: string): SeoPayload | null {
       return null;
     }
 
+    const isTrailer = product.category === "trailer";
     const payload: SeoPayload = {
-      title: `${product.name} | Купить снегоболотоход «Росомаха»`,
+      title: isTrailer
+        ? `${product.name} | Купить прицеп «Росомаха»`
+        : `${product.name} | Купить квадроцикл-вездеход «Росомаха»`,
       description: truncateDescription(product.description),
       canonicalPath: `/catalog/${product.slug}`,
       image: product.gallery[0] || DEFAULT_IMAGE,

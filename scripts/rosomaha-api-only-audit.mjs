@@ -411,7 +411,10 @@ const webmaster = {
   summary: webmasterRequest(env, "/summary/"),
   diagnostics: webmasterRequest(env, "/diagnostics/"),
   sitemaps: webmasterRequest(env, "/sitemaps/"),
-  queries: webmasterRequest(env, "/search-queries/popular/?order_by=TOTAL_SHOWS"),
+  queries: webmasterRequest(
+    env,
+    "/search-queries/popular/?order_by=TOTAL_SHOWS&query_indicator=TOTAL_SHOWS&query_indicator=TOTAL_CLICKS&query_indicator=AVG_SHOW_POSITION&query_indicator=AVG_CLICK_POSITION&limit=500",
+  ),
 };
 
 const report = {

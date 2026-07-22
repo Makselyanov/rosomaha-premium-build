@@ -289,12 +289,22 @@ async function main() {
   const products = fs.existsSync(productsSourcePath) ? parseProducts() : [];
   const latestArticle = getLatestArticle(articles);
   const sampleProduct = getSampleProduct(products);
-  const [summary, diagnostics, indexingHistory, searchInSearch, sitemaps] = await Promise.all([
+  const queryParams = new URLSearchParams({
+    order_by: "TOTAL_SHOWS",
+    limit: "500",
+  });
+  for (const indicator of ["TOTAL_SHOWS", "TOTAL_CLICKS", "AVG_SHOW_POSITION", "AVG_CLICK_POSITION"]) {
+    queryParams.append("query_indicator", indicator);
+  }
+
+  const [summary, diagnostics, indexingHistory, searchInSearch, sitemaps, popularQueries, inSearchSamples] = await Promise.all([
     requestJson(`${apiBase}/summary/`, token),
     requestJson(`${apiBase}/diagnostics/`, token),
     requestJson(`${apiBase}/indexing/history/`, token),
     requestJson(`${apiBase}/search-urls/in-search/history/`, token),
     requestJson(`${apiBase}/sitemaps/`, token),
+    requestJson(`${apiBase}/search-queries/popular/?${queryParams.toString()}`, token),
+    requestJson(`${apiBase}/search-urls/in-search/samples/`, token),
   ]);
 
   const sampleUrls = [
@@ -314,6 +324,21 @@ async function main() {
   const excludedLatest = indexingHistory.indicators?.EXCLUDED_BY_NOINDEX?.at(-1)?.value ?? 0;
   const lastAccessedAt = summary.last_access?.last_access_time || "n/a";
   const tokenExpiresAt = env.YANDEX_WEBMASTER_TOKEN_EXPIRES_AT || "n/a";
+  const queryRows = popularQueries.queries || [];
+  const indexedSamples = inSearchSamples.samples || [];
+  const parameterSamples = indexedSamples.filter((sample) => sample.url.includes("?"));
+  const trailingSlashSamples = indexedSamples.filter((sample) => {
+    try {
+      const parsed = new URL(sample.url);
+      return parsed.pathname !== "/" && parsed.pathname.endsWith("/");
+    } catch {
+      return false;
+    }
+  });
+  const queryValue = (query, key) => {
+    const value = Number(query.indicators?.[key]);
+    return Number.isFinite(value) ? value : 0;
+  };
 
   const lines = [
     `# SEO report for ${baseUrl}`,
@@ -342,6 +367,28 @@ async function main() {
     ...((sitemaps.sitemaps || []).map((entry) =>
       `- ${entry.sitemap_url} | urls=${entry.urls_count} | errors=${entry.errors_count} | processed=${entry.processed ?? "n/a"} | pending=${entry.pending ?? "n/a"}`
     )),
+    "",
+    "## Popular Yandex queries",
+    "",
+    `- Period: ${popularQueries.date_from || "n/a"} - ${popularQueries.date_to || "n/a"}`,
+    `- Queries available: ${popularQueries.count ?? queryRows.length}`,
+    "",
+    "| Query | Shows | Clicks | Avg. show position | Avg. click position |",
+    "|---|---:|---:|---:|---:|",
+    ...queryRows.slice(0, 40).map((query) => {
+      const safeText = String(query.query_text || "").replaceAll("|", "\\|");
+      const showPosition = queryValue(query, "AVG_SHOW_POSITION");
+      const clickPosition = queryValue(query, "AVG_CLICK_POSITION");
+      return `| ${safeText} | ${queryValue(query, "TOTAL_SHOWS")} | ${queryValue(query, "TOTAL_CLICKS")} | ${showPosition ? showPosition.toFixed(1) : "-"} | ${clickPosition ? clickPosition.toFixed(1) : "-"} |`;
+    }),
+    "",
+    "## Indexed URL sample quality",
+    "",
+    `- URLs in sample response: ${indexedSamples.length} of ${inSearchSamples.count ?? "n/a"}`,
+    `- Parameter variants in sample: ${parameterSamples.length}`,
+    `- Trailing-slash variants in sample: ${trailingSlashSamples.length}`,
+    ...parameterSamples.slice(0, 10).map((sample) => `- Parameter sample: ${sample.url}`),
+    ...trailingSlashSamples.slice(0, 10).map((sample) => `- Trailing-slash sample: ${sample.url}`),
     "",
     "## Sample route head checks",
     "",

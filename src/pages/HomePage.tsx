@@ -87,12 +87,12 @@ export default function HomePage() {
               className="max-w-4xl"
             >
               <h1 className="text-[1.75rem] sm:text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-display font-bold mb-3 sm:mb-6 leading-tight">
-                Ваши возможности —{' '}
-                <span className="text-gradient">безграничны!</span>
+                Квадроциклы-вездеходы{' '}
+                <span className="text-gradient">«Росомаха»</span>
               </h1>
               <p className="text-sm sm:text-xl md:text-2xl text-muted-foreground mb-4 sm:mb-8 max-w-2xl">
-                Квадроциклы-вездеходы РОСОМАХА. Российское производство,
-                японская надёжность, проходимость без компромиссов.
+                Официальный сайт завода-изготовителя. Российское производство,
+                японская надёжность и проходимость без компромиссов.
               </p>
 
               <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6 sm:mb-16">

@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite --host --port 8080",
-        "build": "node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs",
+        "build": "node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs && node scripts/audit-prerender-seo.mjs",
         "build:dev": "vite build --mode development",
         "lint": "eslint .",
         "preview": "vite preview",
@@ -14,7 +14,8 @@
         "seo:gsc:oauth": "node scripts/gsc-oauth-current-tab.mjs",
         "api:doctor": "node scripts/rosomaha-api-doctor.mjs",
         "audit:api-only": "node scripts/rosomaha-api-only-audit.mjs",
-        "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs"
+        "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs",
+        "audit:seo-prerender": "node scripts/audit-prerender-seo.mjs"
     },
     "dependencies": {
         "@hookform/resolvers": "^3.10.0",

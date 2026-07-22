@@ -101,7 +101,7 @@ export default function CatalogPage() {
             <motion.div initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} className="max-w-3xl">
               <div className="flex flex-wrap gap-3 mb-6">
                 <span className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-primary">
-                  Снегоболотоходы с завода
+                  Квадроциклы-вездеходы с завода
                 </span>
                 <span className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
                   Охота, рыбалка, вахта, экспедиции
@@ -109,13 +109,13 @@ export default function CatalogPage() {
               </div>
 
               <h1 className="text-4xl md:text-5xl xl:text-6xl font-display font-bold leading-[0.98] tracking-tight mb-6">
-                Каталог снегоболотоходов «Росомаха»
+                Квадроциклы-вездеходы «Росомаха»: модели и цены
               </h1>
 
               <p className="text-lg md:text-xl text-muted-foreground leading-relaxed max-w-2xl mb-8">
-                Подбирайте технику под реальные маршруты, полезную нагрузку и сезон эксплуатации. В каталоге собраны
-                классические снегоболотоходы, пикапы, шестиколёсники и плавающий прицеп для тяжёлых задач и уверенной
-                работы вне дорог.
+                Официальный каталог завода: подбирайте технику под реальные маршруты, полезную нагрузку и сезон эксплуатации.
+                Здесь собраны квадроциклы-вездеходы, снегоболотоходы, пикапы, шестиколёсники и плавающий прицеп для
+                тяжёлых задач и уверенной работы вне дорог.
               </p>
 
               <div className="flex flex-col sm:flex-row gap-4">
