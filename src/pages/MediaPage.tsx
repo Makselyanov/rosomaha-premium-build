@@ -23,6 +23,21 @@ const channelLinks: ChannelLink[] = [
 
 const youtubeVideos: VideoItem[] = [
   {
+    title: 'Росомаха Пикап Стандарт — обзор',
+    embed: 'https://www.youtube-nocookie.com/embed/P4WNOc1F9fk?rel=0',
+    href: 'https://www.youtube.com/watch?v=P4WNOc1F9fk',
+  },
+  {
+    title: 'Кабинная Росомаха — первый заплыв',
+    embed: 'https://www.youtube-nocookie.com/embed/3aQFmXvAMGs?rel=0',
+    href: 'https://www.youtube.com/watch?v=3aQFmXvAMGs',
+  },
+  {
+    title: 'Росомаха в охотничьих угодьях',
+    embed: 'https://www.youtube-nocookie.com/embed/SuYmkVknU8g?rel=0',
+    href: 'https://www.youtube.com/watch?v=SuYmkVknU8g',
+  },
+  {
     title: 'Тест на воде / Кабинная Росомаха',
     embed: 'https://www.youtube-nocookie.com/embed/vxVESZUIcVw?rel=0',
     href: 'https://www.youtube.com/watch?v=vxVESZUIcVw',
