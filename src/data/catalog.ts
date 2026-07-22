@@ -70,7 +70,31 @@ function toCatalogCardModel(product: Product): CatalogCardModel {
   };
 }
 
-export const catalogModels = products.map(toCatalogCardModel);
+const catalogOrder = [
+  'pro-4x4-toyota',
+  'eger-1',
+  'standart-plus-suzuki',
+  'standart-plus-uaz',
+  'extrime-uaz',
+  'extrime-toyota',
+  'extrime-plus-toyota',
+  'hunter-toyota',
+  'pickup-uaz-timken',
+  'pickup-uaz-18',
+  'pickup-toyota',
+  'sixwheel-toyota',
+  'trailer',
+] as const;
+
+const catalogOrderById = new Map(catalogOrder.map((id, index) => [id, index]));
+
+export const catalogModels = products
+  .map(toCatalogCardModel)
+  .sort((left, right) => {
+    const leftIndex = catalogOrderById.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = catalogOrderById.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+    return leftIndex - rightIndex;
+  });
 
 export const featuredCatalogModels = catalogModels.slice(0, 12);
 

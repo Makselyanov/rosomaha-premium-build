@@ -13,7 +13,8 @@
         "seo:gsc": "node scripts/gsc-report.mjs",
         "seo:gsc:oauth": "node scripts/gsc-oauth-current-tab.mjs",
         "api:doctor": "node scripts/rosomaha-api-doctor.mjs",
-        "audit:api-only": "node scripts/rosomaha-api-only-audit.mjs"
+        "audit:api-only": "node scripts/rosomaha-api-only-audit.mjs",
+        "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs"
     },
     "dependencies": {
         "@hookform/resolvers": "^3.10.0",
@@ -51,7 +52,9 @@
         "date-fns": "^3.6.0",
         "embla-carousel-react": "^8.6.0",
         "framer-motion": "^12.23.26",
+        "html2canvas": "^1.4.1",
         "input-otp": "^1.4.2",
+        "jspdf": "^4.2.1",
         "leaflet": "^1.9.4",
         "lucide-react": "^0.462.0",
         "next-themes": "^0.3.0",

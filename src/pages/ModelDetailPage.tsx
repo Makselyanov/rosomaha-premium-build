@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, ShoppingCart, Check, Phone, Printer, ArrowRight, Compass, Newspaper } from 'lucide-react';
+import { ArrowLeft, ShoppingCart, Check, Phone, Download, Share2, Loader2, ArrowRight, Compass, Newspaper } from 'lucide-react';
 import { applications } from '@/data/applications';
 import { articles } from '@/data/articles';
 import { products, productColors } from '@/data/products';
@@ -15,6 +15,7 @@ import VariantSelector from '@/components/VariantSelector';
 import ProductOptions from '@/components/ProductOptions';
 import { officePhone, primaryPhone } from '@/data/contactInfo';
 import { trackAddToCart, trackPhoneClick } from '@/lib/metrika';
+import { downloadConfigurationPdf, shareConfigurationPdf } from '@/lib/configurationPdf';
 
 export default function ModelDetailPage() {
   const { slug } = useParams();
@@ -27,6 +28,7 @@ export default function ModelDetailPage() {
   const [selectedVariant, setSelectedVariant] = useState(defaultVariant);
   const [selectedColor, setSelectedColor] = useState(product?.colors[0]?.id || '');
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
+  const [pdfAction, setPdfAction] = useState<'download' | 'share' | null>(null);
 
   // Computed
   const currentVariant = useMemo(
@@ -143,91 +145,70 @@ export default function ModelDetailPage() {
     toggleCart();
   };
 
-  const handlePrint = () => {
-    const printContent = `
-      <html>
-        <head>
-          <title>Конфигурация — ${product.name}</title>
-          <style>
-            body { font-family: Arial, sans-serif; padding: 40px; color: #333; }
-            h1 { font-size: 24px; margin-bottom: 10px; }
-            h2 { font-size: 18px; color: #666; margin-bottom: 30px; }
-            .section { margin-bottom: 25px; }
-            .section-title { font-weight: bold; margin-bottom: 10px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
-            .row { display: flex; justify-content: space-between; padding: 5px 0; }
-            .label { color: #666; }
-            .value { font-weight: bold; }
-            .total { font-size: 20px; margin-top: 30px; padding-top: 20px; border-top: 2px solid #333; }
-            .options-list { margin-left: 20px; }
-            .option-item { padding: 3px 0; }
-          </style>
-        </head>
-        <body>
-          <h1>Росомаха</h1>
-          <h2>${product.name}</h2>
-          
-          <div class="section">
-            <div class="section-title">Комплектация</div>
-            <div class="row">
-              <span class="label">Выбрано:</span>
-              <span class="value">${currentVariant?.name}</span>
-            </div>
-            <div class="row">
-              <span class="label">Базовая цена:</span>
-              <span class="value">${currentVariant?.priceFormatted}</span>
-            </div>
-          </div>
-          
-          <div class="section">
-            <div class="section-title">Цвет кузова</div>
-            <div class="row">
-              <span class="label">${currentColor.ral}</span>
-              <span class="value">${currentColor.name}</span>
-            </div>
-          </div>
-          
-          ${selectedOptionsData.length > 0 ? `
-          <div class="section">
-            <div class="section-title">Дополнительные опции</div>
-            <div class="options-list">
-              ${selectedOptionsData.map(o => `
-                <div class="option-item row">
-                  <span>${o.name}</span>
-                  <span class="value">${o.priceFormatted}</span>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-          ` : ''}
-          
-          <div class="section">
-            <div class="section-title">Характеристики</div>
-            ${product.specs.engine ? `<div class="row"><span class="label">Двигатель:</span><span class="value">${product.specs.engine}</span></div>` : ''}
-            ${product.specs.power ? `<div class="row"><span class="label">Мощность:</span><span class="value">${product.specs.power} л.с.</span></div>` : ''}
-            ${product.specs.axles ? `<div class="row"><span class="label">Мосты:</span><span class="value">${product.specs.axles}</span></div>` : ''}
-            ${product.specs.speed ? `<div class="row"><span class="label">Макс. скорость:</span><span class="value">${product.specs.speed} км/ч</span></div>` : ''}
-          </div>
-          
-          <div class="total row">
-            <span>ИТОГО:</span>
-            <span class="value">${formatPrice(totalPrice)}</span>
-          </div>
-          
-          <p style="margin-top: 40px; color: #999; font-size: 12px;">
-            Дата: ${new Date().toLocaleDateString('ru-RU')}<br/>
-            Телефон / WhatsApp: ${primaryPhone.display}<br/>
-            Офис: ${officePhone.display}<br/>
-            xn--80aa8ahaki9a.site
-          </p>
-        </body>
-      </html>
-    `;
+  const getPdfInput = () => {
+    if (!currentVariant || !currentColor) {
+      return null;
+    }
 
-    const printWindow = window.open('', '_blank');
-    if (printWindow) {
-      printWindow.document.write(printContent);
-      printWindow.document.close();
-      printWindow.print();
+    return {
+      product,
+      variant: currentVariant,
+      color: currentColor,
+      options: selectedOptionsData,
+      totalPrice,
+      imageUrl: galleryImages[0],
+    };
+  };
+
+  const handlePdfDownload = async () => {
+    const input = getPdfInput();
+    if (!input) return;
+
+    setPdfAction('download');
+    try {
+      await downloadConfigurationPdf(input);
+      toast({
+        title: 'PDF готов',
+        description: 'Конфигурация сохранена в загрузки устройства.',
+      });
+    } catch (error) {
+      console.error('PDF generation failed', error);
+      toast({
+        title: 'Не удалось создать PDF',
+        description: 'Попробуйте ещё раз или отправьте заявку менеджеру.',
+        variant: 'destructive',
+      });
+    } finally {
+      setPdfAction(null);
+    }
+  };
+
+  const handlePdfShare = async () => {
+    const input = getPdfInput();
+    if (!input) return;
+
+    setPdfAction('share');
+    try {
+      const result = await shareConfigurationPdf(input);
+      toast({
+        title: result === 'shared' ? 'Конфигурация отправлена' : 'PDF готов',
+        description:
+          result === 'shared'
+            ? 'PDF передан в выбранное приложение.'
+            : 'На этом устройстве PDF сохранён в загрузки.',
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      console.error('PDF sharing failed', error);
+      toast({
+        title: 'Не удалось отправить PDF',
+        description: 'Скачайте файл и отправьте его вручную.',
+        variant: 'destructive',
+      });
+    } finally {
+      setPdfAction(null);
     }
   };
 
@@ -341,14 +322,34 @@ export default function ModelDetailPage() {
             />
 
             {/* Actions */}
-            <div className="flex flex-col sm:flex-row gap-4 pt-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-4">
               <button onClick={handleAddToCart} className="btn-primary flex-1">
                 <ShoppingCart className="mr-2 w-5 h-5" />
                 В корзину
               </button>
-              <button onClick={handlePrint} className="btn-secondary flex-1">
-                <Printer className="mr-2 w-5 h-5" />
-                Распечатать
+              <button
+                onClick={handlePdfDownload}
+                disabled={pdfAction !== null}
+                className="btn-secondary flex-1 disabled:cursor-wait disabled:opacity-60"
+              >
+                {pdfAction === 'download' ? (
+                  <Loader2 className="mr-2 w-5 h-5 animate-spin" />
+                ) : (
+                  <Download className="mr-2 w-5 h-5" />
+                )}
+                Скачать PDF
+              </button>
+              <button
+                onClick={handlePdfShare}
+                disabled={pdfAction !== null}
+                className="btn-secondary sm:col-span-2 disabled:cursor-wait disabled:opacity-60"
+              >
+                {pdfAction === 'share' ? (
+                  <Loader2 className="mr-2 w-5 h-5 animate-spin" />
+                ) : (
+                  <Share2 className="mr-2 w-5 h-5" />
+                )}
+                Отправить конфигурацию
               </button>
             </div>
 
