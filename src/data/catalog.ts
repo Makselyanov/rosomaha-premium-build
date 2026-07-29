@@ -86,15 +86,12 @@ const catalogOrder = [
   'trailer',
 ] as const;
 
-const catalogOrderById = new Map(catalogOrder.map((id, index) => [id, index]));
+const productsById = new Map(products.map((product) => [product.id, product]));
 
-export const catalogModels = products
-  .map(toCatalogCardModel)
-  .sort((left, right) => {
-    const leftIndex = catalogOrderById.get(left.id) ?? Number.MAX_SAFE_INTEGER;
-    const rightIndex = catalogOrderById.get(right.id) ?? Number.MAX_SAFE_INTEGER;
-    return leftIndex - rightIndex;
-  });
+export const catalogModels = catalogOrder
+  .map((id) => productsById.get(id))
+  .filter((product): product is Product => Boolean(product))
+  .map(toCatalogCardModel);
 
 export const featuredCatalogModels = catalogModels.slice(0, 12);
 
