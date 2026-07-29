@@ -515,12 +515,18 @@ function resolveProductImage(rawToken, assetImports) {
 
 function parseProducts() {
   const source = readText(path.join(sourceDir, "products.ts"));
+  const catalogSource = readText(path.join(sourceDir, "catalog.ts"));
   const assetImports = parseProductAssetImports(source);
   const productsArray = extractArrayBody(source, "export const products: Product[] = [");
   const productBlocks = extractObjectBlocks(productsArray);
+  const catalogOrder = [
+    ...extractArrayBody(catalogSource, "const catalogOrder = [").matchAll(/'([^']+)'/g),
+  ].map((match) => match[1]);
+  const catalogOrderById = new Map(catalogOrder.map((id, index) => [id, index]));
 
   return productBlocks
     .map((block) => {
+      const idMatch = block.match(/^\s*\{\s*id:\s*'([^']+)'/s);
       const slugMatch = block.match(/slug:\s*'([^']+)'/);
       const nameMatch = block.match(/name:\s*'([^']+)'/);
       const descriptionMatch = block.match(/description:\s*'([^']+)'/);
@@ -529,7 +535,7 @@ function parseProducts() {
       const categoryMatch = block.match(/category:\s*'([^']+)'/);
       const galleryMatch = block.match(/gallery:\s*\[([\s\S]*?)\],\s*thumbnails:/);
 
-      if (!slugMatch || !nameMatch || !descriptionMatch) {
+      if (!idMatch || !slugMatch || !nameMatch || !descriptionMatch) {
         return null;
       }
 
@@ -542,6 +548,7 @@ function parseProducts() {
         .find(Boolean);
 
       return {
+        id: idMatch[1],
         slug: slugMatch[1],
         name: nameMatch[1],
         description: descriptionMatch[1],
@@ -551,7 +558,12 @@ function parseProducts() {
         image: image || defaultImage,
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftIndex = catalogOrderById.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = catalogOrderById.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+      return leftIndex - rightIndex;
+    });
 }
 
 function replaceAll(template, replacements) {
