@@ -59,6 +59,7 @@ const optionCategories: OptionCategory[] = [
 const optionCategoryById: Record<string, Exclude<OptionsCategoryId, 'all'>> = {
   trailer: 'cargo',
   'tires-avtoros': 'traction',
+  'tire-bagira': 'traction',
   'kofr-side-improved': 'cargo',
   'kofr-side-standard': 'cargo',
   'kofr-front': 'cargo',

@@ -9,7 +9,6 @@ import eger1Ral9010 from '@/assets/eger1-ral9010.png';
 // Локальные изображения для новых моделей
 import modelPikapUaz from '@/assets/model-pikap-uaz.png';
 import modelExtrimePlus from '@/assets/model-extrime-plus.png';
-import modelHunter from '@/assets/model-hunter.jpg';
 import modelPikap18l from '@/assets/model-pikap-18l.jpg';
 import modelPikapToyota from '@/assets/model-pikap-toyota.jpg';
 import modelPro1 from '@/assets/model-pro-1.jpg';
@@ -153,6 +152,13 @@ export const productOptions: ProductOption[] = [
     price: 150000,
     priceFormatted: '150 000 ₽',
     image: '/upload/iblock/73a/cc53t6mbf7qdj7ssciy503lxi4ed075s.jpg',
+  },
+  {
+    id: 'tire-bagira',
+    name: 'Шина «Багира» (1200 х 530)',
+    price: 60000,
+    priceFormatted: '60 000 ₽',
+    image: '/upload/iblock/f87/3jsk5h67d0tg2igtv5n2gdejubimtqqw.jpeg',
   },
   {
     id: 'kofr-side-improved',
@@ -701,14 +707,14 @@ export const products: Product[] = [
     available: true,
     badge: 'recommended',
     gallery: [
-      '/upload/resize_cache/iblock/120/2000_2000_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
       '/upload/iblock/e3f/fp29uetch26r3jkiwceu3b3cs35ebixz.jpg',
+      '/upload/resize_cache/iblock/120/2000_2000_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
       '/upload/resize_cache/iblock/44b/2000_2000_140cd750bba9870f18aada2478b24840a/juwpyfhlr74jixlhaqr56u087uweyrhn.jpg',
       '/upload/resize_cache/iblock/b2e/2000_2000_140cd750bba9870f18aada2478b24840a/xnndhw0nc1bpglasqxv32bxs257lrnld.png',
     ],
     thumbnails: [
-      '/upload/resize_cache/iblock/120/50_50_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
       '/upload/resize_cache/iblock/e3f/50_50_140cd750bba9870f18aada2478b24840a/fp29uetch26r3jkiwceu3b3cs35ebixz.jpg',
+      '/upload/resize_cache/iblock/120/50_50_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
     ],
     variants: classicVariants,
     colors: productColors,
@@ -741,11 +747,12 @@ export const products: Product[] = [
     available: true,
     badge: 'recommended',
     gallery: [
-      '/upload/resize_cache/iblock/120/2000_2000_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
       '/upload/iblock/e3f/fp29uetch26r3jkiwceu3b3cs35ebixz.jpg',
+      '/upload/resize_cache/iblock/120/2000_2000_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
       '/upload/resize_cache/iblock/b2e/2000_2000_140cd750bba9870f18aada2478b24840a/xnndhw0nc1bpglasqxv32bxs257lrnld.png',
     ],
     thumbnails: [
+      '/upload/resize_cache/iblock/e3f/50_50_140cd750bba9870f18aada2478b24840a/fp29uetch26r3jkiwceu3b3cs35ebixz.jpg',
       '/upload/resize_cache/iblock/120/50_50_140cd750bba9870f18aada2478b24840a/z5q84tbm8djjahtkvda0r4bhba54lk80.png',
     ],
     variants: classicVariants,
@@ -982,8 +989,8 @@ export const products: Product[] = [
     priceFormatted: 'от 2 180 000 ₽',
     available: true,
     badge: 'recommended',
-    gallery: [modelHunter],
-    thumbnails: [modelHunter],
+    gallery: ['/upload/iblock/312/1t1bjxwj1n1t9xzm95368ulnqngi1ni9.jpg'],
+    thumbnails: ['/upload/iblock/312/1t1bjxwj1n1t9xzm95368ulnqngi1ni9.jpg'],
     variants: classicVariants,
     colors: productColors,
     options: productOptions,
