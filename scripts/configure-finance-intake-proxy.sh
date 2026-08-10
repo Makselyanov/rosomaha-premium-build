@@ -112,10 +112,57 @@ token_hash="$(printf '%s' "$token" | sha256sum | awk '{print $1}')"
 
 token_candidate="$(mktemp "$SECRET_DIR/.finance-intake-token.XXXXXX")"
 secret_candidate="$(mktemp "$NGINX_SECRET_DIR/.rosomaha-finance-secret.XXXXXX")"
+token_backup="$(mktemp "$SECRET_DIR/.finance-intake-token-backup.XXXXXX")"
+secret_backup="$(mktemp "$NGINX_SECRET_DIR/.rosomaha-finance-secret-backup.XXXXXX")"
+token_had_previous=0
+secret_had_previous=0
+rollback_needed=0
+
+if [[ -f "$TOKEN_FILE" ]]; then
+  install -m 600 -o root -g root -- "$TOKEN_FILE" "$token_backup"
+  token_had_previous=1
+fi
+if [[ -f "$NGINX_SECRET_FILE" ]]; then
+  install -m 600 -o root -g root -- "$NGINX_SECRET_FILE" "$secret_backup"
+  secret_had_previous=1
+fi
 
 cleanup() {
-  rm -f -- "$token_candidate" "$secret_candidate"
+  status=$?
+  trap - EXIT
+  set +e
+
+  if (( status != 0 && rollback_needed == 1 )); then
+    # Keep the CRM closed while restoring the last known disk/runtime pair.
+    run_finance_command off >/dev/null 2>&1
+
+    if (( token_had_previous == 1 )); then
+      install -m 600 -o root -g root -- "$token_backup" "$TOKEN_FILE"
+    else
+      rm -f -- "$TOKEN_FILE"
+    fi
+    if (( secret_had_previous == 1 )); then
+      install -m 600 -o root -g root -- "$secret_backup" "$NGINX_SECRET_FILE"
+    else
+      rm -f -- "$NGINX_SECRET_FILE"
+    fi
+
+    if "$NGINX_BIN" -t >/dev/null 2>&1; then
+      "$SYSTEMCTL_BIN" reload nginx >/dev/null 2>&1
+    else
+      # On a first install the canonical site config may already require the
+      # new include. Retain the validated candidate pair, but leave CRM OFF.
+      install -m 600 -o root -g root -- "$token_candidate" "$TOKEN_FILE"
+      install -m 600 -o root -g root -- "$secret_candidate" "$NGINX_SECRET_FILE"
+      if "$NGINX_BIN" -t >/dev/null 2>&1; then
+        "$SYSTEMCTL_BIN" reload nginx >/dev/null 2>&1
+      fi
+    fi
+  fi
+
+  rm -f -- "$token_candidate" "$secret_candidate" "$token_backup" "$secret_backup"
   unset token token_hash
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -126,11 +173,11 @@ chown root:root "$token_candidate" "$secret_candidate"
 
 install -m 600 -o root -g root -- "$token_candidate" "$TOKEN_FILE"
 install -m 600 -o root -g root -- "$secret_candidate" "$NGINX_SECRET_FILE"
+rollback_needed=1
 unset token
 
 if ! "$NGINX_BIN" -t >/dev/null 2>&1; then
-  run_finance_command off >/dev/null 2>&1 || true
-  fail "Nginx configuration test failed; tenant intake was left OFF."
+  fail "Nginx configuration test failed; the prior proxy files will be restored and tenant intake left OFF."
 fi
 
 validate_active_proxy
@@ -139,8 +186,9 @@ validate_active_proxy
 # proxy begins using the new token. The unavailable interval is one reload.
 run_finance_command off >/dev/null
 if ! "$SYSTEMCTL_BIN" reload nginx; then
-  fail "Nginx reload failed; tenant intake was left OFF."
+  fail "Nginx reload failed; the prior proxy files will be restored and tenant intake left OFF."
 fi
 
 run_finance_command on --token-sha256="$token_hash"
+rollback_needed=0
 echo "Nginx finance proxy: active"

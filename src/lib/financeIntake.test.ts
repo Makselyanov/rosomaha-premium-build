@@ -16,7 +16,7 @@ test("privacy metadata is fail closed", () => {
   assert.equal(
     parseFinancePrivacyMetadata({
       status: "ok",
-      privacy_document: { kind: "finance", version: "v1", title: "Согласие", text: "", sha256: "abc" },
+      privacy_document: { kind: "personal_data_processing", version: "v1", title: "Согласие", text: "", sha256: "a".repeat(64) },
     }),
     null,
   );
@@ -24,9 +24,24 @@ test("privacy metadata is fail closed", () => {
   assert.equal(
     parseFinancePrivacyMetadata({
       status: "ok",
-      privacy_document: { kind: "finance", version: "v1", title: "Согласие", text: "Текст", sha256: "abc" },
+      privacy_document: { kind: "personal_data_processing", version: "v1", title: "Согласие", text: "Текст", sha256: "a".repeat(64) },
     })?.version,
     "v1",
+  );
+
+  assert.equal(
+    parseFinancePrivacyMetadata({
+      status: "ok",
+      privacy_document: { kind: "finance", version: "v1", title: "Согласие", text: "Текст", sha256: "a".repeat(64) },
+    }),
+    null,
+  );
+  assert.equal(
+    parseFinancePrivacyMetadata({
+      status: "ok",
+      privacy_document: { kind: "personal_data_processing", version: "v1", title: "Согласие", text: "Текст", sha256: "abc" },
+    }),
+    null,
   );
 });
 
@@ -73,20 +88,48 @@ test("payload uses fixed public source and remains immutable", () => {
   assert.equal(payload.source_form, "credit_calculator");
   assert.equal(payload.privacy_accepted, true);
   assert.equal(payload.city, "Тюмень");
+  assert.equal(payload.product_name, "Росомаха");
+  assert.equal(payload.down_payment_amount, 300_000);
+  assert.equal(payload.desired_term_months, 36);
+  assert.equal("product" in payload, false);
+  assert.equal("down_payment" in payload, false);
+  assert.equal("term_months" in payload, false);
   assert.equal("email" in payload, false);
   assert.deepEqual(payload.attribution, { utm_source: "yandex" });
   assert.equal(Object.isFrozen(payload), true);
   assert.equal(Object.isFrozen(payload.attribution), true);
 });
 
-test("receipt requires exact echoed id and opaque nonempty receipt", () => {
+test("receipt requires exact echoed id and exact opaque receipt", () => {
   const submissionId = "rosomaha-10000000000-test";
   assert.equal(
-    isAcceptedFinanceReceipt(201, { status: "ok", receipt_id: "fin_opaque", lead_submission_id: submissionId }, submissionId),
+    isAcceptedFinanceReceipt(200, {
+      status: "ok",
+      receipt_id: `fin_${"a".repeat(32)}`,
+      lead_submission_id: submissionId,
+      created: false,
+      deduplicated: true,
+    }, submissionId),
     true,
   );
   assert.equal(
-    isAcceptedFinanceReceipt(201, { status: "ok", receipt_id: "fin_opaque", lead_submission_id: "other" }, submissionId),
+    isAcceptedFinanceReceipt(201, {
+      status: "ok",
+      receipt_id: `fin_${"b".repeat(32)}`,
+      lead_submission_id: submissionId,
+      created: true,
+      deduplicated: false,
+    }, submissionId),
+    true,
+  );
+  assert.equal(
+    isAcceptedFinanceReceipt(201, {
+      status: "ok",
+      receipt_id: `fin_${"b".repeat(32)}`,
+      lead_submission_id: "other",
+      created: true,
+      deduplicated: false,
+    }, submissionId),
     false,
   );
   assert.equal(
@@ -94,7 +137,33 @@ test("receipt requires exact echoed id and opaque nonempty receipt", () => {
     false,
   );
   assert.equal(
-    isAcceptedFinanceReceipt(202, { status: "ok", receipt_id: "fin_opaque", lead_submission_id: submissionId }, submissionId),
+    isAcceptedFinanceReceipt(201, { status: "ok", receipt_id: 123, lead_submission_id: submissionId }, submissionId),
+    false,
+  );
+  assert.equal(
+    isAcceptedFinanceReceipt(201, { status: "ok", receipt_id: "fin_opaque", lead_submission_id: submissionId }, submissionId),
+    false,
+  );
+  assert.equal(
+    isAcceptedFinanceReceipt(201, {
+      status: "ok",
+      receipt_id: `fin_${"d".repeat(32)}`,
+      lead_submission_id: submissionId,
+      created: true,
+      deduplicated: true,
+    }, submissionId),
+    false,
+  );
+  assert.equal(
+    isAcceptedFinanceReceipt(201, {
+      status: "ok",
+      receipt_id: `fin_${"e".repeat(32)}`,
+      lead_submission_id: submissionId,
+    }, submissionId),
+    false,
+  );
+  assert.equal(
+    isAcceptedFinanceReceipt(202, { status: "ok", receipt_id: `fin_${"c".repeat(32)}`, lead_submission_id: submissionId }, submissionId),
     false,
   );
 });

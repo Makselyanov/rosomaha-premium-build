@@ -5,7 +5,8 @@
     "type": "module",
     "scripts": {
         "dev": "vite --host --port 8080",
-        "build": "node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs && node scripts/audit-prerender-seo.mjs",
+        "build": "node scripts/generate-finance-privacy.mjs && node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs && node scripts/audit-prerender-seo.mjs",
+        "generate:finance-privacy": "node scripts/generate-finance-privacy.mjs",
         "build:dev": "vite build --mode development",
         "lint": "eslint .",
         "preview": "vite preview",

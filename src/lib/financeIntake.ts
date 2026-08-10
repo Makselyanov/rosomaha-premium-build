@@ -16,7 +16,7 @@ export type FinancingType = (typeof FINANCING_TYPES)[number];
 export type FinanceSourceSite = (typeof FINANCE_SOURCE_SITES)[number];
 
 export type FinancePrivacyDocument = Readonly<{
-  kind: string;
+  kind: "personal_data_processing";
   version: string;
   title: string;
   text: string;
@@ -51,11 +51,11 @@ export type FinanceIntakePayload = Readonly<{
   phone: string;
   email?: string;
   city?: string;
-  product: string;
+  product_name: string;
   comment?: string;
   sale_amount: number;
-  down_payment: number;
-  term_months: number;
+  down_payment_amount: number;
+  desired_term_months: number;
   privacy_accepted: true;
   privacy_version: string;
   attribution: Readonly<FinanceAttribution>;
@@ -176,17 +176,18 @@ export function parseFinancePrivacyMetadata(value: unknown): FinancePrivacyDocum
 
   const document = value.privacy_document;
   if (
-    !nonEmptyString(document.kind) ||
+    document.kind !== "personal_data_processing" ||
     !nonEmptyString(document.version) ||
     !nonEmptyString(document.title) ||
     !nonEmptyString(document.text) ||
-    !nonEmptyString(document.sha256)
+    typeof document.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(document.sha256)
   ) {
     return null;
   }
 
   return Object.freeze({
-    kind: document.kind.trim(),
+    kind: document.kind,
     version: document.version.trim(),
     title: document.title.trim(),
     text: document.text,
@@ -206,11 +207,11 @@ export function buildFinanceIntakePayload(input: FinancePayloadInput): FinanceIn
     phone: input.phone,
     ...(optionalTrimmed(input.email) ? { email: optionalTrimmed(input.email) } : {}),
     ...(optionalTrimmed(input.city) ? { city: optionalTrimmed(input.city) } : {}),
-    product: input.product.trim(),
+    product_name: input.product.trim(),
     ...(optionalTrimmed(input.comment) ? { comment: optionalTrimmed(input.comment) } : {}),
     sale_amount: input.saleAmount,
-    down_payment: input.downPayment,
-    term_months: input.termMonths,
+    down_payment_amount: input.downPayment,
+    desired_term_months: input.termMonths,
     privacy_accepted: true,
     privacy_version: input.privacyVersion,
     attribution: filterFinanceAttribution(input.attribution),
@@ -248,7 +249,11 @@ export function isAcceptedFinanceReceipt(
   return (
     body.status === "ok" &&
     body.lead_submission_id === submissionId &&
-    nonEmptyString(body.receipt_id)
+    typeof body.receipt_id === "string" &&
+    /^fin_[a-f0-9]{32}$/.test(body.receipt_id) &&
+    typeof body.created === "boolean" &&
+    typeof body.deduplicated === "boolean" &&
+    body.created !== body.deduplicated
   );
 }
 

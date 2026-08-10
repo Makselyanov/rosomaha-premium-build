@@ -302,8 +302,9 @@ export default function FinanceCalculatorPage() {
         throw new Error(`Finance intake ${response.status}`);
       }
 
+      const receiptId = body.receipt_id.trim();
       writeFinanceReceipt({
-        receipt_id: body.receipt_id,
+        receipt_id: receiptId,
         lead_submission_id: leadSubmissionId,
         source_site: attempt.sourceSite,
         product_slug: selectedProduct.slug,
@@ -316,7 +317,7 @@ export default function FinanceCalculatorPage() {
       trackLeadSubmit({
         source: "finance_calculator",
         lead_submission_id: leadSubmissionId,
-        receipt_id: body.receipt_id,
+        receipt_id: receiptId,
         product_slug: selectedProduct.slug,
         financing_type: financingType,
         applicant_type: applicantType,
