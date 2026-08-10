@@ -13,6 +13,7 @@ const navigation = [
   { name: 'Опции', href: '/options' },
   { name: 'Статьи', href: '/articles' },
   { name: 'Видео', href: '/media' },
+  { name: 'Финансирование', shortName: 'Финансы', href: '/finansirovanie' },
   { name: 'Доставка и оплата', shortName: 'Доставка', href: '/delivery' },
   { name: 'Контакты', href: '/contacts' },
   { name: 'Дилеры', href: '/dealers' },

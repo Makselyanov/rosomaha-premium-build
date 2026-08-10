@@ -480,6 +480,14 @@ function getStaticSeo(pathname: string): SeoPayload | null {
       ogType: "website",
       robots: "index,follow",
     },
+    "/finansirovanie": {
+      title: "Финансирование техники «Росомаха» | Калькулятор суммы",
+      description: "Рассчитайте сумму финансирования для модели «Росомаха». Укажите первоначальный взнос и желаемый срок, затем отправьте заявку на уточнение доступных условий.",
+      canonicalPath: "/finansirovanie",
+      image: DEFAULT_IMAGE,
+      ogType: "website",
+      robots: "index,follow",
+    },
     "/order": {
       title: "Заказать снегоболотоход «Росомаха» | Заявка на подбор",
       description: "Оставьте заявку на подбор комплектации снегоболотохода «Росомаха». Поможем подобрать модель под ваши задачи.",
@@ -576,6 +584,22 @@ function getStaticSeo(pathname: string): SeoPayload | null {
           dealers.filter((dealer) => dealer.region === "Тюменская область"),
           "Производство и партнёры РОСОМАХА в Тюменской области",
         ),
+      ],
+    };
+  }
+
+  if (pathname === "/finansirovanie") {
+    return {
+      ...staticPayload,
+      schema: [
+        buildWebPageSchema({
+          ...staticPayload,
+          schema: {},
+        }),
+        buildBreadcrumbSchema([
+          { name: "Главная", path: "/" },
+          { name: "Финансирование", path: "/finansirovanie" },
+        ]),
       ],
     };
   }

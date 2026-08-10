@@ -18,6 +18,7 @@ import DealersPage from "./pages/DealersPage";
 import TyumenDealersPage from "./pages/TyumenDealersPage";
 import ContactsPage from "./pages/ContactsPage";
 import DeliveryPage from "./pages/DeliveryPage";
+import FinanceCalculatorPage from "./pages/FinanceCalculatorPage";
 import MediaPage from "./pages/MediaPage";
 import OrderPage from "./pages/OrderPage";
 import ArticlesPage from "./pages/ArticlesPage";
@@ -57,6 +58,7 @@ const App = () => (
           <Route path="/dealers/tyumen" element={<TyumenDealersPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
           <Route path="/delivery" element={<DeliveryPage />} />
+          <Route path="/finansirovanie" element={<FinanceCalculatorPage />} />
           <Route path="/media" element={<MediaPage />} />
           <Route path="/order" element={<OrderPage />} />
           <Route path="/articles" element={<ArticlesPage />} />

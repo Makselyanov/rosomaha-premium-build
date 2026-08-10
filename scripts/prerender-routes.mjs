@@ -622,6 +622,7 @@ function buildStaticBody(routePath, route) {
     { href: "/", label: "Официальный сайт завода «Росомаха»" },
     { href: "/catalog", label: "Квадроциклы-вездеходы: модели и цены" },
     { href: "/applications", label: "Сферы применения" },
+    { href: "/finansirovanie", label: "Финансирование техники" },
     { href: "/delivery", label: "Доставка по России" },
     { href: "/dealers", label: "Дилеры" },
     { href: "/contacts", label: "Контакты производителя" },
@@ -653,6 +654,22 @@ function buildStaticBody(routePath, route) {
       <section>
         <h2>Техника под задачу</h2>
         <ul>${renderStaticLinks(applications.map((application) => ({ href: `/applications/${application.slug}`, label: application.title })))}</ul>
+      </section>`);
+  }
+
+  if (routePath === "/finansirovanie") {
+    sections.push(`
+      <section>
+        <h2>Как подготовить заявку на финансирование</h2>
+        <p>Выберите модель по актуальной цене каталога, укажите первоначальный взнос, желаемый срок и контактные данные. Калькулятор покажет только стоимость техники и сумму финансирования.</p>
+        <p>Ставка, график платежей и решение определяются после рассмотрения заявки. Подача заявки не гарантирует одобрение, а калькулятор не рассчитывает ежемесячный платёж.</p>
+      </section>
+      <section>
+        <h2>Модели «Росомаха» в каталоге</h2>
+        <ul>${renderStaticLinks(products.map((product) => ({
+          href: `/catalog/${product.slug}`,
+          label: product.name,
+        })))}</ul>
       </section>`);
   }
 
@@ -846,6 +863,27 @@ const routes = [
     image: defaultImage,
     ogType: "website",
     robots: "index,follow",
+  },
+  {
+    path: "/finansirovanie",
+    title: "Финансирование техники «Росомаха» | Калькулятор суммы",
+    description: "Рассчитайте сумму финансирования для модели «Росомаха». Укажите первоначальный взнос и желаемый срок, затем отправьте заявку на уточнение доступных условий.",
+    heading: "Финансирование техники «Росомаха»",
+    bodyText: "Выберите модель из каталога и рассчитайте сумму финансирования с учётом первоначального взноса. Укажите желаемый срок и отправьте заявку специалисту для уточнения доступных условий.",
+    image: defaultImage,
+    ogType: "website",
+    robots: "index,follow",
+    schema: [
+      buildWebPageSchema({
+        title: "Финансирование техники «Росомаха» | Калькулятор суммы",
+        description: "Рассчитайте сумму финансирования для модели «Росомаха». Укажите первоначальный взнос и желаемый срок, затем отправьте заявку на уточнение доступных условий.",
+        canonical: `${baseUrl}/finansirovanie`,
+      }),
+      buildBreadcrumbSchema([
+        { name: "Главная", path: "/" },
+        { name: "Финансирование", path: "/finansirovanie" },
+      ]),
+    ],
   },
   {
     path: "/order",

@@ -36,6 +36,7 @@ export default function Footer() {
                 { name: 'Дополнительные опции', href: '/options' },
                 { name: 'Статьи', href: '/articles' },
                 { name: 'Видео', href: '/media' },
+                { name: 'Финансирование', href: '/finansirovanie' },
                 { name: 'Доставка и оплата', href: '/delivery' },
                 { name: 'Дилеры', href: '/dealers' },
                 { name: 'Контакты', href: '/contacts' },
@@ -138,26 +139,22 @@ export default function Footer() {
             </h3>
             <ul className="space-y-3">
               <li>
-                <a
-                  href="https://abc-cred.ru/ooo-tzvt-ooo-tpk-rosomaxa/"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <Link
+                  to="/finansirovanie"
                   className="flex items-center gap-2 text-muted-foreground hover:text-primary transition-colors text-sm"
                 >
                   <CreditCard className="w-4 h-4" />
                   Кредит
-                </a>
+                </Link>
               </li>
               <li>
-                <a
-                  href="https://abc-cred.ru/ooo-tzvt-ooo-tpk-rosomaxa/"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <Link
+                  to="/finansirovanie"
                   className="flex items-center gap-2 text-muted-foreground hover:text-primary transition-colors text-sm"
                 >
                   <CreditCard className="w-4 h-4" />
-                  Рассрочка
-                </a>
+                  Лизинг
+                </Link>
               </li>
             </ul>
           </div>

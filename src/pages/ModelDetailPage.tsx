@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, ShoppingCart, Check, Phone, Download, Share2, Loader2, ArrowRight, Compass, Newspaper } from 'lucide-react';
+import { ArrowLeft, ShoppingCart, Check, Phone, Download, Share2, Loader2, ArrowRight, Compass, Newspaper, CreditCard } from 'lucide-react';
 import { applications } from '@/data/applications';
 import { articles } from '@/data/articles';
 import { products, productColors } from '@/data/products';
@@ -351,6 +351,13 @@ export default function ModelDetailPage() {
                 )}
                 Отправить конфигурацию
               </button>
+              <Link
+                to={`/finansirovanie?model=${encodeURIComponent(product.slug)}`}
+                className="btn-primary min-h-11 rounded-lg sm:col-span-2"
+              >
+                <CreditCard className="mr-2 w-5 h-5" />
+                Рассчитать финансирование
+              </Link>
             </div>
 
             {/* Contact */}

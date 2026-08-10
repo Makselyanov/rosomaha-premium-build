@@ -104,6 +104,7 @@ const staticRoutes = [
   { path: "/dealers/tyumen", changefreq: "monthly", priority: "0.8", lastmod: today },
   { path: "/contacts", changefreq: "monthly", priority: "0.7", lastmod: today },
   { path: "/delivery", changefreq: "monthly", priority: "0.7", lastmod: today },
+  { path: "/finansirovanie", changefreq: "monthly", priority: "0.8", lastmod: today },
   { path: "/order", changefreq: "monthly", priority: "0.7", lastmod: today },
   { path: "/politika-konfidencialnosti", changefreq: "yearly", priority: "0.4", lastmod: today },
 ];
