@@ -51,6 +51,7 @@ This matters because search bots must receive correct `title`, `description`, `c
   - Monitor duplicate and cannibalization risks, but do not merge metrics or infer ownership of a query, visit or lead from another domain.
   - Do not change redirects, DNS, robots, sitemap, canonical tags or content ownership until the site's current role, data owner, traffic sources and conversion path are proved and a complete URL map has been reviewed.
   - Any later migration or path-to-path `301` decision requires a separate evidence-first approval and a reversible full release cycle; never redirect every URL to the homepage.
+  - Public product pages currently submit lead data to the external endpoint `https://sam.myenvy.ru/integrations/php/sobeyko2008/EnvySend.php`, not to a same-domain Bitrix handler. Treat this as a separate conversion dependency and verify delivery into CRM before attributing any Bitrix lead drop to SEO or indexing.
 - Yandex has indexed parameter and trailing-slash variants beyond the canonical sitemap set.
   - Keep tracking/filter parameters in `Clean-param`.
   - Production nginx must redirect non-root trailing-slash routes to their no-slash canonical.
