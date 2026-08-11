@@ -61,6 +61,19 @@ const FINANCING_TYPE_LABELS: Record<FinancingType, string> = {
   unsure: "Нужна консультация",
 };
 
+const FINANCING_TYPE_DESCRIPTIONS: Record<FinancingType, string> = {
+  credit: "Уточним задачу и проверим, доступен ли подходящий кредитный канал.",
+  leasing: "Для ИП и компаний: проверим, доступен ли подходящий лизинговый канал.",
+  installment: "Проверим, возможен ли согласованный график оплаты для выбранной комплектации.",
+  unsure: "Менеджер уточнит задачу и поможет выбрать направление.",
+};
+
+const AFTER_SUBMISSION_STEPS = [
+  "Менеджер проверит модель, контакты и параметры обращения.",
+  "Свяжется с вами и уточнит комплектацию, срок и первоначальный взнос.",
+  "Если подходящий канал доступен, назовёт партнёра и запросит отдельное согласие до передачи данных.",
+] as const;
+
 const visibleProducts = products;
 
 function findProduct(slug: string | null): Product | undefined {
@@ -112,6 +125,8 @@ export default function FinanceCalculatorPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const submissionAttempt = useRef<SubmissionAttempt>();
+  const privacyRequestSequence = useRef(0);
+  const privacyRequestController = useRef<AbortController | null>(null);
 
   const selectedProduct = useMemo(
     () => visibleProducts.find((product) => product.slug === form.productSlug) ?? defaultProduct,
@@ -146,9 +161,20 @@ export default function FinanceCalculatorPage() {
     });
   }, [selectedProduct]);
 
-  const refreshPrivacyDocument = async (resetConsent = false) => {
+  const refreshPrivacyDocument = async () => {
+    const requestSequence = privacyRequestSequence.current + 1;
+    privacyRequestSequence.current = requestSequence;
+    privacyRequestController.current?.abort();
+
+    const controller = new AbortController();
+    privacyRequestController.current = controller;
+
+    submissionAttempt.current = undefined;
+    setForm((current) => ({ ...current, privacyAccepted: false }));
+
     setIsMetadataLoading(true);
     setMetadataError(null);
+    setPrivacyDocument(null);
 
     try {
       const response = await fetch(FINANCE_INTAKE_URL, {
@@ -157,31 +183,47 @@ export default function FinanceCalculatorPage() {
           Accept: "application/json",
         },
         cache: "no-store",
+        signal: controller.signal,
       });
 
       const body = await response.json().catch(() => null);
       const parsed = parseFinancePrivacyMetadata(body);
+
+      if (controller.signal.aborted || requestSequence !== privacyRequestSequence.current) {
+        return;
+      }
 
       if (!response.ok || !parsed) {
         throw new Error("Finance legal metadata is unavailable.");
       }
 
       setPrivacyDocument(parsed);
-      if (resetConsent) {
-        submissionAttempt.current = undefined;
-        setForm((current) => ({ ...current, privacyAccepted: false }));
-      }
     } catch (error) {
+      if (controller.signal.aborted || requestSequence !== privacyRequestSequence.current) {
+        return;
+      }
+
       console.error("Finance privacy metadata failed", error);
       setPrivacyDocument(null);
       setMetadataError("Форма временно недоступна: не удалось получить актуальное согласие на обработку данных.");
     } finally {
-      setIsMetadataLoading(false);
+      if (requestSequence === privacyRequestSequence.current) {
+        if (privacyRequestController.current === controller) {
+          privacyRequestController.current = null;
+        }
+        setIsMetadataLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     void refreshPrivacyDocument();
+
+    return () => {
+      privacyRequestSequence.current += 1;
+      privacyRequestController.current?.abort();
+      privacyRequestController.current = null;
+    };
   }, []);
 
   const updateForm = <Key extends keyof FormState>(key: Key, value: FormState[Key]) => {
@@ -294,7 +336,7 @@ export default function FinanceCalculatorPage() {
       if (response.status === 422 && hasStalePrivacyVersion(body)) {
         submissionAttempt.current = undefined;
         setForm((current) => ({ ...current, privacyAccepted: false }));
-        await refreshPrivacyDocument(true);
+        await refreshPrivacyDocument();
         throw new Error("stale-privacy-version");
       }
 
@@ -351,30 +393,48 @@ export default function FinanceCalculatorPage() {
 
   if (isSubmitted && selectedProduct) {
     return (
-      <main className="min-h-screen flex items-center pb-16 pt-24">
-        <div className="container max-w-2xl text-center">
-          <div className="mx-auto mb-8 flex h-20 w-20 items-center justify-center rounded-full bg-green-600 text-white">
-            <Check className="h-10 w-10" />
-          </div>
-          <h1 className="section-title mb-4 text-3xl">Заявка принята</h1>
-          <p className="mx-auto mb-8 max-w-xl text-muted-foreground">
-            Мы получили запрос по модели {selectedProduct.name}. Менеджер уточнит задачу, комплектность и доступные варианты кредита, лизинга или рассрочки.
-          </p>
-          <div className="flex flex-col justify-center gap-3 sm:flex-row">
-            <button
-              type="button"
-              onClick={() => {
-                submissionAttempt.current = undefined;
-                setForm(createInitialForm(selectedProduct));
-                setIsSubmitted(false);
-              }}
-              className="btn-primary min-h-11 rounded-lg"
-            >
-              Новая заявка
-            </button>
-            <Link to={`/catalog/${selectedProduct.slug}`} className="btn-secondary">
-              Вернуться к модели
-            </Link>
+      <main className="flex min-h-screen items-center pb-12 pt-24 sm:pb-16 sm:pt-28">
+        <div className="container">
+          <div className="mx-auto max-w-2xl text-center">
+            <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-green-600 text-white sm:mb-8 sm:h-20 sm:w-20">
+              <Check className="h-8 w-8 sm:h-10 sm:w-10" />
+            </div>
+            <h1 className="section-title mb-4 text-3xl sm:text-4xl">Заявка принята</h1>
+            <p className="mx-auto mb-6 max-w-xl text-muted-foreground sm:mb-8">
+              Мы получили запрос по модели {selectedProduct.name}. Теперь заявку последовательно обработает менеджер.
+            </p>
+
+            <div className="mb-6 rounded-lg border border-border bg-card p-4 text-left sm:mb-8 sm:p-6">
+              <h2 className="mb-4 font-display text-xl uppercase tracking-wider">Что произойдёт дальше</h2>
+              <ol className="space-y-4 text-sm text-muted-foreground sm:text-base">
+                {AFTER_SUBMISSION_STEPS.map((step, index) => (
+                  <li key={step} className="flex gap-3">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary font-semibold text-primary-foreground">{index + 1}</span>
+                    <span>{step}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="mt-5 rounded-lg bg-secondary/50 p-3 text-sm text-foreground">
+                Отправка заявки не означает одобрение финансирования и не фиксирует условия. Доступность варианта и финальные условия подтверждаются после проверки.
+              </p>
+            </div>
+
+            <div className="flex flex-col justify-center gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => {
+                  submissionAttempt.current = undefined;
+                  setForm(createInitialForm(selectedProduct));
+                  setIsSubmitted(false);
+                }}
+                className="btn-primary min-h-11 rounded-lg px-4 text-base sm:px-8 sm:text-lg"
+              >
+                Новая заявка
+              </button>
+              <Link to={`/catalog/${selectedProduct.slug}`} className="btn-secondary min-h-11 px-4 text-base sm:px-8 sm:text-lg">
+                Вернуться к модели
+              </Link>
+            </div>
           </div>
         </div>
       </main>
@@ -382,9 +442,9 @@ export default function FinanceCalculatorPage() {
   }
 
   return (
-    <main className="pb-16 pt-24">
-      <div className="container max-w-6xl">
-        <nav className="mb-8">
+    <main className="pb-12 pt-24 sm:pb-16 sm:pt-28">
+      <div className="container">
+        <nav className="mb-6 sm:mb-8">
           <ol className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <li>
               <Link to="/" className="transition-colors hover:text-foreground">
@@ -396,37 +456,37 @@ export default function FinanceCalculatorPage() {
           </ol>
         </nav>
 
-        <div className="grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+        <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr] xl:gap-8">
           <section className="space-y-6">
-            <div className="rounded-lg border border-border bg-card p-8">
+            <div className="rounded-lg border border-border bg-card p-4 sm:p-6 lg:p-8">
               <p className="mb-3 font-display text-sm uppercase tracking-[0.3em] text-primary">
                 Кредит, лизинг, рассрочка
               </p>
-              <h1 className="section-title mb-4 text-3xl md:text-5xl">
+              <h1 className="section-title mb-4 break-words text-3xl leading-tight sm:text-4xl lg:text-5xl">
                 Подберите финансирование для болотохода «Росомаха»
               </h1>
-              <p className="max-w-3xl text-lg text-muted-foreground">
+              <p className="max-w-3xl text-base text-muted-foreground sm:text-lg">
                 Покажем стоимость техники, размер первоначального взноса и сумму к финансированию. Финальные условия подтверждаются после заявки и проверки партнёром.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-card p-4">
+            <div className="flex flex-col items-stretch gap-4 rounded-lg border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm font-semibold">Заполнено разделов: {completedSteps} из 3</p>
                 <p className="mt-1 text-sm text-muted-foreground">Модель и сумма, параметры заявки, контакты и согласие.</p>
               </div>
-              <div className="flex gap-2" aria-label={`Заполнено ${completedSteps} из 3`}>
+              <div className="grid w-full grid-cols-3 gap-2 sm:w-auto" aria-label={`Заполнено ${completedSteps} из 3`}>
                 {[1, 2, 3].map((step) => (
                   <span
                     key={step}
-                    className={`h-2 w-12 rounded-full ${step <= completedSteps ? "bg-primary" : "bg-secondary"}`}
+                    className={`h-2 min-w-0 rounded-full sm:w-12 ${step <= completedSteps ? "bg-primary" : "bg-secondary"}`}
                     aria-hidden="true"
                   />
                 ))}
               </div>
             </div>
 
-            <div className="rounded-lg border border-border bg-card p-8">
+            <div className="rounded-lg border border-border bg-card p-4 sm:p-6 lg:p-8">
               <div className="mb-6 flex items-center gap-3">
                 <ShieldCheck className="h-6 w-6 text-primary" />
                 <h2 className="font-display text-2xl uppercase tracking-wider">
@@ -490,20 +550,20 @@ export default function FinanceCalculatorPage() {
                 </div>
 
                 <div className="grid gap-4 lg:grid-cols-2">
-                  <div className="rounded-lg border border-border bg-secondary/30 p-5">
-                    <div className="mb-3 flex items-center justify-between gap-4">
+                  <div className="min-w-0 rounded-lg border border-border bg-secondary/30 p-4 sm:p-5">
+                    <div className="mb-3 flex flex-col items-start gap-1 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between min-[390px]:gap-4">
                       <span className="text-sm text-muted-foreground">Стоимость техники</span>
-                      <span className="font-display text-2xl font-bold text-primary">{formatPrice(saleAmount)}</span>
+                      <span className="max-w-full break-words font-display text-xl font-bold tabular-nums text-primary sm:text-2xl">{formatPrice(saleAmount)}</span>
                     </div>
                     <p className="text-sm text-muted-foreground">
                       Цена берётся из актуального каталога Rosomaha. В заявку уходит именно эта стоимость, без ручного ввода суммы.
                     </p>
                   </div>
 
-                  <label className="rounded-lg border border-border bg-secondary/30 p-5">
-                    <div className="mb-3 flex items-center justify-between gap-4">
+                  <label className="min-w-0 rounded-lg border border-border bg-secondary/30 p-4 sm:p-5">
+                    <div className="mb-3 flex flex-col items-start gap-1 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between min-[390px]:gap-4">
                       <span className="text-sm text-muted-foreground">Первоначальный взнос</span>
-                      <span className="text-xl font-bold">{formatPrice(downPayment)}</span>
+                      <span className="max-w-full break-words text-lg font-bold tabular-nums sm:text-xl">{formatPrice(downPayment)}</span>
                     </div>
                     <input
                       type="range"
@@ -531,52 +591,69 @@ export default function FinanceCalculatorPage() {
                   <h3 className="mt-1 font-display text-xl uppercase tracking-wider">Параметры заявки</h3>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-2">
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium">Тип финансирования *</span>
-                    <select
-                      value={form.financingType}
-                      onChange={(event) => updateForm("financingType", event.target.value as FinancingType | "")}
-                      className="input-premium min-h-[52px]"
-                      required
-                    >
-                      <option value="" disabled>Выберите вариант</option>
-                      {FINANCING_TYPES.map((type) => (
-                        <option key={type} value={type}>
-                          {FINANCING_TYPE_LABELS[type]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                <fieldset>
+                  <legend className="mb-3 text-sm font-medium">Тип финансирования *</legend>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {FINANCING_TYPES.map((type) => {
+                      const isSelected = form.financingType === type;
 
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium">Кто оформляет заявку *</span>
-                    <select
-                      value={form.applicantType}
-                      onChange={(event) => updateForm("applicantType", event.target.value as ApplicantType | "")}
-                      className="input-premium min-h-[52px]"
-                      required
-                    >
-                      <option value="" disabled>Выберите тип</option>
-                      {APPLICANT_TYPES.map((type) => (
-                        <option key={type} value={type}>
-                          {APPLICANT_TYPE_LABELS[type]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
+                      return (
+                        <label
+                          key={type}
+                          className={`flex min-w-0 cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors ${
+                            isSelected
+                              ? "border-primary bg-primary/10 text-foreground"
+                              : "border-border bg-secondary/30 text-muted-foreground hover:border-primary/60"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="financingType"
+                            value={type}
+                            checked={isSelected}
+                            onChange={() => updateForm("financingType", type)}
+                            className="mt-1 h-5 w-5 shrink-0 accent-primary"
+                            required
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-semibold text-foreground">{FINANCING_TYPE_LABELS[type]}</span>
+                            <span className="mt-1 block text-sm leading-5">
+                              {FINANCING_TYPE_DESCRIPTIONS[type]}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
 
-                <div className="grid gap-4 sm:grid-cols-3">
-                  <div className="rounded-lg border border-border bg-card/70 p-4">
+                <label className="block md:max-w-md">
+                  <span className="mb-2 block text-sm font-medium">Кто оформляет заявку *</span>
+                  <select
+                    value={form.applicantType}
+                    onChange={(event) => updateForm("applicantType", event.target.value as ApplicantType | "")}
+                    className="input-premium min-h-[52px]"
+                    required
+                  >
+                    <option value="" disabled>Выберите тип</option>
+                    {APPLICANT_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {APPLICANT_TYPE_LABELS[type]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="min-w-0 rounded-lg border border-border bg-card/70 p-4">
                     <div className="text-sm text-muted-foreground">К финансированию</div>
-                    <div className="mt-2 font-display text-3xl text-primary">{formatPrice(financedAmount)}</div>
+                    <div className="mt-2 max-w-full break-words font-display text-2xl tabular-nums text-primary sm:text-3xl">{formatPrice(financedAmount)}</div>
                   </div>
-                  <div className="rounded-lg border border-border bg-card/70 p-4">
+                  <div className="min-w-0 rounded-lg border border-border bg-card/70 p-4">
                     <div className="text-sm text-muted-foreground">Срок</div>
-                    <div className="mt-2 font-display text-3xl">{clampTerm(form.termMonths)} мес.</div>
+                    <div className="mt-2 font-display text-2xl tabular-nums sm:text-3xl">{clampTerm(form.termMonths)} мес.</div>
                   </div>
-                  <div className="rounded-lg border border-border bg-card/70 p-4">
+                  <div className="min-w-0 rounded-lg border border-border bg-card/70 p-4">
                     <div className="text-sm text-muted-foreground">Формат обращения</div>
                     <div className="mt-2 text-base font-medium">
                       {form.financingType ? FINANCING_TYPE_LABELS[form.financingType] : "Не выбран"}
@@ -655,34 +732,41 @@ export default function FinanceCalculatorPage() {
                   />
                 </label>
 
-                <label className="flex items-start gap-3 rounded-lg border border-border bg-card/70 px-4 py-4 text-sm text-muted-foreground">
+                <div className="flex items-start gap-3 rounded-lg border border-border bg-card/70 px-4 py-4 text-sm text-muted-foreground">
                   <input
+                    id="finance-privacy-consent"
                     type="checkbox"
                     checked={form.privacyAccepted}
                     disabled={!privacyDocument || isMetadataLoading}
                     onChange={(event) => updateForm("privacyAccepted", event.target.checked)}
+                    aria-describedby="finance-privacy-policy-note"
                     className="mt-1 h-5 w-5 shrink-0 rounded border-border accent-primary"
                     required
                   />
-                  <span>
-                    Я подтверждаю согласие на обработку персональных данных по актуальной версии документа
-                    {privacyDocument ? (
-                      <>
-                        {" "}
-                        <span className="font-medium text-foreground">{privacyDocument.version}</span>.
-                      </>
-                    ) : null}{" "}
-                    Я ознакомлен с{" "}
-                    <Link
-                      to="/politika-konfidencialnosti"
-                      className="font-medium text-foreground underline decoration-primary underline-offset-4 hover:text-primary"
-                    >
-                      политикой конфиденциальности
-                    </Link>.
-                  </span>
-                </label>
+                  <div className="min-w-0">
+                    <label htmlFor="finance-privacy-consent" className="cursor-pointer text-foreground">
+                      Я даю согласие ООО ТПК «РОСОМАХА» на обработку персональных данных для рассмотрения заявки и связи со мной
+                      {privacyDocument ? (
+                        <>
+                          {" "}по документу «{privacyDocument.title}», версия <span className="font-medium">{privacyDocument.version}</span>.
+                        </>
+                      ) : (
+                        "."
+                      )}
+                    </label>
+                    <span id="finance-privacy-policy-note" className="mt-2 block">
+                      Подробнее об обработке данных — в отдельной{" "}
+                      <Link
+                        to="/politika-konfidencialnosti"
+                        className="font-medium text-foreground underline decoration-primary underline-offset-4 hover:text-primary"
+                      >
+                        политике конфиденциальности
+                      </Link>.
+                    </span>
+                  </div>
+                </div>
 
-                <button type="submit" disabled={isSubmitting || isMetadataLoading || !privacyDocument || !form.privacyAccepted} className="btn-primary min-h-[52px] w-full rounded-lg disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none motion-reduce:hover:transform-none">
+                <button type="submit" disabled={isSubmitting || isMetadataLoading || !privacyDocument || !form.privacyAccepted} className="btn-primary min-h-[52px] w-full rounded-lg px-4 py-3 text-base leading-snug disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none motion-reduce:hover:transform-none sm:px-8 sm:text-lg">
                   {isSubmitting ? <Loader2 className="mr-2 h-5 w-5 animate-spin motion-reduce:animate-none" /> : null}
                   {isSubmitting ? "Отправка..." : "Отправить заявку на финансирование"}
                 </button>
@@ -691,17 +775,22 @@ export default function FinanceCalculatorPage() {
           </section>
 
           <aside className="space-y-6">
-            <div className="rounded-lg border border-border bg-card p-6">
-              <h2 className="mb-4 font-display text-2xl uppercase tracking-wider">Что увидит менеджер</h2>
-              <ul className="space-y-3 text-sm text-muted-foreground">
-                <li>Выбранную модель и актуальную стоимость из каталога.</li>
-                <li>Первоначальный взнос, срок и тип финансирования.</li>
-                <li>Контакты для обратной связи и маркетинговую атрибуцию заявки.</li>
-                <li>Версию согласия, с которой была отправлена заявка.</li>
-              </ul>
+            <div className="rounded-lg border border-border bg-card p-4 sm:p-6">
+              <h2 className="mb-4 font-display text-2xl uppercase tracking-wider">Что будет после отправки</h2>
+              <ol className="space-y-4 text-sm text-muted-foreground">
+                {AFTER_SUBMISSION_STEPS.map((step, index) => (
+                  <li key={step} className="flex gap-3">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary font-semibold text-primary-foreground">{index + 1}</span>
+                    <span>{step}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="mt-5 rounded-lg bg-secondary/50 p-3 text-sm text-foreground">
+                Заявка не равна одобрению и не фиксирует условия финансирования. Финальные условия подтверждаются только после проверки.
+              </p>
             </div>
 
-            <div className="rounded-lg border border-border bg-card p-6">
+            <div className="rounded-lg border border-border bg-card p-4 sm:p-6">
               <div className="mb-3 flex items-center gap-2 text-primary">
                 <AlertCircle className="h-5 w-5" />
                 <h2 className="font-display text-xl uppercase tracking-wider">Что не запрашиваем на сайте</h2>
@@ -714,8 +803,8 @@ export default function FinanceCalculatorPage() {
               </ul>
             </div>
 
-            <div className="rounded-lg border border-border bg-card p-6">
-              <h2 className="mb-4 font-display text-xl uppercase tracking-wider">Актуальное согласие</h2>
+            <div className="rounded-lg border border-border bg-card p-4 sm:p-6">
+              <h2 className="mb-4 font-display text-xl uppercase tracking-wider">Согласие и политика</h2>
               {isMetadataLoading ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -723,24 +812,47 @@ export default function FinanceCalculatorPage() {
                 </div>
               ) : privacyDocument ? (
                 <>
-                  <div className="mb-3 text-sm text-muted-foreground">
+                  <div className="text-sm text-muted-foreground">
                     <div className="font-medium text-foreground">{privacyDocument.title}</div>
-                    <div>Версия: {privacyDocument.version}</div>
+                    <div className="mt-1">Актуальная версия: {privacyDocument.version}</div>
                   </div>
-                  <div className="max-h-[320px] overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-secondary/20 p-4 text-sm leading-6 text-muted-foreground">
-                    {privacyDocument.text}
+                  <details className="mt-4 border-y border-border py-3 text-sm">
+                    <summary className="cursor-pointer font-medium text-foreground marker:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card">
+                      Точный текст документа, версия {privacyDocument.version}
+                    </summary>
+                    <div className="mt-3 whitespace-pre-wrap border-t border-border pt-3 leading-6 text-muted-foreground">
+                      {privacyDocument.text}
+                    </div>
+                  </details>
+                  <div className="mt-4 flex flex-col items-start gap-3 text-sm">
+                    <Link
+                      to="/politika-konfidencialnosti"
+                      className="font-medium text-primary underline underline-offset-4 hover:text-foreground"
+                    >
+                      Открыть политику конфиденциальности
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => void refreshPrivacyDocument()}
+                      className="font-medium text-foreground underline decoration-primary underline-offset-4 hover:text-primary"
+                    >
+                      Проверить актуальную версию
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void refreshPrivacyDocument(true)}
-                    className="mt-4 inline-flex text-sm text-primary hover:underline"
-                  >
-                    Обновить документ
-                  </button>
+                  <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                    После обновления документа согласие нужно подтвердить повторно.
+                  </p>
                 </>
               ) : (
-                <div className="text-sm text-muted-foreground">
-                  Документ недоступен. Повторите попытку позже.
+                <div className="space-y-3 text-sm text-muted-foreground">
+                  <p>Документ недоступен. Пока версия не загружена, отправка формы заблокирована.</p>
+                  <button
+                    type="button"
+                    onClick={() => void refreshPrivacyDocument()}
+                    className="font-medium text-primary underline underline-offset-4 hover:text-foreground"
+                  >
+                    Повторить загрузку
+                  </button>
                 </div>
               )}
             </div>

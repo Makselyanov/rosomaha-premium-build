@@ -27,19 +27,20 @@ export default function Header() {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-md border-b border-border/50">
-      <nav className="container flex items-center justify-between h-20">
+      <nav className="mx-auto flex h-20 w-full max-w-[1760px] items-center justify-between gap-2 px-4 sm:px-6 lg:px-8">
         {/* Logo */}
         <Link to="/" className="flex shrink-0 items-center gap-3">
-          <img src={logoImage} alt="Росомаха" className="h-10 w-auto max-w-[150px]" />
+          <img src={logoImage} alt="Росомаха" className="h-9 w-auto max-w-[128px] sm:h-10 sm:max-w-[150px]" />
         </Link>
 
         {/* Desktop Navigation */}
-        <div className="hidden min-w-0 flex-1 items-center justify-center gap-4 px-4 lg:flex xl:gap-5 2xl:gap-7">
+        <div className="hidden min-w-0 flex-1 items-center justify-center gap-3 px-3 xl:flex min-[1440px]:gap-4 min-[1680px]:gap-5">
           {navigation.map((item) => (
             <Link
               key={item.name}
               to={item.href}
-              className={`nav-link whitespace-nowrap text-xs xl:text-sm ${location.pathname === item.href ? 'active text-foreground' : ''}`}
+              aria-current={location.pathname === item.href ? 'page' : undefined}
+              className={`nav-link whitespace-nowrap text-[11px] min-[1440px]:text-xs min-[1680px]:text-sm ${location.pathname === item.href ? 'active text-foreground' : ''}`}
             >
               {item.shortName ?? item.name}
             </Link>
@@ -47,13 +48,13 @@ export default function Header() {
         </div>
 
         {/* Right Section */}
-        <div className="flex shrink-0 items-center gap-2 xl:gap-3">
+        <div className="flex shrink-0 items-center gap-1 min-[1440px]:gap-2 min-[1600px]:gap-3">
           {/* Phone */}
-          <div className="hidden xl:flex flex-col items-end leading-tight">
+          <div className="hidden flex-col items-end leading-tight min-[1440px]:flex">
             <a
               href={primaryPhone.href}
               onClick={() => trackPhoneClick('header_primary')}
-              className="flex items-center gap-2 text-xs font-semibold hover:text-primary transition-colors 2xl:text-sm"
+              className="flex items-center gap-2 whitespace-nowrap text-xs font-semibold transition-colors hover:text-primary min-[1680px]:text-sm"
             >
               <Phone className="w-4 h-4" />
               <span>{primaryPhone.display}</span>
@@ -61,14 +62,14 @@ export default function Header() {
             <a
               href={officePhone.href}
               onClick={() => trackPhoneClick('header_office')}
-              className="mt-1 hidden text-xs text-muted-foreground hover:text-primary transition-colors 2xl:block"
+              className="mt-1 hidden whitespace-nowrap text-xs text-muted-foreground transition-colors hover:text-primary min-[1880px]:block"
             >
               {officePhone.label}: {officePhone.display}
             </a>
           </div>
 
           {/* Social Links */}
-          <div className="hidden items-center gap-1 min-[1440px]:flex">
+          <div className="hidden items-center gap-1 min-[1800px]:flex">
             <a
               href="https://max.ru/u/f9LHodD0cOL3V4NXRmtmYF2IZjxHXKlaVXudIXvPuAhApJSxwS2OhFH8Id4"
               target="_blank"
@@ -134,7 +135,7 @@ export default function Header() {
           <Link
             to="/order"
             onClick={() => trackOrderCtaClick('header_desktop')}
-            className="hidden xl:inline-flex btn-primary text-sm py-3 px-5 2xl:px-6"
+            className="btn-primary hidden whitespace-nowrap px-4 py-3 text-sm min-[1600px]:inline-flex min-[1720px]:px-5"
           >
             Получить расчёт
           </Link>
@@ -142,8 +143,10 @@ export default function Header() {
           {/* Mobile Menu Button */}
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="lg:hidden p-2 hover:bg-secondary rounded-lg transition-colors"
+            className="rounded-lg p-2 transition-colors hover:bg-secondary xl:hidden"
             aria-label="Меню"
+            aria-expanded={mobileMenuOpen}
+            aria-controls="mobile-navigation"
           >
             {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
@@ -154,10 +157,11 @@ export default function Header() {
       <AnimatePresence>
         {mobileMenuOpen && (
           <motion.div
+            id="mobile-navigation"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="max-h-[calc(100svh-5rem)] overflow-y-auto overscroll-contain lg:hidden bg-background border-t border-border"
+            className="max-h-[calc(100svh-5rem)] overflow-y-auto overscroll-contain border-t border-border bg-background xl:hidden"
           >
             <div className="container py-6 space-y-4">
               {navigation.map((item) => (
@@ -165,6 +169,7 @@ export default function Header() {
                   key={item.name}
                   to={item.href}
                   onClick={() => setMobileMenuOpen(false)}
+                  aria-current={location.pathname === item.href ? 'page' : undefined}
                   className={`block py-3 text-lg font-display uppercase tracking-wider ${location.pathname === item.href
                     ? 'text-primary'
                     : 'text-muted-foreground hover:text-foreground'
@@ -191,7 +196,7 @@ export default function Header() {
                   {officePhone.label}: {officePhone.display}
                 </a>
                 {/* Мессенджеры в мобильном меню */}
-                <div className="flex items-center gap-4 pt-2">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-3 pt-2">
                   <a
                     href="https://max.ru/u/f9LHodD0cOL3V4NXRmtmYF2IZjxHXKlaVXudIXvPuAhApJSxwS2OhFH8Id4"
                     target="_blank"
