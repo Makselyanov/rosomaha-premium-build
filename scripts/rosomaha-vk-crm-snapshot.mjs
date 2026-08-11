@@ -24,6 +24,19 @@ const TOP_LEVEL_KEYS = new Set([
   "leadChannelHealth",
 ]);
 const PERIOD_KEYS = new Set(["from", "to", "vkAds", "crm"]);
+const PERIOD_NAMES = ["today", "days7", "previous7", "days30"];
+const VK_COMPARISON_METRICS = [
+  "shows",
+  "clicks",
+  "spent",
+  "ctr",
+  "cpc",
+  "cpm",
+  "providerGoals",
+  "providerGoalCost",
+  "totalCampaigns",
+  "activeCampaigns",
+];
 const VK_KEYS = new Set([
   "status",
   "errorCode",
@@ -42,21 +55,42 @@ const VK_KEYS = new Set([
   "totalCampaigns",
   "activeCampaigns",
 ]);
-const CRM_KEYS = new Set(["vk", "yandex", "domains"]);
+const CRM_KEYS = new Set(["vk", "yandex", "domains", "formReceiptChain"]);
 const DOMAIN_KEYS = new Set(["bitrix", "catalog", "quiz", "unknown"]);
 const AGGREGATE_KEYS = new Set([
   "deals",
   "uniqueContacts",
+  "withLeadSubmissionId",
+  "withModel",
+  "withConfiguration",
+  "working",
+  "rejected",
+  "success",
+  "notTarget",
+  "proposalOrLater",
   "currentNonTarget",
   "withCallActivity",
   "currentProposalStage",
   "currentPrepaymentState",
   "currentSuccessState",
   "currentShippedState",
+  "formReceipts",
+  "processedFormReceipts",
+  "dealsWithSubmissionId",
+  "dealsWithMatchingProcessedReceipt",
+  "dealsMissingReceipt",
   "prepaymentsInPeriod",
   "successInPeriod",
   "shippedInPeriod",
   "successRevenueInPeriod",
+]);
+const FORM_RECEIPT_CHAIN_KEYS = new Set([
+  "formReceipts",
+  "processedFormReceipts",
+  "dealsWithSubmissionId",
+  "dealsWithMatchingProcessedReceipt",
+  "orphanProcessedFormReceipts",
+  "dealsMissingReceipt",
 ]);
 const HEALTH_KEYS = new Set(["generatedAt", "okCount", "warningCount", "criticalCount", "items"]);
 const HEALTH_ITEM_KEYS = new Set(["key", "status", "count24h", "count7d", "count30d", "lastSeenAt"]);
@@ -145,6 +179,29 @@ function assertDate(value, trail) {
   }
 }
 
+function epochDay(value) {
+  return Date.parse(`${value}T00:00:00.000Z`) / 86_400_000;
+}
+
+function assertSevenDayComparisonWindows(periods) {
+  const current = periods.days7;
+  const previous = periods.previous7;
+  const currentFrom = epochDay(current.from);
+  const currentTo = epochDay(current.to);
+  const previousFrom = epochDay(previous.from);
+  const previousTo = epochDay(previous.to);
+
+  if (currentTo - currentFrom !== 6) {
+    throw new Error("Snapshot periods.days7 must cover exactly seven calendar days");
+  }
+  if (previousTo - previousFrom !== 6) {
+    throw new Error("Snapshot periods.previous7 must cover exactly seven calendar days");
+  }
+  if (previousTo + 1 !== currentFrom) {
+    throw new Error("Snapshot periods.previous7 must immediately precede periods.days7");
+  }
+}
+
 function assertTimestamp(value, trail, { nullable = false } = {}) {
   if (nullable && value === null) return;
   const isoTimestamp = typeof value === "string" && !Number.isNaN(Date.parse(value));
@@ -159,6 +216,14 @@ function assertAggregate(value, trail) {
   assertExactKeys(value, AGGREGATE_KEYS, trail);
   assertRequiredKeys(value, AGGREGATE_KEYS, trail);
   for (const key of AGGREGATE_KEYS) {
+    assertNonNegativeNumber(value[key], `${trail}.${key}`);
+  }
+}
+
+function assertFormReceiptChain(value, trail) {
+  assertExactKeys(value, FORM_RECEIPT_CHAIN_KEYS, trail);
+  assertRequiredKeys(value, FORM_RECEIPT_CHAIN_KEYS, trail);
+  for (const key of FORM_RECEIPT_CHAIN_KEYS) {
     assertNonNegativeNumber(value[key], `${trail}.${key}`);
   }
 }
@@ -297,9 +362,9 @@ function assertSnapshotSchema(payload) {
     throw new Error("Snapshot did not prove exact tenant-setting cabinet validation");
   }
 
-  assertExactKeys(payload.periods, new Set(["today", "days7", "days30"]), "periods");
-  assertRequiredKeys(payload.periods, ["today", "days7", "days30"], "periods");
-  for (const periodKey of ["today", "days7", "days30"]) {
+  assertExactKeys(payload.periods, new Set(PERIOD_NAMES), "periods");
+  assertRequiredKeys(payload.periods, PERIOD_NAMES, "periods");
+  for (const periodKey of PERIOD_NAMES) {
     const period = payload.periods[periodKey];
     const trail = `periods.${periodKey}`;
     assertExactKeys(period, PERIOD_KEYS, trail);
@@ -317,7 +382,9 @@ function assertSnapshotSchema(payload) {
     for (const domain of DOMAIN_KEYS) {
       assertAggregate(period.crm.domains[domain], `${trail}.crm.domains.${domain}`);
     }
+    assertFormReceiptChain(period.crm.formReceiptChain, `${trail}.crm.formReceiptChain`);
   }
+  assertSevenDayComparisonWindows(payload.periods);
 
   assertHealth(payload.leadChannelHealth);
 }
@@ -366,6 +433,88 @@ export function parseAndValidateSnapshot(stdout) {
   return payload;
 }
 
+function rounded(value) {
+  return Number(value.toFixed(2));
+}
+
+function compareMetric(current, previous) {
+  const comparable = typeof current === "number" && typeof previous === "number";
+  if (!comparable) {
+    return {
+      current,
+      previous,
+      delta: null,
+      deltaPercent: null,
+    };
+  }
+
+  const rawDelta = current - previous;
+  const delta = rounded(rawDelta);
+  const deltaPercent = previous === 0
+    ? null
+    : rounded((rawDelta / previous) * 100);
+  return {
+    current,
+    previous,
+    delta,
+    deltaPercent,
+  };
+}
+
+function compareMetricSet(current, previous, metricNames) {
+  return Object.fromEntries(
+    [...metricNames].map((metric) => [metric, compareMetric(current[metric], previous[metric])]),
+  );
+}
+
+function providerComparisonStatus(currentStatus, previousStatus) {
+  if (currentStatus === "ok" && previousStatus === "ok") return "complete";
+  if (currentStatus === "unavailable" || previousStatus === "unavailable") return "unavailable";
+  return "partial";
+}
+
+export function buildSevenDayComparison(payload) {
+  const current = payload.periods.days7;
+  const previous = payload.periods.previous7;
+
+  return {
+    generatedAt: payload.fetchedAt,
+    asOf: payload.asOf,
+    timezone: payload.timezone,
+    periods: {
+      current: { key: "days7", from: current.from, to: current.to },
+      previous: { key: "previous7", from: previous.from, to: previous.to },
+    },
+    vkAds: {
+      status: providerComparisonStatus(current.vkAds.status, previous.vkAds.status),
+      metrics: compareMetricSet(current.vkAds, previous.vkAds, VK_COMPARISON_METRICS),
+    },
+    crm: {
+      vk: compareMetricSet(current.crm.vk, previous.crm.vk, AGGREGATE_KEYS),
+      yandex: compareMetricSet(current.crm.yandex, previous.crm.yandex, AGGREGATE_KEYS),
+      domains: Object.fromEntries(
+        [...DOMAIN_KEYS].map((domain) => [
+          domain,
+          compareMetricSet(
+            current.crm.domains[domain],
+            previous.crm.domains[domain],
+            AGGREGATE_KEYS,
+          ),
+        ]),
+      ),
+      formReceiptChain: compareMetricSet(
+        current.crm.formReceiptChain,
+        previous.crm.formReceiptChain,
+        FORM_RECEIPT_CHAIN_KEYS,
+      ),
+    },
+    metricDefinitions: {
+      providerGoals: "vk_ads_provider_metric_not_a_confirmed_crm_lead",
+      crmDeals: "crm_aggregate_deals",
+    },
+  };
+}
+
 export function runSnapshot({
   runner = defaultRunner,
   outDir = path.join(process.cwd(), "marketing-audits", "vk-crm"),
@@ -380,12 +529,25 @@ export function runSnapshot({
   fs.mkdirSync(outDir, { recursive: true });
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   const body = `${JSON.stringify(payload, null, 2)}\n`;
+  const comparison = buildSevenDayComparison(payload);
+  const comparisonBody = `${JSON.stringify(comparison, null, 2)}\n`;
   const stampedPath = path.join(outDir, `ROSOMAHA_VK_CRM_SNAPSHOT_${stamp}.json`);
+  const comparisonPath = path.join(outDir, `ROSOMAHA_VK_CRM_COMPARISON_7D_${stamp}.json`);
   const latestPath = path.join(outDir, "latest.json");
+  const latestComparisonPath = path.join(outDir, "latest-comparison-7d.json");
   fs.writeFileSync(stampedPath, body, "utf8");
   fs.writeFileSync(latestPath, body, "utf8");
+  fs.writeFileSync(comparisonPath, comparisonBody, "utf8");
+  fs.writeFileSync(latestComparisonPath, comparisonBody, "utf8");
 
-  return { payload, stampedPath, latestPath };
+  return {
+    payload,
+    comparison,
+    stampedPath,
+    comparisonPath,
+    latestPath,
+    latestComparisonPath,
+  };
 }
 
 function main() {
@@ -404,7 +566,31 @@ function main() {
         cabinetId: EXPECTED_CABINET_ID,
         periods: Object.keys(periods),
         report: result.stampedPath,
+        comparison: result.comparisonPath,
         latest: result.latestPath,
+        latestComparison: result.latestComparisonPath,
+        weekComparison: {
+          current: result.comparison.periods.current,
+          previous: result.comparison.periods.previous,
+          vkAds: {
+            clicks: result.comparison.vkAds.metrics.clicks,
+            spent: result.comparison.vkAds.metrics.spent,
+            providerGoals: result.comparison.vkAds.metrics.providerGoals,
+          },
+          crm: {
+            deals: {
+              vk: result.comparison.crm.vk.deals,
+              yandex: result.comparison.crm.yandex.deals,
+              domains: Object.fromEntries(
+                [...DOMAIN_KEYS].map((domain) => [
+                  domain,
+                  result.comparison.crm.domains[domain].deals,
+                ]),
+              ),
+            },
+            formReceiptChain: result.comparison.crm.formReceiptChain,
+          },
+        },
       })}\n`,
     );
   } catch (error) {

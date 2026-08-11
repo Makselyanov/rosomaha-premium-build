@@ -3,17 +3,34 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { parseAndValidateSnapshot, runSnapshot } from "./rosomaha-vk-crm-snapshot.mjs";
+import {
+  buildSevenDayComparison,
+  parseAndValidateSnapshot,
+  runSnapshot,
+} from "./rosomaha-vk-crm-snapshot.mjs";
 
 const aggregate = {
   deals: 2,
   uniqueContacts: 2,
+  withLeadSubmissionId: 1,
+  withModel: 1,
+  withConfiguration: 1,
+  working: 1,
+  rejected: 0,
+  success: 0,
+  notTarget: 0,
+  proposalOrLater: 0,
   currentNonTarget: 0,
   withCallActivity: 1,
   currentProposalStage: 0,
   currentPrepaymentState: 0,
   currentSuccessState: 0,
   currentShippedState: 0,
+  formReceipts: 1,
+  processedFormReceipts: 1,
+  dealsWithSubmissionId: 1,
+  dealsWithMatchingProcessedReceipt: 1,
+  dealsMissingReceipt: 0,
   prepaymentsInPeriod: 0,
   successInPeriod: 0,
   shippedInPeriod: 0,
@@ -73,6 +90,14 @@ function period(from, to, providerStatus = "ok") {
         quiz: { ...aggregate },
         unknown: { ...aggregate },
       },
+      formReceiptChain: {
+        formReceipts: 1,
+        processedFormReceipts: 1,
+        dealsWithSubmissionId: 1,
+        dealsWithMatchingProcessedReceipt: 1,
+        orphanProcessedFormReceipts: 0,
+        dealsMissingReceipt: 0,
+      },
     },
   };
 }
@@ -91,6 +116,7 @@ function validPayload(overrides = {}) {
     periods: {
       today: period("2026-08-11", "2026-08-11"),
       days7: period("2026-08-05", "2026-08-11"),
+      previous7: period("2026-07-29", "2026-08-04"),
       days30: period("2026-07-13", "2026-08-11"),
     },
     leadChannelHealth: {
@@ -118,8 +144,57 @@ test("accepts a complete isolated aggregate snapshot and writes ignored artifact
 
   assert.deepEqual(result.payload, payload);
   assert.equal(fs.existsSync(result.stampedPath), true);
+  assert.equal(fs.existsSync(result.comparisonPath), true);
   assert.equal(fs.existsSync(result.latestPath), true);
+  assert.equal(fs.existsSync(result.latestComparisonPath), true);
   assert.deepEqual(JSON.parse(fs.readFileSync(result.latestPath, "utf8")), payload);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(result.latestComparisonPath, "utf8")),
+    result.comparison,
+  );
+  assert.equal(result.comparison.periods.previous.key, "previous7");
+  assert.equal(
+    result.comparison.metricDefinitions.providerGoals,
+    "vk_ads_provider_metric_not_a_confirmed_crm_lead",
+  );
+});
+
+test("builds an explicit days7 to previous7 comparison without treating provider goals as CRM deals", () => {
+  const payload = validPayload();
+  payload.periods.days7.vkAds.clicks = 12;
+  payload.periods.previous7.vkAds.clicks = 8;
+  payload.periods.days7.vkAds.providerGoals = 3;
+  payload.periods.previous7.vkAds.providerGoals = 2;
+  payload.periods.days7.crm.vk.deals = 5;
+  payload.periods.previous7.crm.vk.deals = 4;
+
+  const comparison = buildSevenDayComparison(parseAndValidateSnapshot(JSON.stringify(payload)));
+
+  assert.deepEqual(comparison.vkAds.metrics.clicks, {
+    current: 12,
+    previous: 8,
+    delta: 4,
+    deltaPercent: 50,
+  });
+  assert.deepEqual(comparison.vkAds.metrics.providerGoals, {
+    current: 3,
+    previous: 2,
+    delta: 1,
+    deltaPercent: 50,
+  });
+  assert.deepEqual(comparison.crm.vk.deals, {
+    current: 5,
+    previous: 4,
+    delta: 1,
+    deltaPercent: 25,
+  });
+  assert.deepEqual(comparison.crm.formReceiptChain.dealsWithMatchingProcessedReceipt, {
+    current: 1,
+    previous: 1,
+    delta: 0,
+    deltaPercent: 0,
+  });
+  assert.notDeepEqual(comparison.vkAds.metrics.providerGoals, comparison.crm.vk.deals);
 });
 
 test("requires explicit degraded mode before writing a partial snapshot", (t) => {
@@ -183,8 +258,19 @@ test("rejects unexpected fields including camelCase and plural PII", () => {
 
 test("rejects incomplete schema, inconsistent status and console noise", () => {
   const missingPeriod = validPayload();
-  delete missingPeriod.periods.days30;
+  delete missingPeriod.periods.previous7;
   assert.throws(() => parseAndValidateSnapshot(JSON.stringify(missingPeriod)), /missing required field/);
+
+  const unexpectedPeriod = validPayload();
+  unexpectedPeriod.periods.days14 = period("2026-07-29", "2026-08-11");
+  assert.throws(() => parseAndValidateSnapshot(JSON.stringify(unexpectedPeriod)), /unexpected field/);
+
+  const nonAdjacentPreviousPeriod = validPayload();
+  nonAdjacentPreviousPeriod.periods.previous7 = period("2026-07-28", "2026-08-03");
+  assert.throws(
+    () => parseAndValidateSnapshot(JSON.stringify(nonAdjacentPreviousPeriod)),
+    /immediately precede/,
+  );
 
   const inconsistent = validPayload({
     periods: {
