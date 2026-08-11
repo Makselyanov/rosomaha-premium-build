@@ -4,9 +4,9 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const legacyCatalogUrl = 'https://rosomaha-rus.ru/product/kvadrotsikly/?display=price';
+const bitrixCatalogUrl = 'https://rosomaha-rus.ru/product/kvadrotsikly/?display=price';
 
-const legacySlugToProductId = new Map([
+const bitrixSlugToProductId = new Map([
   ['snegobolotokhod-rosomakha-model-pro-4kh4-s-dvs-1zz-fe-1-8-litra-mosty-toyota', 'pro-4x4-toyota'],
   ['rosomakha-model-eger-1-dvs-30-l-s-s-mostami-volga-', 'eger-1'],
   ['standart-plus-1-5-litra', 'standart-plus-suzuki'],
@@ -164,7 +164,7 @@ function parseCatalogOrder() {
   return [...body.matchAll(/'([^']+)'/g)].map((match) => match[1]);
 }
 
-function parseLegacyCatalog(html) {
+function parseBitrixCatalog(html) {
   const itemStarts = [...html.matchAll(/<meta itemprop="name" content="([^"]+)">/g)];
   const products = [];
 
@@ -172,13 +172,13 @@ function parseLegacyCatalog(html) {
     const start = match.index;
     const end = itemStarts[index + 1]?.index ?? html.length;
     const block = html.slice(start, end);
-    const legacySlug = block.match(/<link itemprop="url" href="\/product\/([^/?"]+)/)?.[1];
+    const bitrixSlug = block.match(/<link itemprop="url" href="\/product\/([^/?"]+)/)?.[1];
     const priceMatch = block.match(/<meta itemprop="price" content="(\d+)">/);
-    if (!legacySlug || !priceMatch) return;
+    if (!bitrixSlug || !priceMatch) return;
 
-    const productId = legacySlugToProductId.get(legacySlug);
+    const productId = bitrixSlugToProductId.get(bitrixSlug);
     if (!productId) {
-      products.push({ productId: null, legacySlug });
+      products.push({ productId: null, bitrixSlug });
       return;
     }
 
@@ -189,7 +189,7 @@ function parseLegacyCatalog(html) {
     const specs = Object.fromEntries(columns.map((column, valueIndex) => [column, values[valueIndex]]));
     products.push({
       productId,
-      legacySlug,
+      bitrixSlug,
       price: Number(priceMatch[1]),
       specs,
     });
@@ -207,49 +207,49 @@ function normalize(value) {
 }
 
 async function main() {
-  const response = await fetch(legacyCatalogUrl, {
+  const response = await fetch(bitrixCatalogUrl, {
     headers: { 'user-agent': 'Rosomaha catalog parity audit/1.0' },
     signal: AbortSignal.timeout(20000),
   });
   if (!response.ok) {
-    throw new Error(`Legacy catalog request failed: HTTP ${response.status}`);
+    throw new Error(`Bitrix catalog request failed: HTTP ${response.status}`);
   }
 
-  const legacyProducts = parseLegacyCatalog(await response.text());
+  const bitrixProducts = parseBitrixCatalog(await response.text());
   const localProducts = parseLocalProducts();
   const localOrder = parseCatalogOrder();
   const failures = [];
 
-  const unknownLegacySlugs = legacyProducts.filter((product) => !product.productId);
-  unknownLegacySlugs.forEach((product) => {
-    failures.push(`Unmapped legacy product: ${product.legacySlug}`);
+  const unknownBitrixSlugs = bitrixProducts.filter((product) => !product.productId);
+  unknownBitrixSlugs.forEach((product) => {
+    failures.push(`Unmapped Bitrix product: ${product.bitrixSlug}`);
   });
 
-  const expectedOrder = legacyProducts.map((product) => product.productId).filter(Boolean);
+  const expectedOrder = bitrixProducts.map((product) => product.productId).filter(Boolean);
   if (JSON.stringify(localOrder) !== JSON.stringify(expectedOrder)) {
-    failures.push(`Catalog order mismatch\n  old: ${expectedOrder.join(', ')}\n  new: ${localOrder.join(', ')}`);
+    failures.push(`Catalog order mismatch\n  Bitrix: ${expectedOrder.join(', ')}\n  local: ${localOrder.join(', ')}`);
   }
 
-  for (const legacyProduct of legacyProducts) {
-    if (!legacyProduct.productId) continue;
-    const localProduct = localProducts.get(legacyProduct.productId);
+  for (const bitrixProduct of bitrixProducts) {
+    if (!bitrixProduct.productId) continue;
+    const localProduct = localProducts.get(bitrixProduct.productId);
     if (!localProduct) {
-      failures.push(`Missing local product: ${legacyProduct.productId}`);
+      failures.push(`Missing local product: ${bitrixProduct.productId}`);
       continue;
     }
 
-    if (localProduct.price !== legacyProduct.price) {
+    if (localProduct.price !== bitrixProduct.price) {
       failures.push(
-        `${legacyProduct.productId}.price: old=${legacyProduct.price}, new=${localProduct.price}`,
+        `${bitrixProduct.productId}.price: Bitrix=${bitrixProduct.price}, local=${localProduct.price}`,
       );
     }
 
-    for (const [key, legacyValue] of Object.entries(legacyProduct.specs)) {
-      if (!legacyValue) continue;
+    for (const [key, bitrixValue] of Object.entries(bitrixProduct.specs)) {
+      if (!bitrixValue) continue;
       const localValue = localProduct.specs[key];
-      if (normalize(localValue) !== normalize(legacyValue)) {
+      if (normalize(localValue) !== normalize(bitrixValue)) {
         failures.push(
-          `${legacyProduct.productId}.${key}: old=${legacyValue}, new=${localValue || '<missing>'}`,
+          `${bitrixProduct.productId}.${key}: Bitrix=${bitrixValue}, local=${localValue || '<missing>'}`,
         );
       }
     }
@@ -269,7 +269,7 @@ async function main() {
     return;
   }
 
-  console.log(`Catalog parity PASS: ${expectedOrder.length} products match ${legacyCatalogUrl}`);
+  console.log(`Catalog parity PASS: ${expectedOrder.length} products match ${bitrixCatalogUrl}`);
 }
 
 main().catch((error) => {

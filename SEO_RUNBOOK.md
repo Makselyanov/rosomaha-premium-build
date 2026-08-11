@@ -46,10 +46,11 @@ This matters because search bots must receive correct `title`, `description`, `c
 
 ## Current known SEO risks
 
-- `https://rosomaha-rus.ru/` still returns `200` with self-canonical pages.
-  - The legacy domain has not transferred its accumulated search signals.
-  - Complete a path-to-path `301` migration only after server access and a reviewed URL map are available.
-  - Do not redirect every legacy URL to the homepage; models and categories must land on their closest equivalents.
+- `https://rosomaha-rus.ru/` is a separate active commercial Bitrix site, not a legacy domain or an automatic redirect candidate.
+  - Track its availability, indexing, queries, traffic sources and CRM conversion path independently from `xn--80aa8ahaki9a.site` and `rosomaha.site`.
+  - Monitor duplicate and cannibalization risks, but do not merge metrics or infer ownership of a query, visit or lead from another domain.
+  - Do not change redirects, DNS, robots, sitemap, canonical tags or content ownership until the site's current role, data owner, traffic sources and conversion path are proved and a complete URL map has been reviewed.
+  - Any later migration or path-to-path `301` decision requires a separate evidence-first approval and a reversible full release cycle; never redirect every URL to the homepage.
 - Yandex has indexed parameter and trailing-slash variants beyond the canonical sitemap set.
   - Keep tracking/filter parameters in `Clean-param`.
   - Production nginx must redirect non-root trailing-slash routes to their no-slash canonical.
