@@ -350,6 +350,47 @@ def extract_data_item(page: str, offer_id: int) -> dict[str, object]:
     raise RuntimeError(f"Offer {offer_id} data-item payload was not found")
 
 
+def _html_attributes(opening_tag: str) -> dict[str, str]:
+    """Parse the small, fixed set of attributes used by the public SKU widget."""
+    attributes: dict[str, str] = {}
+    attribute_pattern = re.compile(
+        r"([^\s=/>]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?"
+    )
+    for match in attribute_pattern.finditer(opening_tag):
+        name = match.group(1).lower()
+        if name in {"<div", "div"}:
+            continue
+        value = next((item for item in match.groups()[1:] if item is not None), "")
+        attributes[name] = html_module.unescape(value)
+    return attributes
+
+
+def verify_sku_binding(page: str, product_id: int, offer_id: int) -> bool:
+    """Require the selected offer to be bound to the pinned product and iblocks."""
+    expected = {
+        "data-item-id": str(product_id),
+        "data-iblockid": "86",
+        "data-offer-id": str(offer_id),
+        "data-offer-iblockid": "64",
+    }
+    bindings: list[dict[str, str]] = []
+
+    for match in re.finditer(r"<div\b[^>]*>", page, flags=re.IGNORECASE):
+        attributes = _html_attributes(match.group(0))
+        classes = set(attributes.get("class", "").split())
+        if "sku-props" not in classes:
+            continue
+        if attributes.get("data-offer-id") == str(offer_id):
+            bindings.append(attributes)
+
+    # Duplicate renderings are allowed only when every binding for the selected
+    # offer independently proves the same product/offer/iblock relationship.
+    return bool(bindings) and all(
+        all(binding.get(name) == value for name, value in expected.items())
+        for binding in bindings
+    )
+
+
 def verify_detail(
     product_id: int,
     offer_id: int,
@@ -375,14 +416,7 @@ def verify_detail(
             page,
         )
     )
-    sku_props_ok = bool(
-        re.search(
-            rf'<div\s+class="sku-props"[^>]*data-item-id="{product_id}"[^>]*'
-            rf'data-iblockid="86"[^>]*data-offer-id="{offer_id}"[^>]*'
-            r'data-offer-iblockid="64"',
-            page,
-        )
-    )
+    sku_props_ok = verify_sku_binding(page, product_id, offer_id)
     data_item = extract_data_item(page, offer_id)
     expected_path = f"/product/{slug}/?oid={offer_id}"
     expected_formatted = formatted_price(expected_price)
