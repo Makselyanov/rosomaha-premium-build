@@ -24,7 +24,7 @@ import {
     Truck
 } from 'lucide-react';
 import { applications } from '@/data/applications';
-import { articles } from '@/data/articles';
+import { canonicalArticles } from '@/data/canonical-articles';
 import { resolveMediaUrl } from '@/lib/media';
 
 export default function ApplicationDetailPage() {
@@ -62,8 +62,8 @@ export default function ApplicationDetailPage() {
         .slice(0, 3);
 
     const relatedArticles = application.relatedArticles
-        .map((relatedSlug) => articles.find((entry) => entry.slug === relatedSlug))
-        .filter((entry): entry is (typeof articles)[number] => Boolean(entry))
+        .map((relatedSlug) => canonicalArticles.find((entry) => entry.slug === relatedSlug))
+        .filter((entry): entry is (typeof canonicalArticles)[number] => Boolean(entry))
         .slice(0, 3);
     const heroImage = resolveMediaUrl(application.image) || '/media/placeholder-hero.jpg';
     const featureImage = resolveMediaUrl(application.image) || '/media/placeholder-application.jpg';

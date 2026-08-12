@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useLocation } from "react-router-dom";
 
 import { applications } from "@/data/applications";
-import { articles } from "@/data/articles";
+import { canonicalArticles } from "@/data/canonical-articles";
 import { catalogFaqs, catalogModels } from "@/data/catalog";
 import { dealers } from "@/data/models";
 import { productFaqs } from "@/data/product-detail-content";
@@ -616,7 +616,7 @@ function getStaticSeo(pathname: string): SeoPayload | null {
 function getDynamicSeo(pathname: string): SeoPayload | null {
   if (pathname.startsWith("/articles/")) {
     const slug = pathname.replace("/articles/", "");
-    const article = articles.find((entry) => entry.slug === slug);
+    const article = canonicalArticles.find((entry) => entry.slug === slug);
 
     if (!article) {
       return null;

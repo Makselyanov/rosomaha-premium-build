@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ArrowLeft, ShoppingCart, Check, Phone, Download, Share2, Loader2, ArrowRight, Compass, Newspaper, CreditCard } from 'lucide-react';
 import { applications } from '@/data/applications';
-import { articles } from '@/data/articles';
+import { canonicalArticles } from '@/data/canonical-articles';
 import { products, productColors } from '@/data/products';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
@@ -91,8 +91,8 @@ export default function ModelDetailPage() {
     const articleSlugs = new Set(relatedApplications.flatMap((application) => application.relatedArticles));
 
     return Array.from(articleSlugs)
-      .map((articleSlug) => articles.find((article) => article.slug === articleSlug))
-      .filter((article): article is (typeof articles)[number] => Boolean(article))
+      .map((articleSlug) => canonicalArticles.find((article) => article.slug === articleSlug))
+      .filter((article): article is (typeof canonicalArticles)[number] => Boolean(article))
       .slice(0, 3);
   }, [relatedApplications]);
 
