@@ -4,6 +4,17 @@ import path from "node:path";
 const rootDir = process.cwd();
 const distDir = path.join(rootDir, "dist");
 const expectedOrigin = "https://xn--80aa8ahaki9a.site";
+const approvedModelPrices = [
+  ["rosomaha-standart-plus", "от 1 350 000 ₽", "от 1 300 000 ₽", 1350000],
+  ["rosomaha-standart-plus-uaz", "от 1 450 000 ₽", "от 1 400 000 ₽", 1450000],
+  ["rosomaha-extrime-uaz", "от 1 850 000 ₽", "от 1 800 000 ₽", 1850000],
+  ["rosomaha-extrime-toyota", "от 2 100 000 ₽", "от 2 050 000 ₽", 2100000],
+  ["rosomaha-extrime-plus", "от 2 200 000 ₽", "от 2 150 000 ₽", 2200000],
+  ["rosomaha-hunter", "от 2 230 000 ₽", "от 2 180 000 ₽", 2230000],
+  ["rosomaha-pickup-uaz-timken", "от 1 850 000 ₽", "от 1 800 000 ₽", 1850000],
+  ["rosomaha-pickup-uaz-18", "от 2 300 000 ₽", "от 2 250 000 ₽", 2300000],
+  ["rosomaha-pickup-toyota", "от 2 500 000 ₽", "от 2 450 000 ₽", 2500000],
+];
 
 function read(filePath) {
   return fs.readFileSync(filePath, "utf8");
@@ -115,6 +126,65 @@ for (const [label, value] of [["home title", homeTitle], ["home H1", homeH1], ["
 
 if (homeHtml.includes("t.me/rosomahaclub") || homeHtml.includes("youtube.com/@Rosomaha_Club")) {
   failures.push("manufacturer Organization schema still conflates Rosomaha Club channels");
+}
+
+for (const [slug, expectedPrice, previousPrice, expectedNumericPrice] of approvedModelPrices) {
+  const url = `${expectedOrigin}/catalog/${slug}`;
+  const filePath = routeFile(url);
+
+  if (!fs.existsSync(filePath)) {
+    failures.push(`${url}: missing approved model route`);
+    continue;
+  }
+
+  const html = read(filePath);
+  const staticBody = extract(html, /<main[^>]+id="seo-prerender"[^>]*>([\s\S]*?)<\/main>/i);
+  const visibleText = plainText(staticBody);
+  const expectedLabel = `Цена: ${expectedPrice}`;
+  const previousLabel = `Цена: ${previousPrice}`;
+  const priceElementCount = count(staticBody, /<p[^>]+data-model-price(?:=["'][^"']*["'])?[^>]*>/gi);
+  const expectedLabelCount = visibleText.split(expectedLabel).length - 1;
+  const expectedPriceCount = html.split(expectedPrice).length - 1;
+  const title = extract(html, /<title>([\s\S]*?)<\/title>/i);
+  const description = extract(html, /<meta[^>]+name="description"[^>]+content="([^"]*)"/i);
+  const canonical = extract(html, /<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i);
+  const robots = extract(html, /<meta[^>]+name="robots"[^>]+content="([^"]*)"/i);
+  const ogTitle = extract(html, /<meta[^>]+property="og:title"[^>]+content="([^"]*)"/i);
+  const ogDescription = extract(html, /<meta[^>]+property="og:description"[^>]+content="([^"]*)"/i);
+  const ogUrl = extract(html, /<meta[^>]+property="og:url"[^>]+content="([^"]*)"/i);
+
+  if (priceElementCount !== 1) {
+    failures.push(`${url}: expected one visible prerender price element, got ${priceElementCount}`);
+  }
+  if (expectedLabelCount !== 1) {
+    failures.push(`${url}: expected one visible '${expectedLabel}', got ${expectedLabelCount}`);
+  }
+  if (expectedPriceCount !== 1) {
+    failures.push(`${url}: expected one formatted price '${expectedPrice}' in HTML, got ${expectedPriceCount}`);
+  }
+  if (visibleText.includes(previousLabel)) {
+    failures.push(`${url}: visible prerender still contains previous price '${previousLabel}'`);
+  }
+  if (html.includes(previousPrice)) {
+    failures.push(`${url}: HTML still contains previous price '${previousPrice}'`);
+  }
+  if (!title || !description || ogTitle !== title || ogDescription !== description) {
+    failures.push(`${url}: price update changed or removed title, description or OpenGraph metadata`);
+  }
+  if (canonical !== url || ogUrl !== url || robots !== "index,follow") {
+    failures.push(`${url}: price update changed canonical, og:url or robots`);
+  }
+
+  const schemaText = extract(html, /<script[^>]+id="page-json-ld"[^>]*>([\s\S]*?)<\/script>/i);
+  try {
+    const schema = JSON.parse(schemaText);
+    const product = findSchemaByType(schema, "Product");
+    if (product?.offers?.price !== expectedNumericPrice) {
+      failures.push(`${url}: Product JSON-LD price=${product?.offers?.price ?? "missing"}, expected ${expectedNumericPrice}`);
+    }
+  } catch (error) {
+    failures.push(`${url}: Product JSON-LD is invalid JSON: ${error.message}`);
+  }
 }
 
 const catalogSchemaText = extract(catalogHtml, /<script[^>]+id="page-json-ld"[^>]*>([\s\S]*?)<\/script>/i);

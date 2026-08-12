@@ -531,6 +531,7 @@ function parseProducts() {
       const nameMatch = block.match(/name:\s*'([^']+)'/);
       const descriptionMatch = block.match(/description:\s*'([^']+)'/);
       const basePriceMatch = block.match(/basePrice:\s*(\d+)/);
+      const priceFormattedMatch = block.match(/priceFormatted:\s*'([^']+)'/);
       const availableMatch = block.match(/available:\s*(true|false)/);
       const categoryMatch = block.match(/category:\s*'([^']+)'/);
       const galleryMatch = block.match(/gallery:\s*\[([\s\S]*?)\],\s*thumbnails:/);
@@ -553,6 +554,7 @@ function parseProducts() {
         name: nameMatch[1],
         description: descriptionMatch[1],
         basePrice: basePriceMatch ? Number.parseInt(basePriceMatch[1], 10) : 0,
+        priceFormatted: priceFormattedMatch?.[1] || "",
         available: availableMatch ? availableMatch[1] === "true" : true,
         category: categoryMatch?.[1] || "classic",
         image: image || defaultImage,
@@ -680,6 +682,7 @@ function buildStaticBody(routePath, route) {
       <section>
         <h2>Описание модели</h2>
         ${renderParagraphs(route.product.description)}
+        ${route.product.priceFormatted ? `<p data-model-price><strong>Цена: ${escapeHtml(route.product.priceFormatted)}</strong></p>` : ""}
         <p><a href="/order">Получить расчёт комплектации</a></p>
       </section>`);
   } else if (route.application) {
