@@ -22,7 +22,7 @@ case "$MODE" in
     ;;
 esac
 
-PYTHONDONTWRITEBYTECODE=1 exec python3 - "$MODE" "$BUNDLE_DIR" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 exec /usr/bin/python3 -I -B - "$MODE" "$BUNDLE_DIR" <<'PY'
 from __future__ import annotations
 
 import fcntl
@@ -146,6 +146,43 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def read_verified_script(path, expected_sha):
+    """Read one exact inode safely; callers never execute the mutable path."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        linked = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or stat.S_ISLNK(linked.st_mode)
+            or (before.st_dev, before.st_ino) != (linked.st_dev, linked.st_ino)
+        ):
+            raise ReleaseError(f"unsafe release script inode: {path}")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(64 * 1024, MAX_SCRIPT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_SCRIPT_BYTES:
+                raise ReleaseError(f"release script exceeds fixed size limit: {path}")
+        after = os.fstat(fd)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise ReleaseError(f"release script changed during verified read: {path}")
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size or sha256_bytes(raw) != expected_sha:
+            raise ReleaseError(f"release script integrity mismatch: {path}")
+        return raw
+    finally:
+        os.close(fd)
+
+
 def canonical_json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -162,6 +199,65 @@ def within(root, path):
         return os.path.commonpath((str(root.resolve(strict=True)), str(path.resolve(strict=True)))) == str(root.resolve(strict=True))
     except (OSError, ValueError):
         return False
+
+
+def python_runtime_supported(version_info=None):
+    observed = sys.version_info if version_info is None else version_info
+    return tuple(observed[:2]) >= (3, 9)
+
+
+def safe_system_binary(path):
+    requested = Path(path)
+    try:
+        link_details = os.lstat(requested)
+        realpath = requested.resolve(strict=True)
+        details = os.lstat(realpath)
+        if requested == Path("/bin/bash"):
+            intended_realpath = str(realpath) in {"/bin/bash", "/usr/bin/bash"}
+        elif requested == Path("/usr/bin/python3"):
+            intended_realpath = re.fullmatch(r"/usr/bin/python3(?:\.[0-9]+)?", str(realpath)) is not None
+        else:
+            intended_realpath = str(realpath) == str(requested)
+        valid = bool(
+            stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+            and details.st_nlink == 1 and details.st_uid == 0
+            and not (stat.S_IMODE(details.st_mode) & 0o022)
+            and (not stat.S_ISLNK(link_details.st_mode) or link_details.st_uid == 0)
+            and intended_realpath
+            and os.access(requested, os.R_OK | os.X_OK)
+        )
+        lexical = Path(requested.anchor)
+        for part in requested.parts[1:-1]:
+            lexical = lexical / part
+            lexical_details = os.lstat(lexical)
+            if stat.S_ISLNK(lexical_details.st_mode):
+                valid = valid and lexical_details.st_uid == 0
+            else:
+                valid = valid and bool(
+                    stat.S_ISDIR(lexical_details.st_mode)
+                    and lexical_details.st_uid == 0
+                    and not (stat.S_IMODE(lexical_details.st_mode) & 0o022)
+                )
+        ancestor = realpath.parent
+        while valid:
+            ancestor_details = os.lstat(ancestor)
+            if (
+                not stat.S_ISDIR(ancestor_details.st_mode) or stat.S_ISLNK(ancestor_details.st_mode)
+                or ancestor_details.st_uid != 0 or stat.S_IMODE(ancestor_details.st_mode) & 0o022
+            ):
+                valid = False
+                break
+            if ancestor == ancestor.parent:
+                break
+            ancestor = ancestor.parent
+        return {
+            "path": str(requested), "realpath": str(realpath), "exists": True,
+            "regular": stat.S_ISREG(details.st_mode), "symlink": stat.S_ISLNK(link_details.st_mode),
+            "nlink": details.st_nlink, "uid": details.st_uid, "gid": details.st_gid,
+            "mode": oct(stat.S_IMODE(details.st_mode)), "valid": valid,
+        }
+    except OSError as exc:
+        return {"path": str(requested), "exists": False, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def safe_directory(path, *, root, optional=False, readable=True, writable=False):
@@ -457,10 +553,20 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
             "app_root": APP_ROOT, "releases": RELEASES_DIR, "dist": DIST_DIR,
         }.items()
     }
-    scripts = {
-        "server_release": safe_file(RELEASE_SCRIPT, root=APP_ROOT),
-        "server_rollback": safe_file(ROLLBACK_SCRIPT, root=APP_ROOT),
-    }
+    scripts = {}
+    for name, path, expected_sha in (
+        ("server_release", RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256),
+        ("server_rollback", ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256),
+    ):
+        info = safe_file(path, root=APP_ROOT)
+        try:
+            raw = read_verified_script(path, expected_sha)
+            info["verified_bytes"] = len(raw)
+            info["verified_sha256"] = sha256_bytes(raw)
+        except Exception as exc:
+            info["verified_sha256"] = None
+            info["verification_error"] = f"{type(exc).__name__}: {exc}"
+        scripts[name] = info
     tmp = topo["temporary"]
     if lock_already_held:
         lock = safe_file(LOCK_PATH, root=APP_ROOT)
@@ -474,13 +580,16 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
     valid = bool(
         all(item.get("valid") for item in writable_directories.values())
         and tmp.get("valid") and tmp.get("writable")
-        and all(item.get("valid") and item.get("executable") for item in scripts.values())
-        and lock.get("valid") and all(command_paths.values())
+        and all(item.get("valid") and item.get("verified_sha256") for item in scripts.values())
+        and lock.get("valid") and all(item.get("valid") for item in command_paths.values())
+        and python_runtime_supported()
     )
     return {
         "valid": valid, "writable_directories": writable_directories,
         "temporary_writable": bool(tmp.get("writable")), "scripts": scripts,
-        "lock": lock, "commands_available": all(command_paths.values()),
+        "lock": lock, "commands_available": all(item.get("valid") for item in command_paths.values()),
+        "python_version": list(sys.version_info[:3]),
+        "python_version_supported": python_runtime_supported(),
     }
 
 
@@ -501,7 +610,7 @@ def audit_state(mode, lock_already_held=False):
     scripts = {"server-release.sh": release_sha, "server-rollback.sh": rollback_sha}
     staging = tree_manifest(DIST_DIR)
     current_tree = tree_manifest(Path(current)) if current else {"valid": False, "error": "current release missing"}
-    command_paths = {name: shutil.which(name) for name in FIXED_COMMANDS}
+    command_paths = {name: safe_system_binary(FIXED_BIN_PATHS[name]) for name in FIXED_COMMANDS}
     try:
         existing_label_releases = sorted(
             str(item.resolve(strict=True)) for item in RELEASES_DIR.iterdir()
@@ -685,8 +794,8 @@ def verify_exact_baseline_state(baseline, *, require_staging):
     )
     if any(not item.get("valid") or item.get("sha256") != expected_sha for item in articles):
         raise ReleaseError("baseline article raw parity is not restored")
-    if sha256_file(RELEASE_SCRIPT) != RELEASE_SCRIPT_SHA256 or sha256_file(ROLLBACK_SCRIPT) != ROLLBACK_SCRIPT_SHA256:
-        raise ReleaseError("release script integrity is not restored")
+    read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
+    read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
     cz_manifest = articles_cz_manifest()
     if not cz_manifest.get("valid") or cz_manifest.get("digest") != baseline.get("articles_cz", {}).get("digest") or cz_manifest.get("files") != baseline.get("articles_cz", {}).get("files"):
         raise ReleaseError("canonical articles-cz baseline is not restored")
@@ -736,6 +845,60 @@ def write_new_regular(path, raw, mode):
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def fsync_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
+            raise ReleaseError(f"unsafe directory fsync target: {path}")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def materialize_trusted_scripts(bundle, token, purpose):
+    if purpose not in {"apply", "rollback"} or not re.fullmatch(r"[0-9a-f]{16}", token):
+        raise ReleaseError("invalid trusted-script purpose/token")
+    root = bundle / f"trusted-scripts-{purpose}"
+    if root.exists() or root.is_symlink():
+        raise ReleaseError("trusted script directory already exists")
+    old_umask = os.umask(0)
+    try:
+        os.mkdir(root, 0o700)
+    finally:
+        os.umask(old_umask)
+    details = os.lstat(root)
+    if (
+        not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode)
+        or details.st_uid != 0 or stat.S_IMODE(details.st_mode) != 0o700
+        or root.resolve(strict=True).parent != bundle
+    ):
+        raise ReleaseError("trusted script directory topology is unsafe")
+    scripts = {}
+    try:
+        for name, source, expected_sha in (
+            ("server-release.sh", RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256),
+            ("server-rollback.sh", ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256),
+        ):
+            raw = read_verified_script(source, expected_sha)
+            target = root / name
+            write_new_regular(target, raw, 0o700)
+            observed = os.lstat(target)
+            if (
+                stat.S_IMODE(observed.st_mode) != 0o700 or observed.st_uid != 0
+                or sha256_file(target) != expected_sha
+            ):
+                raise ReleaseError(f"trusted script copy mismatch: {name}")
+            scripts[name] = target
+        fsync_directory(root)
+        fsync_directory(bundle)
+        return root, scripts
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
 
 
 def extract_candidate(bundle, baseline):
@@ -796,9 +959,39 @@ def extract_candidate(bundle, baseline):
         raise
 
 
-def run_fixed(command, timeout):
-    completed = subprocess.run(command, cwd=APP_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False, env={**os.environ, "APP_ROOT": str(APP_ROOT)})
-    receipt = {"command": command, "exit_code": completed.returncode, "stdout_tail": completed.stdout[-4000:], "stderr_tail": completed.stderr[-4000:]}
+def run_fixed(script_path, argument, timeout):
+    if not re.fullmatch(r"trusted-scripts-(apply|rollback)", script_path.parent.name) or script_path.name not in {"server-release.sh", "server-rollback.sh"}:
+        raise ReleaseError("refusing non-private fixed script execution")
+    expected_sha = RELEASE_SCRIPT_SHA256 if script_path.name == "server-release.sh" else ROLLBACK_SCRIPT_SHA256
+    details = os.lstat(script_path)
+    if (
+        not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode)
+        or details.st_nlink != 1 or details.st_uid != 0
+        or stat.S_IMODE(details.st_mode) != 0o700
+        or sha256_file(script_path) != expected_sha
+    ):
+        raise ReleaseError("trusted script changed before fixed execution")
+    parent = os.lstat(script_path.parent)
+    if (
+        not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != 0 or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise ReleaseError("trusted script directory changed before execution")
+    command = [FIXED_BIN_PATHS["bash"], str(script_path), argument]
+    env = {
+        "APP_ROOT": str(APP_ROOT), "PATH": FIXED_PATH,
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+    }
+    completed = subprocess.run(
+        command, cwd=script_path.parent, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout, check=False, env=env,
+    )
+    receipt = {
+        "script": script_path.name, "script_sha256": expected_sha,
+        "argument": argument, "exit_code": completed.returncode,
+        "stdout_tail": completed.stdout[-4000:], "stderr_tail": completed.stderr[-4000:],
+    }
     if completed.returncode != 0:
         raise ReleaseError(json.dumps(receipt, ensure_ascii=False))
     return receipt
@@ -827,6 +1020,8 @@ def apply_release(bundle):
         fresh = verify_fresh_baseline(baseline)
         candidate = extract_candidate(bundle, baseline)
         token = baseline["baseline_token"][:16]
+        trusted_root = None
+        trusted_scripts = None
         staging_backup = APP_ROOT / f".price-staging-backup-{token}"
         candidate_used = APP_ROOT / f".price-candidate-used-{token}"
         if staging_backup.exists() or staging_backup.is_symlink() or candidate_used.exists() or candidate_used.is_symlink():
@@ -839,6 +1034,7 @@ def apply_release(bundle):
         failure = None
         automatic_rollback = None
         try:
+            trusted_root, trusted_scripts = materialize_trusted_scripts(bundle, token, "apply")
             # Candidate extraction can take time. Re-prove the complete shared
             # baseline immediately before the first staging mutation.
             final_fresh = verify_fresh_baseline(baseline)
@@ -849,7 +1045,7 @@ def apply_release(bundle):
             os.replace(DIST_DIR, staging_backup)
             os.replace(candidate, DIST_DIR)
             candidate_at_dist = True
-            release_receipt = run_fixed([str(RELEASE_SCRIPT), RELEASE_LABEL], 180)
+            release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180)
             new_release = resolved(CURRENT_LINK)
             release_switched = new_release != baseline["current_release"]
             if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-10d9dc6", Path(new_release).name):
@@ -870,6 +1066,13 @@ def apply_release(bundle):
                 or cz_after.get("files") != baseline.get("articles_cz", {}).get("files")
             ):
                 raise ReleaseError("canonical articles-cz changed during release")
+            if (
+                sha256_file(trusted_scripts["server-release.sh"]) != RELEASE_SCRIPT_SHA256
+                or sha256_file(trusted_scripts["server-rollback.sh"]) != ROLLBACK_SCRIPT_SHA256
+            ):
+                raise ReleaseError("trusted script copies changed during release")
+            read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
+            read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
             apply_receipt = {
                 "schema": SCHEMA, "status": "released", "mode": "apply", "completed_at": utc_now(),
                 "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
@@ -887,7 +1090,11 @@ def apply_release(bundle):
             failure = exc
             if release_switched:
                 try:
-                    automatic_rollback = run_fixed([str(ROLLBACK_SCRIPT), Path(baseline["current_release"]).name], 180)
+                    automatic_rollback = run_fixed(
+                        trusted_scripts["server-rollback.sh"],
+                        Path(baseline["current_release"]).name,
+                        180,
+                    )
                     verify_exact_baseline_state(baseline, require_staging=False)
                 except Exception as rollback_exc:
                     failure = ReleaseError(f"apply failed and automatic rollback was not proved: {type(rollback_exc).__name__}: {rollback_exc}")
@@ -895,6 +1102,8 @@ def apply_release(bundle):
             restore_staging(candidate_at_dist, staging_backup, candidate_used)
             if candidate.exists():
                 shutil.rmtree(candidate)
+            if trusted_root is not None and trusted_root.exists():
+                shutil.rmtree(trusted_root)
         if failure is not None:
             try:
                 verify_exact_baseline_state(baseline, require_staging=True)
@@ -948,8 +1157,8 @@ def rollback_release(bundle):
         expected_article_sha = baseline["articles"]["canonical"]["sha256"]
         if any(item.get("sha256") != expected_article_sha for item in (canonical, current_articles, live)):
             raise ReleaseError("full canonical article baseline changed before rollback")
-        if sha256_file(RELEASE_SCRIPT) != RELEASE_SCRIPT_SHA256 or sha256_file(ROLLBACK_SCRIPT) != ROLLBACK_SCRIPT_SHA256:
-            raise ReleaseError("release script integrity changed before rollback")
+        read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
+        read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
         before_cz = articles_cz_manifest()
         if not before_cz.get("valid") or before_cz.get("digest") != baseline.get("articles_cz", {}).get("digest") or before_cz.get("files") != baseline.get("articles_cz", {}).get("files"):
             raise ReleaseError("canonical articles-cz baseline changed before rollback")
@@ -958,15 +1167,24 @@ def rollback_release(bundle):
             raise ReleaseError("exact baseline release tree changed before rollback")
         if tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
             raise ReleaseError("restored staging dist changed before rollback")
-        rollback_receipt = run_fixed([str(ROLLBACK_SCRIPT), Path(baseline["current_release"]).name], 180)
-        verification = verify_exact_baseline_state(baseline, require_staging=True)
-        return {
-            "schema": SCHEMA, "status": "rolled_back", "mode": "rollback", "completed_at": utc_now(),
-            "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
-            "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
-            "rolled_back_from": exact_new, "current_release": resolved(CURRENT_LINK), "rollback": rollback_receipt,
-            "verification": verification,
-        }
+        trusted_root, trusted_scripts = materialize_trusted_scripts(
+            bundle, baseline["baseline_token"][:16], "rollback",
+        )
+        try:
+            rollback_receipt = run_fixed(
+                trusted_scripts["server-rollback.sh"], Path(baseline["current_release"]).name, 180,
+            )
+            verification = verify_exact_baseline_state(baseline, require_staging=True)
+            return {
+                "schema": SCHEMA, "status": "rolled_back", "mode": "rollback", "completed_at": utc_now(),
+                "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
+                "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
+                "rolled_back_from": exact_new, "current_release": resolved(CURRENT_LINK), "rollback": rollback_receipt,
+                "verification": verification,
+            }
+        finally:
+            if trusted_root.exists():
+                shutil.rmtree(trusted_root)
 
 
 def main():

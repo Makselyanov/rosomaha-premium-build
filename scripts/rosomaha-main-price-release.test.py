@@ -4,7 +4,9 @@ import importlib.util
 import ast
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 import urllib.error
 from pathlib import Path
@@ -19,6 +21,23 @@ spec = importlib.util.spec_from_file_location("rosomaha_main_price_release", HEL
 assert spec and spec.loader
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
+
+
+def operator_source() -> str:
+    raw = OPERATOR_PATH.read_text(encoding="utf-8")
+    return raw[raw.index("<<'PY'\n") + len("<<'PY'\n") : raw.rindex("\nPY")]
+
+
+def operator_namespace() -> dict:
+    source = operator_source().rsplit("raise SystemExit(main())", 1)[0]
+    fake_fcntl = types.ModuleType("fcntl")
+    fake_pwd = types.ModuleType("pwd")
+    with mock.patch.dict(sys.modules, {"fcntl": fake_fcntl, "pwd": fake_pwd}), mock.patch.object(
+        sys, "argv", ["operator", "audit", ""],
+    ):
+        namespace = {"__name__": "rosomaha_operator_test"}
+        exec(compile(source, str(OPERATOR_PATH), "exec"), namespace)
+    return namespace
 
 
 def page_html(path: str, price: int | str | float | None = None, *, title: str = "Модель Росомаха", description: str = "Описание") -> bytes:
@@ -72,9 +91,24 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertEqual(helper.TARGET_COMMIT, "10d9dc666bccbe9fb250ab29a69ae09710537e77")
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
-        self.assertEqual(len(helper.ARTICLES_CZ_ALLOWLIST), 14)
+        self.assertEqual(len(helper.ARTICLES_CZ_ALLOWLIST), 33)
         self.assertIn("avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts", helper.ARTICLES_CZ_ALLOWLIST)
         self.assertIn("rosomaha-zastryala-v-bolote-spokoynyy-poryadok-deystviy-bez-lishney-suety.ts", helper.ARTICLES_CZ_ALLOWLIST)
+        self.assertIn("bolotohod-ili-smert-pochemu-aprel-ubivaet-tehniku-silnee-chem-yanvar.ts", helper.ARTICLES_CZ_ALLOWLIST)
+
+    def test_exact_33_file_cz_allowlist_is_identical_in_wrapper_and_operator(self) -> None:
+        expected_digest = "bcf61fd319d10727dd32956b87c97f80d31e763dc5f20052ad9c25e4be6409f6"
+        observed_digest = helper.sha256_bytes(("\n".join(helper.ARTICLES_CZ_ALLOWLIST) + "\n").encode("utf-8"))
+        self.assertEqual(observed_digest, expected_digest)
+        raw = OPERATOR_PATH.read_text(encoding="utf-8")
+        embedded = raw[raw.index("<<'PY'\n") + len("<<'PY'\n") : raw.rindex("\nPY")]
+        tree = ast.parse(embedded)
+        assignment = next(
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "ARTICLES_CZ_ALLOWLIST" for target in node.targets)
+        )
+        self.assertEqual(ast.literal_eval(assignment.value), helper.ARTICLES_CZ_ALLOWLIST)
 
     def test_saved_acl_does_not_treat_c_users_path_as_builtin_users(self) -> None:
         current_sid = "S-1-5-21-111-222-333-1001"
@@ -117,6 +151,71 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertNotIn(" | None", source)
         self.assertNotRegex(source, r":\s*(?:dict|list|tuple|set)\[")
 
+    def test_operator_entry_and_all_wrapper_remote_commands_are_absolute(self) -> None:
+        operator = OPERATOR_PATH.read_text(encoding="utf-8")
+        wrapper = HELPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("exec /usr/bin/python3 -I -B -", operator)
+        self.assertNotRegex(wrapper, r'run_remote\([^\n]*["\']bash -s')
+        self.assertGreaterEqual(wrapper.count("/bin/bash -s --"), 3)
+
+    def test_root_readiness_rejects_python_38_runtime(self) -> None:
+        namespace = operator_namespace()
+        supported = namespace["python_runtime_supported"]
+        self.assertFalse(supported((3, 8, 20)))
+        self.assertTrue(supported((3, 9, 0)))
+
+    def test_fixed_binary_validation_accepts_only_intended_root_owned_realpaths(self) -> None:
+        source = operator_source()
+        body = source[source.index("def safe_system_binary") : source.index("def safe_directory")]
+        self.assertIn('{"/bin/bash", "/usr/bin/bash"}', body)
+        self.assertIn(r'/usr/bin/python3(?:\.[0-9]+)?', body)
+        self.assertIn("link_details.st_uid == 0", body)
+        self.assertIn("details.st_uid == 0", body)
+        self.assertIn("stat.S_IMODE(details.st_mode) & 0o022", body)
+        self.assertIn("ancestor_details.st_uid != 0", body)
+
+    def test_root_never_executes_mutable_app_root_scripts(self) -> None:
+        source = operator_source()
+        runner = source[source.index("def run_fixed") : source.index("def restore_staging")]
+        apply_body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        rollback_body = source[source.index("def rollback_release") : source.index("def main")]
+        self.assertIn('command = [FIXED_BIN_PATHS["bash"], str(script_path), argument]', runner)
+        self.assertIn("trusted script changed before fixed execution", runner)
+        self.assertIn('"PATH": FIXED_PATH', runner)
+        self.assertNotIn("os.environ", runner)
+        self.assertNotIn("str(RELEASE_SCRIPT)", runner)
+        self.assertNotIn("str(ROLLBACK_SCRIPT)", runner)
+        self.assertNotIn("str(RELEASE_SCRIPT)", apply_body)
+        self.assertNotIn("str(ROLLBACK_SCRIPT)", apply_body)
+        self.assertNotIn("str(ROLLBACK_SCRIPT)", rollback_body)
+        self.assertIn('trusted_scripts["server-release.sh"]', apply_body)
+        self.assertIn('trusted_scripts["server-rollback.sh"]', apply_body)
+        self.assertIn('trusted_scripts["server-rollback.sh"]', rollback_body)
+
+    def test_trusted_script_snapshot_is_exclusive_private_hashed_and_fsynced(self) -> None:
+        source = operator_source()
+        reader = source[source.index("def read_verified_script") : source.index("def canonical_json")]
+        writer = source[source.index("def write_new_regular") : source.index("def extract_candidate")]
+        self.assertIn('getattr(os, "O_NOFOLLOW", 0)', reader)
+        self.assertIn("os.fstat(fd)", reader)
+        self.assertIn("sha256_bytes(raw) != expected_sha", reader)
+        self.assertIn("os.O_EXCL", writer)
+        self.assertIn("os.mkdir(root, 0o700)", writer)
+        self.assertIn("write_new_regular(target, raw, 0o700)", writer)
+        self.assertIn("fsync_directory(root)", writer)
+        self.assertIn("fsync_directory(bundle)", writer)
+
+    def test_script_source_is_reverified_after_private_copy_and_after_switch(self) -> None:
+        source = operator_source()
+        body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        copied = body.index("materialize_trusted_scripts")
+        final_baseline = body.index("final_fresh = verify_fresh_baseline", copied)
+        switched = body.index('release_receipt = run_fixed(trusted_scripts["server-release.sh"]', final_baseline)
+        post_source = body.index("read_verified_script(RELEASE_SCRIPT", switched)
+        self.assertLess(copied, final_baseline)
+        self.assertLess(final_baseline, switched)
+        self.assertLess(switched, post_source)
+
     def test_connect_rejects_unpinned_role_before_loading_key(self) -> None:
         with mock.patch.object(helper, "pinned_identity") as pinned:
             with self.assertRaisesRegex(helper.HelperError, "unsupported pinned SSH role"):
@@ -129,7 +228,8 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         apply_body = source[source.index("def apply(") : source.index("def argument_parser")]
         recovery_body = source[source.index("def bounded_reconnect") : source.index("def apply(")]
         self.assertIn("connect(AUDIT_LOGIN)", audit_body)
-        self.assertIn('remote_audit(client, "audit", AUDIT_LOGIN)', audit_body)
+        self.assertIn("frozen_operator = operator_bytes()", audit_body)
+        self.assertIn('remote_audit(client, "audit", AUDIT_LOGIN, frozen_operator)', audit_body)
         self.assertNotIn("APPLY_LOGIN", audit_body)
         self.assertIn("connect(APPLY_LOGIN)", apply_body)
         self.assertIn('remote_audit(client, "root-audit", APPLY_LOGIN)', apply_body)
@@ -184,9 +284,9 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         body = text[text.index("def root_apply_readiness") : text.index("def audit_state")]
         self.assertIn('safe_directory(path, root=APP_ROOT, writable=True)', body)
         self.assertIn('tmp.get("writable")', body)
-        self.assertIn('item.get("executable")', body)
+        self.assertIn('item.get("verified_sha256")', body)
         self.assertIn('lock.get("valid")', body)
-        self.assertIn('all(command_paths.values())', body)
+        self.assertIn('all(item.get("valid") for item in command_paths.values())', body)
 
     def test_bundle_upload_has_no_permission_mutation(self) -> None:
         source = HELPER_PATH.read_text(encoding="utf-8")
@@ -630,14 +730,19 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                     continue
                 slug = f"cz-{index}"
                 slugs.append(slug)
-                (cz / name).write_text(f"export default {{ slug: '{slug}' }};\n", encoding="utf-8")
-                imports.append(f"import item{index} from './{Path(name).stem}';")
+                export_name = f"item{index}Article"
+                (cz / name).write_text(
+                    f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
+                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
             (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
             (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'manual' };", encoding="utf-8")
             (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
             result = helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
             self.assertTrue(result["valid"])
             self.assertEqual(result["union_count"], len(slugs) + 2)
+            self.assertEqual(result["excluded_files"], [])
 
     def test_articles_cz_missing_import_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
@@ -653,12 +758,66 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                     continue
                 slug = f"cz-{index}"
                 slugs.append(slug)
-                (cz / name).write_text(f"export default {{ slug: '{slug}' }};\n", encoding="utf-8")
+                (cz / name).write_text(
+                    f"export const item{index}Article: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
             (cz / "index.ts").write_text("", encoding="utf-8")
             (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'manual' };", encoding="utf-8")
             (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
             with self.assertRaises(helper.HelperError):
                 helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
+
+    def test_articles_cz_noncanonical_file_is_excluded_from_generated_index(self) -> None:
+        helper.TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=helper.TEMP_ROOT) as raw_root:
+            root = Path(raw_root)
+            snapshot = root / "canonical"
+            cz = snapshot / "src/data/articles-cz"
+            worktree = root / "worktree"
+            target_cz = worktree / "src/data/articles-cz"
+            (worktree / "src/data").mkdir(parents=True)
+            (worktree / "public/api").mkdir(parents=True)
+            (snapshot / "public/api").mkdir(parents=True)
+            cz.mkdir(parents=True)
+            target_cz.mkdir(parents=True)
+            (target_cz / "index.ts").write_text("export const czArticles = [];\n", encoding="utf-8")
+            canonical_slugs = ["manual", "tyumen"]
+            imports = []
+            for index, name in enumerate(helper.ARTICLES_CZ_ALLOWLIST):
+                if name == "index.ts":
+                    continue
+                slug = f"cz-{index}"
+                if index == 0:
+                    slug = "draft-only-slug"
+                else:
+                    canonical_slugs.append(slug)
+                export_name = f"item{index}Article"
+                (cz / name).write_text(
+                    f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
+                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
+            (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
+            (worktree / "src/data/articles.ts").write_text(
+                "import { czArticles } from './articles-cz/index';\nexport const x = { slug: 'manual' };",
+                encoding="utf-8",
+            )
+            (worktree / "src/data/tyumen-exhibition.ts").write_text(
+                "export const x = { slug: 'tyumen' };",
+                encoding="utf-8",
+            )
+            (snapshot / "public/api/articles.json").write_text(
+                json.dumps([{"slug": slug} for slug in canonical_slugs]),
+                encoding="utf-8",
+            )
+            validation = helper.validate_articles_cz(snapshot, worktree, canonical_slugs)
+            self.assertEqual(len(validation["excluded_files"]), 1)
+            self.assertEqual(validation["excluded_files"][0]["slug"], "draft-only-slug")
+            helper.overlay_canonical(snapshot, worktree, validation)
+            generated = (target_cz / "index.ts").read_text(encoding="utf-8")
+            self.assertNotIn("draft-only-slug", generated)
+            self.assertNotIn(Path(validation["excluded_files"][0]["name"]).stem, generated)
 
     def test_tree_manifest_rejects_hardlinked_candidate_file(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
@@ -682,6 +841,38 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             item.write_text("two", encoding="utf-8")
             second = helper.tree_manifest(root)["digest"]
             self.assertNotEqual(first, second)
+
+    def test_operator_tree_manifest_is_order_independent(self) -> None:
+        namespace = operator_namespace()
+        tree_manifest = namespace["tree_manifest"]
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            (root / "z-dir").mkdir()
+            (root / "a-dir").mkdir()
+            (root / "z-dir/z.txt").write_text("z", encoding="utf-8")
+            (root / "a-dir/a.txt").write_text("a", encoding="utf-8")
+            (root / "middle.txt").write_text("m", encoding="utf-8")
+            namespace["APP_ROOT"] = root
+            original_walk = namespace["os"].walk
+            observed = [
+                (current, list(dir_names), list(file_names))
+                for current, dir_names, file_names in original_walk(root, followlinks=False)
+            ]
+
+            def ordered(reverse: bool):
+                rows = list(reversed(observed)) if reverse else list(observed)
+                for current, dir_names, file_names in rows:
+                    yield current, list(reversed(dir_names)), list(reversed(file_names))
+
+            with mock.patch.object(namespace["os"], "walk", side_effect=lambda *_args, **_kwargs: ordered(False)):
+                first = tree_manifest(root)
+            with mock.patch.object(namespace["os"], "walk", side_effect=lambda *_args, **_kwargs: ordered(True)):
+                second = tree_manifest(root)
+            self.assertEqual(first["digest"], second["digest"])
+            self.assertEqual(
+                [item["path"] for item in first["files"]],
+                sorted(item["path"] for item in first["files"]),
+            )
 
     def test_read_http_retries_three_times(self) -> None:
         class FakeOpener:
@@ -736,7 +927,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             "articles": {"canonical": {"sha256": "article"}},
         }
 
-        def audit(current: str, tree: str) -> dict:
+        def audit(current: str, tree: str, labels: list[str] | None = None) -> dict:
             return {
                 "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
                 "mode": "root-audit", "roles": helper.ROLES,
@@ -746,15 +937,46 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                 "staging_dist": {"valid": True, "digest": "staging"},
                 "articles_cz": {"valid": True, "digest": "cz", "files": [{"name": "index.ts"}]},
                 "release_scripts": baseline["release_scripts"],
+                "existing_label_releases": [] if labels is None else labels,
                 "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
             }
 
         new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-10d9dc6"
         receipt = {"new_release": new_release}
-        self.assertEqual(helper.classify_recovery_state(audit(new_release, "new-tree"), baseline, receipt), "released_candidate")
+        self.assertEqual(helper.classify_recovery_state(audit(new_release, "new-tree", [new_release]), baseline, receipt), "released_candidate")
         self.assertEqual(helper.classify_recovery_state(audit(baseline["current_release"], "old-tree"), baseline, None), "original")
-        broken = audit(new_release, "wrong")
+        broken = audit(new_release, "wrong", [new_release])
         self.assertEqual(helper.classify_recovery_state(broken, baseline, receipt), "unexpected")
+
+    def test_recovery_residual_or_extra_release_label_is_ambiguous(self) -> None:
+        baseline = {
+            "current_release": "/var/www/rosomaha/_releases/original",
+            "current_tree": {"digest": "old-tree"}, "candidate": {"tree_digest": "new-tree"},
+            "staging_dist": {"digest": "staging"},
+            "articles_cz": {"digest": "cz", "files": [{"name": "index.ts"}]},
+            "release_scripts": {"server-release.sh": "r", "server-rollback.sh": "b"},
+            "articles": {"canonical": {"sha256": "article"}},
+        }
+        base_audit = {
+            "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
+            "mode": "root-audit", "roles": helper.ROLES, "root_readiness": {"valid": True},
+            "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
+            "current_release": baseline["current_release"],
+            "current_tree": {"valid": True, "digest": "old-tree"},
+            "staging_dist": {"valid": True, "digest": "staging"},
+            "articles_cz": {"valid": True, "digest": "cz", "files": [{"name": "index.ts"}]},
+            "release_scripts": baseline["release_scripts"],
+            "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
+        }
+        residual = dict(base_audit, existing_label_releases=["/var/www/rosomaha/_releases/partial-prices-10d9dc6"])
+        self.assertEqual(helper.classify_recovery_state(residual, baseline, None), "unexpected")
+        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-10d9dc6"
+        released = dict(
+            base_audit, current_release=new_release,
+            current_tree={"valid": True, "digest": "new-tree"},
+            existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-10d9dc6"],
+        )
+        self.assertEqual(helper.classify_recovery_state(released, baseline, {"new_release": new_release}), "unexpected")
 
     def test_candidate_archive_members_are_fixed_under_dist(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
