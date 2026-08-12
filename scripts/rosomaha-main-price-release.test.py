@@ -836,7 +836,8 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                     f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
                     encoding="utf-8",
                 )
-                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
+                if slug != "draft-only-slug":
+                    imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
             (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
             (worktree / "src/data/articles.ts").write_text(
                 "import { czArticles } from './articles-cz/index';\nexport const x = { slug: 'manual' };",

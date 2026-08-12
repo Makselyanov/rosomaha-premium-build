@@ -1040,7 +1040,7 @@ def validate_articles_cz(snapshot_root: Path, worktree: Path, canonical_slugs: l
             excluded_entries.append({"name": name, "stem": stem, "slug": slug, "export_name": export_name})
     index_raw = (cz_root / "index.ts").read_text(encoding="utf-8-sig")
     imports = re.findall(r"\bfrom\s+['\"]\./([^'\"]+)['\"]", index_raw)
-    expected_stems = sorted(Path(name).stem for name in article_names)
+    expected_stems = sorted(entry["stem"] for entry in included_entries)
     if sorted(imports) != expected_stems or len(imports) != len(set(imports)):
         raise HelperError("articles-cz index does not import each allowlisted article exactly once")
 
@@ -1108,7 +1108,6 @@ def overlay_canonical(snapshot_root: Path, worktree: Path, cz_validation: dict[s
     articles_source = (worktree / "src/data/articles.ts").read_text(encoding="utf-8-sig")
     if "from './articles-cz/index'" not in articles_source and 'from "./articles-cz/index"' not in articles_source:
         raise HelperError("pinned commit lacks the explicit articles-cz/index import fix")
-    filtered_entries = list(cz_validation.get("excluded_files", []))
     included_names = set(cz_validation.get("included_files", []))
     filtered_entries = []
     for name in ARTICLES_CZ_ALLOWLIST:
