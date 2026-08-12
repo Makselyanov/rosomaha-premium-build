@@ -63,9 +63,12 @@ class FakeResponse:
         return self.url
 
 
-class MainPriceReleaseV2Test(unittest.TestCase):
+class MainPriceReleaseV3Test(unittest.TestCase):
     def test_fixed_identity_and_commit_are_pinned(self) -> None:
-        self.assertEqual(helper.EXPECTED_LOGIN, "deploy")
+        self.assertEqual(helper.SCHEMA, "rosomaha-main-price-release/v3")
+        self.assertEqual(helper.AUDIT_LOGIN, "deploy")
+        self.assertEqual(helper.APPLY_LOGIN, "root")
+        self.assertEqual(helper.ROLES, {"audit": "deploy", "apply": "root"})
         self.assertEqual(helper.TARGET_COMMIT, "10d9dc666bccbe9fb250ab29a69ae09710537e77")
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
@@ -113,6 +116,84 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         ast.parse(source, str(OPERATOR_PATH), feature_version=(3, 8))
         self.assertNotIn(" | None", source)
         self.assertNotRegex(source, r":\s*(?:dict|list|tuple|set)\[")
+
+    def test_connect_rejects_unpinned_role_before_loading_key(self) -> None:
+        with mock.patch.object(helper, "pinned_identity") as pinned:
+            with self.assertRaisesRegex(helper.HelperError, "unsupported pinned SSH role"):
+                helper.connect("administrator")
+        pinned.assert_not_called()
+
+    def test_wrapper_routes_read_audit_and_release_to_exact_roles(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        audit_body = source[source.index("def audit()") : source.index("def safe_baseline_path")]
+        apply_body = source[source.index("def apply(") : source.index("def argument_parser")]
+        recovery_body = source[source.index("def bounded_reconnect") : source.index("def apply(")]
+        self.assertIn("connect(AUDIT_LOGIN)", audit_body)
+        self.assertIn('remote_audit(client, "audit", AUDIT_LOGIN)', audit_body)
+        self.assertNotIn("APPLY_LOGIN", audit_body)
+        self.assertIn("connect(APPLY_LOGIN)", apply_body)
+        self.assertIn('remote_audit(client, "root-audit", APPLY_LOGIN)', apply_body)
+        self.assertIn("connect(APPLY_LOGIN)", recovery_body)
+
+    def test_root_preflight_happens_before_any_bundle_upload(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        body = source[source.index("def apply(") : source.index("def argument_parser")]
+        self.assertLess(body.index('remote_audit(client, "root-audit", APPLY_LOGIN)'), body.index("upload_bundle("))
+        self.assertLess(body.index('root_preflight["server_baseline_token"]'), body.index("upload_bundle("))
+
+    def test_operator_modes_and_identity_gates_are_split(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        identity = text[text.index("def identity_for_mode") : text.index("def lock_readiness")]
+        apply_body = text[text.index("def apply_release") : text.index("def rollback_release")]
+        rollback_body = text[text.index("def rollback_release") : text.index("def main")]
+        self.assertIn('audit|root-audit', text)
+        self.assertIn('mode == "audit"', identity)
+        self.assertIn('mode in {"root-audit", "apply", "rollback"}', identity)
+        self.assertIn('login == APPLY_LOGIN and uid == 0 and euid == 0', identity)
+        self.assertIn('identity_for_mode("apply")["valid"]', apply_body)
+        self.assertIn('identity_for_mode("rollback")["valid"]', rollback_body)
+
+    def test_deploy_topology_is_read_only_and_not_write_gated(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        topology = text[text.index("def topology") : text.index("def identity_for_mode")]
+        self.assertNotIn("writable=True", topology)
+        self.assertIn('"releases": safe_directory(RELEASES_DIR, root=APP_ROOT)', topology)
+        self.assertIn('"dist": safe_directory(DIST_DIR, root=APP_ROOT)', topology)
+
+    def test_root_audit_has_no_mutation_path(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        audit = text[text.index("def audit_state") : text.index("def stable_topology_material")]
+        readiness = text[text.index("def lock_readiness") : text.index("def audit_state")]
+        for forbidden in ("write_text", "write_bytes", "os.replace", "shutil.rmtree", "subprocess.run", "os.O_CREAT"):
+            self.assertNotIn(forbidden, audit)
+            self.assertNotIn(forbidden, readiness)
+        self.assertIn('root_apply_readiness(topo, command_paths, lock_already_held)', audit)
+
+    def test_server_baseline_token_is_actor_neutral(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        stable = text[text.index("def stable_topology_material") : text.index("def full_baseline_token")]
+        self.assertNotIn('value["account"]', stable)
+        self.assertNotIn('value["identity"]', stable)
+        self.assertNotIn('value["root_readiness"]', stable)
+        self.assertNotIn('"writable"', stable)
+        self.assertNotIn('"readable"', stable)
+        self.assertIn('"roles": value["roles"]', stable)
+
+    def test_root_readiness_is_inspection_only_and_complete(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        body = text[text.index("def root_apply_readiness") : text.index("def audit_state")]
+        self.assertIn('safe_directory(path, root=APP_ROOT, writable=True)', body)
+        self.assertIn('tmp.get("writable")', body)
+        self.assertIn('item.get("executable")', body)
+        self.assertIn('lock.get("valid")', body)
+        self.assertIn('all(command_paths.values())', body)
+
+    def test_bundle_upload_has_no_permission_mutation(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        body = source[source.index("def sftp_upload_file") : source.index("def cleanup_bundle_sftp")]
+        self.assertNotIn(".chmod(", body)
+        self.assertIn("stat.S_IMODE(attr.st_mode) & 0o022", body)
+        self.assertIn("mode=0o700", body)
 
     def test_parse_operator_json_accepts_banner_and_exact_json_line(self) -> None:
         payload = helper.parse_operator_json({
@@ -365,6 +446,27 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertEqual(summary["articles_cz"]["observed"], observed[:128])
         self.assertTrue(summary["articles_cz"]["observed_truncated"])
 
+    def test_blocked_summary_explains_root_readiness_without_hashes(self) -> None:
+        payload = {
+            "status": "blocked",
+            "blockers": ["root apply readiness is not proved"],
+            "topology": {"valid": True, "directories": {}, "files": {}, "current_link": {"valid": True}, "temporary": {"valid": True}},
+            "articles_cz": {"valid": True},
+            "root_readiness": {
+                "valid": False, "temporary_writable": True, "commands_available": True,
+                "writable_directories": {
+                    "dist": {"path": "/var/www/rosomaha/dist", "valid": False, "writable": False, "sha256": "hidden"},
+                },
+                "scripts": {"server_release": {"path": "/var/www/rosomaha/scripts/server-release.sh", "valid": True, "executable": False, "sha256": "hidden"}},
+                "lock": {"path": "/var/www/rosomaha/.rosomaha-main-price-release.lock", "valid": False, "available": False},
+            },
+        }
+        summary = json.loads(helper.summarize_blocked_payload(payload))
+        invalid = summary["root_readiness"]["invalid"]
+        self.assertEqual(sorted(invalid), ["lock", "scripts.server_release", "writable_directories.dist"])
+        self.assertFalse(invalid["scripts.server_release"]["executable"])
+        self.assertNotIn("sha256", json.dumps(summary))
+
     def test_operator_has_no_privileged_or_server_build_path(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
         self.assertNotIn("ROOT_OPERATOR", text)
@@ -372,8 +474,11 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertNotIn("npm run build", text)
         self.assertNotIn("src/data/products.ts", text)
         self.assertNotIn("src/data/models.ts", text)
-        self.assertIn('EXPECTED_LOGIN = "deploy"', text)
-        self.assertIn("os.geteuid() == 0", text)
+        self.assertNotIn("os.chmod", text)
+        self.assertNotIn("os.chown", text)
+        self.assertIn('AUDIT_LOGIN = "deploy"', text)
+        self.assertIn('APPLY_LOGIN = "root"', text)
+        self.assertIn('euid == 0', text)
 
     def test_operator_rollback_takes_flock_before_state_checks(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
@@ -403,6 +508,18 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertIn("verify_exact_baseline_state(baseline, require_staging=False)", body)
         self.assertIn("verify_exact_baseline_state(baseline, require_staging=True)", body)
         self.assertIn("staging dist was not restored after successful release", body)
+
+    def test_operator_rechecks_full_baseline_immediately_before_swap_and_after_release(self) -> None:
+        text = OPERATOR_PATH.read_text(encoding="utf-8")
+        body = text[text.index("def apply_release") : text.index("def rollback_release")]
+        extract_at = body.index("candidate = extract_candidate")
+        final_at = body.index("final_fresh = verify_fresh_baseline", extract_at)
+        swap_at = body.index("os.replace(DIST_DIR, staging_backup)")
+        self.assertLess(extract_at, final_at)
+        self.assertLess(final_at, swap_at)
+        self.assertIn('canonical_after = article_file(CANONICAL_ARTICLES, "canonical-after-release")', body)
+        self.assertIn("cz_after = articles_cz_manifest()", body)
+        self.assertIn("canonical articles-cz changed during release", body)
 
     def test_operator_rollback_proves_articles_cz_baseline(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
@@ -606,6 +723,7 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertNotIn('invoke_operator(client, "apply"', body)
         self.assertIn("ambiguous_apply_requires_recovery", body)
         self.assertIn("bundle_preserved", body)
+        self.assertIn("raw_remote_audit(client)", body)
 
     def test_recovery_classifies_released_original_and_unexpected(self) -> None:
         baseline = {
@@ -620,7 +738,9 @@ class MainPriceReleaseV2Test(unittest.TestCase):
 
         def audit(current: str, tree: str) -> dict:
             return {
-                "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.EXPECTED_LOGIN,
+                "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
+                "mode": "root-audit", "roles": helper.ROLES,
+                "root_readiness": {"valid": True},
                 "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
                 "current_release": current, "current_tree": {"valid": True, "digest": tree},
                 "staging_dist": {"valid": True, "digest": "staging"},

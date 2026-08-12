@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fixed non-root production operator for one approved catalog-price release.
-# It never builds from, uploads to, or edits the mutable server source tree.
+# Fixed split-role production operator for one approved catalog-price release.
+# Deploy may only audit. Root may only preflight/apply/rollback. The operator
+# never builds from, uploads to, or edits the mutable server source tree.
 
 MODE="${1:-audit}"
 BUNDLE_DIR="${2:-}"
 
 case "$MODE" in
-  audit) ;;
+  audit|root-audit) ;;
   apply|rollback)
     [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-10d9dc6-[0-9a-f]{16}$ ]] || {
       echo '{"status":"error","error":"invalid fixed bundle path"}'
@@ -21,7 +22,7 @@ case "$MODE" in
     ;;
 esac
 
-exec python3 - "$MODE" "$BUNDLE_DIR" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 exec python3 - "$MODE" "$BUNDLE_DIR" <<'PY'
 from __future__ import annotations
 
 import fcntl
@@ -45,9 +46,11 @@ from pathlib import Path, PurePosixPath
 MODE = sys.argv[1]
 BUNDLE_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
 
-SCHEMA = "rosomaha-main-price-release/v2"
+SCHEMA = "rosomaha-main-price-release/v3"
 HOST = "90.156.168.115"
-EXPECTED_LOGIN = "deploy"
+AUDIT_LOGIN = "deploy"
+APPLY_LOGIN = "root"
+ROLES = {"audit": AUDIT_LOGIN, "apply": APPLY_LOGIN}
 TARGET_COMMIT = "10d9dc666bccbe9fb250ab29a69ae09710537e77"
 RELEASE_LABEL = "prices-10d9dc6"
 APP_ROOT = Path("/var/www/rosomaha")
@@ -79,12 +82,12 @@ ARTICLES_CZ_ALLOWLIST = (
     "top-5-neochevidnyh-problem-s-kotorymi-stalkivayutsya-vladeltsy-kvadrotsiklov-vesnoy-i-kak-ih-izbezhat.ts",
     "vesenniy-tyuning-7-byudzhetnyh-apgreydov-kotorye-preobrazyat-vash-kvadrotsikl-k-letu.ts",
 )
-BUNDLE_FILES = {
-    "baseline.json": 0o600,
-    "candidate.tar.gz": 0o600,
-    "candidate-manifest.json": 0o600,
-    "operator.sh": 0o700,
-}
+BUNDLE_FILES = (
+    "baseline.json",
+    "candidate.tar.gz",
+    "candidate-manifest.json",
+    "operator.sh",
+)
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
@@ -128,7 +131,7 @@ def within(root, path):
         return False
 
 
-def safe_directory(path, *, root, optional=False, writable=False):
+def safe_directory(path, *, root, optional=False, readable=True, writable=False):
     try:
         details = os.lstat(path)
     except FileNotFoundError:
@@ -141,17 +144,19 @@ def safe_directory(path, *, root, optional=False, writable=False):
         and not stat.S_ISLNK(details.st_mode)
         and realpath is not None
         and within(root, path)
+        and (not readable or os.access(path, os.R_OK | os.X_OK))
         and (not writable or os.access(path, os.W_OK | os.X_OK))
     )
     return {
         "path": str(path), "exists": True, "realpath": realpath,
         "directory": stat.S_ISDIR(details.st_mode), "symlink": stat.S_ISLNK(details.st_mode),
         "uid": details.st_uid, "gid": details.st_gid, "mode": oct(stat.S_IMODE(details.st_mode)),
+        "readable": os.access(path, os.R_OK | os.X_OK),
         "writable": os.access(path, os.W_OK | os.X_OK), "valid": valid,
     }
 
 
-def safe_file(path, *, root, writable=False):
+def safe_file(path, *, root, readable=True, writable=False):
     try:
         details = os.lstat(path)
     except OSError as exc:
@@ -163,6 +168,7 @@ def safe_file(path, *, root, writable=False):
         and details.st_nlink == 1
         and realpath is not None
         and within(root, path)
+        and (not readable or os.access(path, os.R_OK))
         and (not writable or os.access(path, os.W_OK))
     )
     return {
@@ -170,7 +176,8 @@ def safe_file(path, *, root, writable=False):
         "regular": stat.S_ISREG(details.st_mode), "symlink": stat.S_ISLNK(details.st_mode),
         "nlink": details.st_nlink, "uid": details.st_uid, "gid": details.st_gid,
         "mode": oct(stat.S_IMODE(details.st_mode)), "sha256": sha256_file(path) if valid else None,
-        "writable": os.access(path, os.W_OK), "valid": valid,
+        "readable": os.access(path, os.R_OK), "writable": os.access(path, os.W_OK),
+        "executable": os.access(path, os.X_OK), "valid": valid,
     }
 
 
@@ -299,14 +306,17 @@ def rollback_target(current):
 
 
 def topology():
+    """Actor-neutral read topology used by both audit roles."""
     dirs = {
-        "app_root": safe_directory(APP_ROOT, root=APP_ROOT, writable=True),
+        "app_root": safe_directory(APP_ROOT, root=APP_ROOT),
+        "src": safe_directory(APP_ROOT / "src", root=APP_ROOT),
+        "src_data": safe_directory(APP_ROOT / "src/data", root=APP_ROOT),
         "public": safe_directory(APP_ROOT / "public", root=APP_ROOT),
         "public_api": safe_directory(APP_ROOT / "public/api", root=APP_ROOT),
         "articles_cz": safe_directory(ARTICLES_CZ_DIR, root=APP_ROOT),
         "scripts": safe_directory(APP_ROOT / "scripts", root=APP_ROOT),
-        "releases": safe_directory(RELEASES_DIR, root=APP_ROOT, writable=True),
-        "dist": safe_directory(DIST_DIR, root=APP_ROOT, writable=True),
+        "releases": safe_directory(RELEASES_DIR, root=APP_ROOT),
+        "dist": safe_directory(DIST_DIR, root=APP_ROOT),
     }
     files = {
         "canonical_articles": safe_file(CANONICAL_ARTICLES, root=APP_ROOT),
@@ -328,15 +338,118 @@ def topology():
     try:
         tmp = Path("/tmp")
         details = os.lstat(tmp)
-        tmp_info = {"path": "/tmp", "realpath": resolved(tmp), "directory": stat.S_ISDIR(details.st_mode), "symlink": stat.S_ISLNK(details.st_mode), "sticky": bool(details.st_mode & stat.S_ISVTX)}
-        tmp_info["valid"] = bool(tmp_info["directory"] and not tmp_info["symlink"] and tmp_info["realpath"] == "/tmp" and tmp_info["sticky"])
+        tmp_info = {
+            "path": "/tmp", "realpath": resolved(tmp),
+            "directory": stat.S_ISDIR(details.st_mode), "symlink": stat.S_ISLNK(details.st_mode),
+            "sticky": bool(details.st_mode & stat.S_ISVTX),
+            "readable": os.access(tmp, os.R_OK | os.X_OK),
+            "writable": os.access(tmp, os.W_OK | os.X_OK),
+        }
+        tmp_info["valid"] = bool(
+            tmp_info["directory"] and not tmp_info["symlink"]
+            and tmp_info["realpath"] == "/tmp" and tmp_info["sticky"]
+            and tmp_info["readable"]
+        )
     except OSError as exc:
         tmp_info = {"path": "/tmp", "valid": False, "error": f"{type(exc).__name__}: {exc}"}
     valid = all(item["valid"] for item in dirs.values()) and all(item["valid"] for item in files.values()) and current_link["valid"] and tmp_info["valid"]
     return {"directories": dirs, "files": files, "current_link": current_link, "temporary": tmp_info, "valid": valid}
 
 
-def audit_state():
+def identity_for_mode(mode):
+    uid = os.getuid()
+    login = pwd.getpwuid(uid).pw_name
+    euid = os.geteuid()
+    if mode == "audit":
+        valid = login == AUDIT_LOGIN and uid != 0 and euid == uid
+        role = "read-only-audit"
+    elif mode in {"root-audit", "apply", "rollback"}:
+        valid = login == APPLY_LOGIN and uid == 0 and euid == 0
+        role = "root-release-preflight" if mode == "root-audit" else "root-release-operator"
+    else:
+        valid = False
+        role = "invalid"
+    return {"login": login, "uid": uid, "euid": euid, "role": role, "valid": valid}
+
+
+def lock_readiness():
+    """Inspect lock safety/availability without creating or modifying it."""
+    try:
+        details = os.lstat(LOCK_PATH)
+    except FileNotFoundError:
+        parent = safe_directory(APP_ROOT, root=APP_ROOT, writable=True)
+        return {
+            "path": str(LOCK_PATH), "exists": False, "create_ready": parent.get("valid", False),
+            "available": parent.get("valid", False), "valid": parent.get("valid", False),
+        }
+    except OSError as exc:
+        return {"path": str(LOCK_PATH), "exists": False, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+    valid = bool(
+        stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+        and details.st_nlink == 1 and details.st_uid == 0
+        and stat.S_IMODE(details.st_mode) == 0o600 and within(APP_ROOT, LOCK_PATH)
+    )
+    available = False
+    if valid:
+        fd = os.open(LOCK_PATH, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            valid = valid and (opened.st_dev, opened.st_ino) == (details.st_dev, details.st_ino)
+            if valid:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    available = True
+                except BlockingIOError:
+                    available = False
+                finally:
+                    if available:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return {
+        "path": str(LOCK_PATH), "exists": True, "regular": stat.S_ISREG(details.st_mode),
+        "symlink": stat.S_ISLNK(details.st_mode), "nlink": details.st_nlink,
+        "uid": details.st_uid, "gid": details.st_gid, "mode": oct(stat.S_IMODE(details.st_mode)),
+        "available": available, "valid": bool(valid and available),
+    }
+
+
+def root_apply_readiness(topo, command_paths, lock_already_held=False):
+    writable_directories = {
+        name: safe_directory(path, root=APP_ROOT, writable=True)
+        for name, path in {
+            "app_root": APP_ROOT, "releases": RELEASES_DIR, "dist": DIST_DIR,
+        }.items()
+    }
+    scripts = {
+        "server_release": safe_file(RELEASE_SCRIPT, root=APP_ROOT),
+        "server_rollback": safe_file(ROLLBACK_SCRIPT, root=APP_ROOT),
+    }
+    tmp = topo["temporary"]
+    if lock_already_held:
+        lock = safe_file(LOCK_PATH, root=APP_ROOT)
+        lock["valid"] = bool(
+            lock.get("valid") and lock.get("uid") == 0 and lock.get("mode") == oct(0o600)
+        )
+        lock["available"] = lock["valid"]
+        lock["held_by_operator"] = True
+    else:
+        lock = lock_readiness()
+    valid = bool(
+        all(item.get("valid") for item in writable_directories.values())
+        and tmp.get("valid") and tmp.get("writable")
+        and all(item.get("valid") and item.get("executable") for item in scripts.values())
+        and lock.get("valid") and all(command_paths.values())
+    )
+    return {
+        "valid": valid, "writable_directories": writable_directories,
+        "temporary_writable": bool(tmp.get("writable")), "scripts": scripts,
+        "lock": lock, "commands_available": all(command_paths.values()),
+    }
+
+
+def audit_state(mode, lock_already_held=False):
+    identity = identity_for_mode(mode)
     login = pwd.getpwuid(os.getuid()).pw_name
     current = resolved(CURRENT_LINK)
     rollback = rollback_target(current)
@@ -361,8 +474,8 @@ def audit_state():
     except OSError:
         existing_label_releases = ["unreadable"]
     blockers = []
-    if login != EXPECTED_LOGIN or os.geteuid() == 0:
-        blockers.append("pinned non-root deploy identity is not proved")
+    if not identity["valid"]:
+        blockers.append("exact operator role identity is not proved")
     if not topo["valid"]:
         blockers.append("unsafe server path topology")
     if not release_path(current) or not release_path(rollback):
@@ -373,26 +486,48 @@ def audit_state():
         blockers.append("canonical articles-cz manifest is unsafe")
     if release_sha != RELEASE_SCRIPT_SHA256 or rollback_sha != ROLLBACK_SCRIPT_SHA256:
         blockers.append("release script integrity mismatch")
-    if not os.access(RELEASE_SCRIPT, os.X_OK) or not os.access(ROLLBACK_SCRIPT, os.X_OK):
-        blockers.append("release scripts are not executable by deploy")
     if not staging.get("valid"):
         blockers.append("staging dist topology is unsafe")
     if not current_tree.get("valid"):
         blockers.append("current release tree topology is unsafe")
-    if not all(command_paths.values()):
-        blockers.append("fixed server command is unavailable")
     if existing_label_releases:
         blockers.append("the exact release label already exists; replay is forbidden")
+    root_readiness = root_apply_readiness(topo, command_paths, lock_already_held) if mode == "root-audit" else None
+    if mode == "root-audit" and not root_readiness.get("valid"):
+        blockers.append("root apply readiness is not proved")
     result = {
-        "schema": SCHEMA, "mode": "audit", "captured_at": utc_now(), "host": HOST,
-        "account": EXPECTED_LOGIN, "app_root": str(APP_ROOT), "current_release": current,
+        "schema": SCHEMA, "mode": mode, "captured_at": utc_now(), "host": HOST,
+        "account": login, "identity": identity, "roles": ROLES,
+        "app_root": str(APP_ROOT), "current_release": current,
         "rollback_release": rollback, "articles": articles, "articles_cz": cz_manifest, "article_parity": article_parity,
         "release_scripts": scripts, "topology": topo, "staging_dist": staging, "current_tree": current_tree,
-        "target_commit": TARGET_COMMIT, "commands": command_paths, "existing_label_releases": existing_label_releases,
+        "target_commit": TARGET_COMMIT, "commands": command_paths,
+        "root_readiness": root_readiness,
+        "existing_label_releases": existing_label_releases,
         "blockers": blockers, "status": "ok" if not blockers else "blocked",
     }
     result["server_baseline_token"] = sha256_bytes(canonical_json(server_baseline_material(result)))
     return result
+
+
+def stable_topology_material(topo):
+    directory_keys = ("path", "exists", "realpath", "directory", "symlink", "uid", "gid", "mode", "valid")
+    file_keys = ("path", "exists", "realpath", "regular", "symlink", "nlink", "uid", "gid", "mode", "sha256", "valid")
+    link_keys = ("path", "realpath", "symlink", "valid")
+    temporary_keys = ("path", "realpath", "directory", "symlink", "sticky", "valid")
+    return {
+        "directories": {
+            name: {key: item.get(key) for key in directory_keys}
+            for name, item in topo["directories"].items()
+        },
+        "files": {
+            name: {key: item.get(key) for key in file_keys}
+            for name, item in topo["files"].items()
+        },
+        "current_link": {key: topo["current_link"].get(key) for key in link_keys},
+        "temporary": {key: topo["temporary"].get(key) for key in temporary_keys},
+        "valid": topo.get("valid"),
+    }
 
 
 def server_baseline_material(value):
@@ -403,10 +538,11 @@ def server_baseline_material(value):
     }
     tree_keys = ("valid", "file_count", "directory_count", "digest")
     return {
-        "schema": value["schema"], "host": value["host"], "account": value["account"],
+        "schema": value["schema"], "host": value["host"], "roles": value["roles"],
         "app_root": value["app_root"], "current_release": value["current_release"],
         "rollback_release": value["rollback_release"], "articles": articles,
-        "release_scripts": value["release_scripts"], "topology": value["topology"],
+        "release_scripts": value["release_scripts"],
+        "topology": stable_topology_material(value["topology"]),
         "articles_cz": value["articles_cz"],
         "staging_dist": {key: value["staging_dist"].get(key) for key in tree_keys},
         "current_tree": {key: value["current_tree"].get(key) for key in tree_keys},
@@ -450,13 +586,22 @@ def validate_bundle(bundle):
     details = os.lstat(bundle)
     if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode) or str(bundle.resolve(strict=True)) != str(bundle) or details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o700:
         raise ReleaseError("unsafe bundle directory")
-    for name, mode in BUNDLE_FILES.items():
+    for name in BUNDLE_FILES:
         path = bundle / name
         item = os.lstat(path)
-        if not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode) or item.st_nlink != 1 or item.st_uid != os.getuid() or stat.S_IMODE(item.st_mode) != mode or path.resolve(strict=True).parent != bundle:
+        if (
+            not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode)
+            or item.st_nlink != 1 or item.st_uid != 0
+            or stat.S_IMODE(item.st_mode) & 0o022
+            or path.resolve(strict=True).parent != bundle
+        ):
             raise ReleaseError(f"unsafe bundle file: {name}")
     baseline = json.loads((bundle / "baseline.json").read_text(encoding="utf-8"))
-    if baseline.get("schema") != SCHEMA or baseline.get("host") != HOST or baseline.get("account") != EXPECTED_LOGIN or baseline.get("target_commit") != TARGET_COMMIT:
+    if (
+        baseline.get("schema") != SCHEMA or baseline.get("host") != HOST
+        or baseline.get("account") != AUDIT_LOGIN or baseline.get("roles") != ROLES
+        or baseline.get("target_commit") != TARGET_COMMIT
+    ):
         raise ReleaseError("bundle baseline identity mismatch")
     if baseline.get("baseline_token", "")[:16] != match.group(1):
         raise ReleaseError("bundle path/token mismatch")
@@ -479,7 +624,7 @@ def validate_bundle(bundle):
 def verify_fresh_baseline(baseline):
     if baseline.get("server_baseline_token") != sha256_bytes(canonical_json(server_baseline_material(baseline))):
         raise ReleaseError("stored server baseline token is invalid")
-    fresh = audit_state()
+    fresh = audit_state("root-audit", lock_already_held=True)
     if fresh["status"] != "ok":
         raise ReleaseError("fresh server audit is blocked")
     if fresh["server_baseline_token"] != baseline["server_baseline_token"]:
@@ -514,6 +659,49 @@ def verify_exact_baseline_state(baseline, *, require_staging):
     return {"topology": topo, "baseline_tree": baseline_tree, "articles": list(articles), "articles_cz": cz_manifest}
 
 
+def ensure_candidate_parent(candidate, parent):
+    relative = parent.relative_to(candidate)
+    current = candidate
+    for part in relative.parts:
+        current = current / part
+        old_umask = os.umask(0)
+        try:
+            try:
+                os.mkdir(current, 0o755)
+            except FileExistsError:
+                pass
+        finally:
+            os.umask(old_umask)
+        info = safe_directory(current, root=candidate)
+        if not info.get("valid"):
+            raise ReleaseError(f"unsafe candidate directory: {current}")
+
+
+def write_new_regular(path, raw, mode):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    old_umask = os.umask(0)
+    try:
+        fd = os.open(path, flags, mode)
+    finally:
+        os.umask(old_umask)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        opened = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(opened.st_mode)
+            or opened.st_nlink != 1 or opened.st_uid != 0
+            or stat.S_IMODE(opened.st_mode) & 0o022
+        ):
+            raise ReleaseError(f"new file topology is unsafe: {path}")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def extract_candidate(bundle, baseline):
     token = baseline["baseline_token"][:16]
     candidate = APP_ROOT / f".price-candidate-{token}"
@@ -525,7 +713,11 @@ def extract_candidate(bundle, baseline):
         raise ReleaseError("invalid candidate manifest")
     if any(not isinstance(item.get("bytes"), int) or item["bytes"] < 0 for item in expected.values()) or sum(item["bytes"] for item in expected.values()) > MAX_EXPANDED_BYTES:
         raise ReleaseError("candidate expanded-size limit exceeded")
-    candidate.mkdir(mode=0o700)
+    old_umask = os.umask(0)
+    try:
+        candidate.mkdir(mode=0o700)
+    finally:
+        os.umask(old_umask)
     try:
         with tarfile.open(bundle / "candidate.tar.gz", "r:gz") as archive:
             members = archive.getmembers()
@@ -546,7 +738,7 @@ def extract_candidate(bundle, baseline):
                 raise ReleaseError("archive/manifest path set mismatch")
             for member, relative in regular:
                 target = candidate / Path(relative)
-                target.parent.mkdir(parents=True, exist_ok=True)
+                ensure_candidate_parent(candidate, target.parent)
                 source = archive.extractfile(member)
                 if source is None:
                     raise ReleaseError(f"archive member unreadable: {relative}")
@@ -554,8 +746,7 @@ def extract_candidate(bundle, baseline):
                 item = expected[relative]
                 if len(raw) != item["bytes"] or sha256_bytes(raw) != item["sha256"]:
                     raise ReleaseError(f"archive member hash mismatch: {relative}")
-                target.write_bytes(raw)
-                os.chmod(target, 0o644)
+                write_new_regular(target, raw, 0o644)
         actual = tree_manifest(candidate)
         if not actual["valid"] or actual["digest"] != manifest["digest"]:
             raise ReleaseError("extracted candidate tree mismatch")
@@ -591,6 +782,8 @@ def restore_staging(candidate_at_dist, staging_backup, candidate_used):
 
 
 def apply_release(bundle):
+    if not identity_for_mode("apply")["valid"]:
+        raise ReleaseError("apply requires exact root identity")
     validate_bundle(bundle)
     with open_lock(create=True) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -610,9 +803,12 @@ def apply_release(bundle):
         failure = None
         automatic_rollback = None
         try:
+            # Candidate extraction can take time. Re-prove the complete shared
+            # baseline immediately before the first staging mutation.
+            final_fresh = verify_fresh_baseline(baseline)
             if not topology()["valid"]:
                 raise ReleaseError("server topology changed under the release lock")
-            if tree_manifest(DIST_DIR).get("digest") != fresh["staging_dist"].get("digest"):
+            if tree_manifest(DIST_DIR).get("digest") != final_fresh["staging_dist"].get("digest"):
                 raise ReleaseError("staging dist changed under lock")
             os.replace(DIST_DIR, staging_backup)
             os.replace(candidate, DIST_DIR)
@@ -628,15 +824,29 @@ def apply_release(bundle):
             current_articles = article_file(Path(new_release) / "api/articles.json", "released")
             if current_articles.get("sha256") != baseline["articles"]["canonical"].get("sha256"):
                 raise ReleaseError("released article export differs from canonical")
+            canonical_after = article_file(CANONICAL_ARTICLES, "canonical-after-release")
+            if canonical_after.get("sha256") != baseline["articles"]["canonical"].get("sha256"):
+                raise ReleaseError("canonical article export changed during release")
+            cz_after = articles_cz_manifest()
+            if (
+                not cz_after.get("valid")
+                or cz_after.get("digest") != baseline.get("articles_cz", {}).get("digest")
+                or cz_after.get("files") != baseline.get("articles_cz", {}).get("files")
+            ):
+                raise ReleaseError("canonical articles-cz changed during release")
             apply_receipt = {
                 "schema": SCHEMA, "status": "released", "mode": "apply", "completed_at": utc_now(),
+                "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
                 "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
                 "previous_release": baseline["current_release"], "new_release": new_release,
                 "candidate_tree_digest": baseline["candidate"]["tree_digest"], "release": release_receipt,
             }
             receipt_path = bundle / "apply-receipt.json"
-            receipt_path.write_text(json.dumps(apply_receipt, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-            os.chmod(receipt_path, 0o600)
+            write_new_regular(
+                receipt_path,
+                (json.dumps(apply_receipt, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"),
+                0o600,
+            )
         except Exception as exc:
             failure = exc
             if release_switched:
@@ -668,6 +878,8 @@ def apply_release(bundle):
 
 
 def rollback_release(bundle):
+    if not identity_for_mode("rollback")["valid"]:
+        raise ReleaseError("rollback requires exact root identity")
     with open_lock(create=False) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         baseline = validate_bundle(bundle)
@@ -676,10 +888,17 @@ def rollback_release(bundle):
             raise ReleaseError("server topology is unsafe before rollback")
         receipt_path = bundle / "apply-receipt.json"
         info = safe_file(receipt_path, root=bundle)
-        if not info["valid"] or info["uid"] != os.getuid() or stat.S_IMODE(os.lstat(receipt_path).st_mode) != 0o600:
+        if not info["valid"] or info["uid"] != 0 or stat.S_IMODE(os.lstat(receipt_path).st_mode) & 0o022:
             raise ReleaseError("safe apply receipt is unavailable")
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        if receipt.get("schema") != SCHEMA or receipt.get("baseline_token") != baseline.get("baseline_token") or receipt.get("target_commit") != TARGET_COMMIT:
+        if (
+            receipt.get("schema") != SCHEMA
+            or receipt.get("baseline_token") != baseline.get("baseline_token")
+            or receipt.get("target_commit") != TARGET_COMMIT
+            or receipt.get("account") != APPLY_LOGIN
+            or receipt.get("role") != "root-release-operator"
+            or receipt.get("roles") != ROLES
+        ):
             raise ReleaseError("apply receipt identity mismatch")
         exact_new = receipt.get("new_release")
         if resolved(CURRENT_LINK) != exact_new or not release_path(exact_new):
@@ -707,6 +926,7 @@ def rollback_release(bundle):
         verification = verify_exact_baseline_state(baseline, require_staging=True)
         return {
             "schema": SCHEMA, "status": "rolled_back", "mode": "rollback", "completed_at": utc_now(),
+            "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
             "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
             "rolled_back_from": exact_new, "current_release": resolved(CURRENT_LINK), "rollback": rollback_receipt,
             "verification": verification,
@@ -715,8 +935,8 @@ def rollback_release(bundle):
 
 def main():
     try:
-        if MODE == "audit":
-            result = audit_state()
+        if MODE in {"audit", "root-audit"}:
+            result = audit_state(MODE)
         elif MODE == "apply" and BUNDLE_DIR is not None:
             result = apply_release(BUNDLE_DIR)
         elif MODE == "rollback" and BUNDLE_DIR is not None:
@@ -726,7 +946,12 @@ def main():
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result.get("status") in {"ok", "released", "rolled_back"} else 3
     except Exception as exc:
-        print(json.dumps({"schema": SCHEMA, "status": "error", "mode": MODE, "error": f"{type(exc).__name__}: {exc}", "current_release": resolved(CURRENT_LINK)}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps({
+            "schema": SCHEMA, "status": "error", "mode": MODE,
+            "account": pwd.getpwuid(os.getuid()).pw_name, "roles": ROLES,
+            "error": f"{type(exc).__name__}: {exc}",
+            "current_release": resolved(CURRENT_LINK),
+        }, ensure_ascii=False, sort_keys=True))
         return 1
 
 

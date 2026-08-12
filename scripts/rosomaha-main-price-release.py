@@ -4,8 +4,8 @@
 Default mode is a read-only audit which captures the production article export,
 builds the exact committed candidate in an isolated worktree, and emits a
 baseline receipt.  Apply is possible only with that receipt and the exact
-pinned commit.  The remote operator never builds source code and never runs as
-root.
+pinned commit.  Deploy performs only the read audit/canonical snapshot; a
+separate pinned root login performs a no-write preflight before apply.
 """
 
 from __future__ import annotations
@@ -41,10 +41,13 @@ OPERATOR_PATH = PROJECT_ROOT / "scripts/rosomaha-main-price-release-operator.sh"
 REPORT_ROOT = PROJECT_ROOT / "marketing-audits/releases"
 TEMP_ROOT = PROJECT_ROOT / ".codex_tmp/main-price-release"
 
-SCHEMA = "rosomaha-main-price-release/v2"
+SCHEMA = "rosomaha-main-price-release/v3"
 HOST = "90.156.168.115"
 PORT = 22
-EXPECTED_LOGIN = "deploy"
+AUDIT_LOGIN = "deploy"
+APPLY_LOGIN = "root"
+ALLOWED_LOGINS = (AUDIT_LOGIN, APPLY_LOGIN)
+ROLES = {"audit": AUDIT_LOGIN, "apply": APPLY_LOGIN}
 EXPECTED_HOST_KEY_SHA256 = "0bcM0FC+ETPaXuICxp+1dvG5US4DAdSrrLl5H8py3BY"
 EXPECTED_PUBLIC_KEY_FINGERPRINT = "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo"
 IDENTITY_FILE = Path.home() / ".ssh/id_ed25519"
@@ -345,20 +348,22 @@ def pinned_identity() -> tuple[paramiko.PKey, dict[str, Any]]:
     }
 
 
-def connect() -> tuple[paramiko.SSHClient, dict[str, Any]]:
+def connect(expected_login: str) -> tuple[paramiko.SSHClient, dict[str, Any]]:
+    if expected_login not in ALLOWED_LOGINS:
+        raise HelperError("unsupported pinned SSH role")
     key, identity_evidence = pinned_identity()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(PinnedHostKeyPolicy())
     try:
         client.connect(
-            hostname=HOST, port=PORT, username=EXPECTED_LOGIN, pkey=key,
+            hostname=HOST, port=PORT, username=expected_login, pkey=key,
             look_for_keys=False, allow_agent=False, timeout=20,
             banner_timeout=20, auth_timeout=20,
         )
         transport = client.get_transport()
-        if transport is None or not transport.is_active() or transport.get_username() != EXPECTED_LOGIN:
-            raise HelperError("pinned deploy SSH identity is not active")
-        return client, identity_evidence
+        if transport is None or not transport.is_active() or transport.get_username() != expected_login:
+            raise HelperError("pinned SSH role identity is not active")
+        return client, {**identity_evidence, "login": expected_login, "role_verified": True}
     except Exception:
         client.close()
         raise
@@ -367,9 +372,13 @@ def connect() -> tuple[paramiko.SSHClient, dict[str, Any]]:
 def operator_bytes() -> bytes:
     safe_regular_file(OPERATOR_PATH, PROJECT_ROOT)
     raw = OPERATOR_PATH.read_bytes()
-    if b"EXPECTED_LOGIN = \"deploy\"" not in raw or b"SCHEMA = \"rosomaha-main-price-release/v2\"" not in raw:
+    required = (
+        b"AUDIT_LOGIN = \"deploy\"", b"APPLY_LOGIN = \"root\"",
+        b"SCHEMA = \"rosomaha-main-price-release/v3\"",
+    )
+    if any(marker not in raw for marker in required):
         raise HelperError("fixed operator identity marker is missing")
-    if b"sudo" in raw or b"ROOT_OPERATOR" in raw or b"npm run build" in raw:
+    if b"sudo" in raw or b"ROOT_OPERATOR" in raw or b"npm run build" in raw or b"os.chmod" in raw or b"os.chown" in raw:
         raise HelperError("fixed operator contains a forbidden privileged/build path")
     return raw
 
@@ -474,7 +483,8 @@ def operator_diagnostics(result: dict[str, Any]) -> str:
 
 SAFE_TOPOLOGY_FIELDS = (
     "path", "exists", "realpath", "directory", "regular", "symlink", "nlink",
-    "uid", "gid", "mode", "writable", "sticky", "error", "valid",
+    "uid", "gid", "mode", "readable", "writable", "executable", "sticky",
+    "available", "create_ready", "held_by_operator", "error", "valid",
 )
 MAX_SAFE_OBSERVED_ARTICLES_CZ = 128
 MAX_SAFE_ARTICLE_FILENAME_CHARS = 240
@@ -535,6 +545,30 @@ def summarize_blocked_payload(payload: dict[str, Any]) -> str:
             else:
                 cz_summary["observed"] = "unsafe filename data omitted"
 
+    readiness_summary: dict[str, Any] | None = None
+    readiness = payload.get("root_readiness")
+    if isinstance(readiness, dict) and readiness.get("valid") is not True:
+        readiness_summary = {
+            "valid": False,
+            "temporary_writable": bool(readiness.get("temporary_writable")),
+            "commands_available": bool(readiness.get("commands_available")),
+            "invalid": {},
+        }
+        for section in ("writable_directories", "scripts"):
+            entries = readiness.get(section)
+            if not isinstance(entries, dict):
+                readiness_summary["invalid"][section] = {"valid": False, "error": "malformed readiness section"}
+                continue
+            for name in sorted(entries):
+                entry = entries[name]
+                if not isinstance(entry, dict) or entry.get("valid") is not True or (
+                    section == "scripts" and entry.get("executable") is not True
+                ):
+                    readiness_summary["invalid"][f"{section}.{name}"] = safe_topology_entry(entry)
+        lock = readiness.get("lock")
+        if not isinstance(lock, dict) or lock.get("valid") is not True:
+            readiness_summary["invalid"]["lock"] = safe_topology_entry(lock)
+
     blockers = payload.get("blockers")
     safe_blockers = []
     if isinstance(blockers, list):
@@ -545,6 +579,7 @@ def summarize_blocked_payload(payload: dict[str, Any]) -> str:
         "blockers": safe_blockers,
         "invalid_topology": invalid,
         "articles_cz": cz_summary,
+        "root_readiness": readiness_summary,
     }
     encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(encoded) > MAX_BLOCKED_SUMMARY_CHARS:
@@ -579,9 +614,15 @@ def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def remote_audit(client: paramiko.SSHClient) -> dict[str, Any]:
-    payload = parse_operator_json(run_remote(client, "bash -s -- audit", operator_bytes(), 180))
-    if payload.get("schema") != SCHEMA or payload.get("host") != HOST or payload.get("account") != EXPECTED_LOGIN:
+def remote_audit(client: paramiko.SSHClient, mode: str, expected_login: str) -> dict[str, Any]:
+    if (mode, expected_login) not in {("audit", AUDIT_LOGIN), ("root-audit", APPLY_LOGIN)}:
+        raise HelperError("unsupported fixed audit role")
+    payload = parse_operator_json(run_remote(client, f"bash -s -- {mode}", operator_bytes(), 180))
+    if (
+        payload.get("schema") != SCHEMA or payload.get("host") != HOST
+        or payload.get("account") != expected_login or payload.get("mode") != mode
+        or payload.get("roles") != ROLES
+    ):
         raise HelperError("remote audit identity mismatch")
     if payload.get("target_commit") != TARGET_COMMIT or payload.get("status") != "ok":
         raise HelperError("remote audit is not ready for the pinned release")
@@ -590,6 +631,8 @@ def remote_audit(client: paramiko.SSHClient) -> dict[str, Any]:
     hashes = {payload.get("articles", {}).get(name, {}).get("sha256") for name in ("canonical", "current", "live")}
     if None in hashes or len(hashes) != 1:
         raise HelperError("remote article raw SHA-256 differs")
+    if mode == "root-audit" and not payload.get("root_readiness", {}).get("valid"):
+        raise HelperError("root release readiness is not proved")
     return payload
 
 
@@ -1182,9 +1225,9 @@ def calculate_baseline_token(payload: dict[str, Any]) -> str:
 
 
 def audit() -> tuple[dict[str, Any], Path]:
-    client, identity = connect()
+    client, identity = connect(AUDIT_LOGIN)
     try:
-        server = remote_audit(client)
+        server = remote_audit(client, "audit", AUDIT_LOGIN)
         snapshot_root, canonical = capture_canonical_snapshot(client, server)
     finally:
         client.close()
@@ -1201,7 +1244,8 @@ def audit() -> tuple[dict[str, Any], Path]:
     payload.update({
         "schema": SCHEMA, "mode": "baseline", "status": "ready", "captured_at": utc_now(),
         "target_commit": TARGET_COMMIT, "release_label": RELEASE_LABEL,
-        "identity": identity, "operator_sha256": sha256_bytes(operator_bytes()),
+        "account": AUDIT_LOGIN, "roles": ROLES, "audit_identity": identity,
+        "operator_sha256": sha256_bytes(operator_bytes()),
         "canonical_snapshot": canonical, "public_articles": public_info,
         "public_seo_baseline": public_baseline, "candidate": candidate,
         "artifacts": {"root_token": snapshot_root.parent.name, "archive": "candidate.tar.gz", "manifest": "candidate-manifest.json"},
@@ -1225,6 +1269,8 @@ def load_baseline(path: Path) -> tuple[dict[str, Any], Path, Path, Path]:
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if payload.get("schema") != SCHEMA or payload.get("status") != "ready":
         raise HelperError("baseline receipt schema/status mismatch")
+    if payload.get("account") != AUDIT_LOGIN or payload.get("roles") != ROLES:
+        raise HelperError("baseline receipt role identity mismatch")
     if payload.get("target_commit") != TARGET_COMMIT or payload.get("release_label") != RELEASE_LABEL:
         raise HelperError("baseline receipt is for another release")
     if payload.get("baseline_token") != calculate_baseline_token(payload):
@@ -1265,7 +1311,7 @@ def sftp_assert_missing(sftp: paramiko.SFTPClient, path: str) -> None:
     raise HelperError(f"remote bundle path already exists: {path}")
 
 
-def sftp_upload_file(sftp: paramiko.SFTPClient, local: Path, remote_dir: str, name: str, mode: int) -> None:
+def sftp_upload_file(sftp: paramiko.SFTPClient, local: Path, remote_dir: str, name: str) -> None:
     safe_regular_file(local, PROJECT_ROOT if str(local).startswith(str(PROJECT_ROOT)) else TEMP_ROOT)
     final = f"{remote_dir}/{name}"
     temporary = final + ".part"
@@ -1277,10 +1323,9 @@ def sftp_upload_file(sftp: paramiko.SFTPClient, local: Path, remote_dir: str, na
             if not chunk:
                 break
             target.write(chunk)
-    sftp.chmod(temporary, mode)
     sftp.posix_rename(temporary, final)
     attr = sftp.lstat(final)
-    if not sftp_regular(attr) or stat.S_IMODE(attr.st_mode) != mode or attr.st_size != local.stat().st_size:
+    if not sftp_regular(attr) or stat.S_IMODE(attr.st_mode) & 0o022 or attr.st_size != local.stat().st_size:
         raise HelperError(f"remote uploaded bundle file topology mismatch: {name}")
 
 
@@ -1292,11 +1337,13 @@ def upload_bundle(client: paramiko.SSHClient, baseline_path: Path, archive: Path
         sftp_assert_missing(sftp, remote_dir)
         sftp.mkdir(remote_dir, mode=0o700)
         created = True
-        sftp.chmod(remote_dir, 0o700)
-        sftp_upload_file(sftp, baseline_path, remote_dir, "baseline.json", 0o600)
-        sftp_upload_file(sftp, archive, remote_dir, "candidate.tar.gz", 0o600)
-        sftp_upload_file(sftp, manifest, remote_dir, "candidate-manifest.json", 0o600)
-        sftp_upload_file(sftp, OPERATOR_PATH, remote_dir, "operator.sh", 0o700)
+        directory_attr = sftp.lstat(remote_dir)
+        if not stat.S_ISDIR(directory_attr.st_mode) or stat.S_IMODE(directory_attr.st_mode) != 0o700:
+            raise HelperError("remote bundle directory mode is not exact 0700")
+        sftp_upload_file(sftp, baseline_path, remote_dir, "baseline.json")
+        sftp_upload_file(sftp, archive, remote_dir, "candidate.tar.gz")
+        sftp_upload_file(sftp, manifest, remote_dir, "candidate-manifest.json")
+        sftp_upload_file(sftp, OPERATOR_PATH, remote_dir, "operator.sh")
         observed = sorted(sftp.listdir(remote_dir))
         expected = sorted(("baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh"))
         if observed != expected:
@@ -1360,7 +1407,7 @@ def download_apply_receipt(client: paramiko.SSHClient, remote_dir: str) -> dict[
             attr = sftp.lstat(path)
         except FileNotFoundError:
             return None
-        if not sftp_regular(attr) or stat.S_IMODE(attr.st_mode) != 0o600 or attr.st_size > 1024 * 1024:
+        if not sftp_regular(attr) or stat.S_IMODE(attr.st_mode) & 0o022 or attr.st_size > 1024 * 1024:
             raise HelperError("unsafe remote apply receipt")
         with sftp.open(path, "rb") as handle:
             return json.loads(handle.read().decode("utf-8"))
@@ -1373,6 +1420,8 @@ def validate_apply_receipt(receipt: dict[str, Any], baseline: dict[str, Any], op
         raise HelperError("apply receipt schema/status mismatch")
     if receipt.get("target_commit") != TARGET_COMMIT or receipt.get("baseline_token") != baseline["baseline_token"]:
         raise HelperError("apply receipt identity mismatch")
+    if receipt.get("account") != APPLY_LOGIN or receipt.get("roles") != ROLES or receipt.get("role") != "root-release-operator":
+        raise HelperError("apply receipt role identity mismatch")
     if receipt.get("previous_release") != baseline["current_release"]:
         raise HelperError("apply receipt previous release mismatch")
     new_release = receipt.get("new_release")
@@ -1427,7 +1476,7 @@ def public_verify(baseline: dict[str, Any], *, stage: str) -> dict[str, Any]:
 
 
 def raw_remote_audit(client: paramiko.SSHClient) -> dict[str, Any]:
-    result = run_remote(client, "bash -s -- audit", operator_bytes(), 180)
+    result = run_remote(client, "bash -s -- root-audit", operator_bytes(), 180)
     lines = [line for line in result["stdout"].splitlines() if line.strip()]
     if not lines:
         raise HelperError("recovery audit returned no JSON")
@@ -1442,7 +1491,7 @@ def bounded_reconnect() -> tuple[paramiko.SSHClient, dict[str, Any], list[dict[s
     last_error: Exception | None = None
     for index in range(3):
         try:
-            client, identity = connect()
+            client, identity = connect(APPLY_LOGIN)
             attempts.append({"attempt": index + 1, "status": "connected"})
             return client, identity, attempts
         except Exception as exc:
@@ -1461,7 +1510,10 @@ def recovery_audit_matches(
     return bool(
         audit_payload.get("schema") == SCHEMA
         and audit_payload.get("host") == HOST
-        and audit_payload.get("account") == EXPECTED_LOGIN
+        and audit_payload.get("account") == APPLY_LOGIN
+        and audit_payload.get("mode") == "root-audit"
+        and audit_payload.get("roles") == ROLES
+        and audit_payload.get("root_readiness", {}).get("valid")
         and audit_payload.get("target_commit") == TARGET_COMMIT
         and audit_payload.get("topology", {}).get("valid")
         and audit_payload.get("current_release") == expected_current
@@ -1496,7 +1548,10 @@ def classify_recovery_state(audit_payload: dict[str, Any], baseline: dict[str, A
 
 def rollback_and_verify(client: paramiko.SSHClient, remote_dir: str, baseline: dict[str, Any]) -> dict[str, Any]:
     rollback = invoke_operator(client, "rollback", remote_dir)
-    if rollback.get("status") != "rolled_back" or rollback.get("current_release") != baseline["current_release"]:
+    if (
+        rollback.get("status") != "rolled_back" or rollback.get("current_release") != baseline["current_release"]
+        or rollback.get("account") != APPLY_LOGIN or rollback.get("roles") != ROLES
+    ):
         raise HelperError("fixed rollback did not prove exact baseline release")
     rollback_cz = rollback.get("verification", {}).get("articles_cz", {})
     if rollback_cz.get("digest") != baseline.get("articles_cz", {}).get("digest") or rollback_cz.get("files") != baseline.get("articles_cz", {}).get("files"):
@@ -1512,7 +1567,7 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
         recovery_attempts.extend(connection_attempts)
     except Exception as exc:
         payload = {
-            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery",
+            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
             "original_error_type": type(original_error).__name__, "recovery_error_type": type(exc).__name__,
             "bundle_preserved": True, "attempts": recovery_attempts,
@@ -1532,7 +1587,7 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
             try:
                 verified = public_verify(baseline, stage="new")
                 payload = {
-                    "schema": SCHEMA, "status": "recovered_verified_success", "mode": "apply-recovery",
+                    "schema": SCHEMA, "status": "recovered_verified_success", "mode": "apply-recovery", "roles": ROLES,
                     "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
                     "public_verify": verified, "attempts": recovery_attempts,
                 }
@@ -1541,7 +1596,7 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
             except Exception as verify_error:
                 rolled_back = rollback_and_verify(client, remote_dir, baseline)
                 payload = {
-                    "schema": SCHEMA, "status": "recovered_rolled_back", "mode": "apply-recovery",
+                    "schema": SCHEMA, "status": "recovered_rolled_back", "mode": "apply-recovery", "roles": ROLES,
                     "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
                     "verification_error_type": type(verify_error).__name__, "rollback": rolled_back,
                     "attempts": recovery_attempts,
@@ -1554,12 +1609,12 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
             original_public = public_verify(baseline, stage="old")
             cleanup_bundle(client, remote_dir)
             return {
-                "schema": SCHEMA, "status": "apply_not_switched", "mode": "apply-recovery",
+                "schema": SCHEMA, "status": "apply_not_switched", "mode": "apply-recovery", "roles": ROLES,
                 "baseline_token": baseline["baseline_token"], "bundle_preserved": False,
                 "attempts": recovery_attempts, "public_verify": original_public,
             }, False
         return {
-            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery",
+            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
             "observed_current_release": current, "bundle_preserved": True,
             "reason": "current changed but exact apply receipt is unavailable; apply was not retried",
@@ -1567,7 +1622,7 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
         }, False
     except Exception as exc:
         return {
-            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery",
+            "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
             "bundle_preserved": True, "recovery_error_type": type(exc).__name__,
             "reason": "recovery could not prove a safe terminal state; apply was not retried",
@@ -1580,14 +1635,15 @@ def recover_ambiguous_apply(remote_dir: str, baseline: dict[str, Any], original_
 def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
     prove_target_commit(commit)
     baseline, resolved_baseline, archive, manifest = load_baseline(baseline_path)
-    client, identity = connect()
+    client, identity = connect(APPLY_LOGIN)
     remote_dir: str | None = None
     apply_invoked = False
     try:
-        fresh = remote_audit(client)
-        if fresh["server_baseline_token"] != baseline["server_baseline_token"]:
+        root_preflight = remote_audit(client, "root-audit", APPLY_LOGIN)
+        if root_preflight["server_baseline_token"] != baseline["server_baseline_token"]:
             raise HelperError("server baseline changed after capture; create a fresh audit receipt")
         preflight = public_verify(baseline, stage="old")
+        # Upload is deliberately after the exact no-write root preflight.
         remote_dir = upload_bundle(client, resolved_baseline, archive, manifest, baseline)
         apply_invoked = True
         try:
@@ -1603,7 +1659,12 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                 payload = {
                     "schema": SCHEMA, "status": "verification_failed_rolled_back", "mode": "apply",
                     "completed_at": utc_now(), "target_commit": TARGET_COMMIT,
-                    "baseline_token": baseline["baseline_token"], "identity": identity,
+                    "baseline_token": baseline["baseline_token"], "roles": ROLES,
+                    "apply_identity": identity, "root_preflight": {
+                        "account": root_preflight["account"], "mode": root_preflight["mode"],
+                        "server_baseline_token": root_preflight["server_baseline_token"],
+                        "root_readiness": root_preflight["root_readiness"],
+                    },
                     "preflight": preflight, "apply_receipt": receipt,
                     "verification_error_type": type(verify_error).__name__, "rollback": rollback,
                 }
@@ -1613,7 +1674,12 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
             payload = {
                 "schema": SCHEMA, "status": "released_verified", "mode": "apply",
                 "completed_at": utc_now(), "target_commit": TARGET_COMMIT,
-                "baseline_token": baseline["baseline_token"], "identity": identity,
+                "baseline_token": baseline["baseline_token"], "roles": ROLES,
+                "apply_identity": identity, "root_preflight": {
+                    "account": root_preflight["account"], "mode": root_preflight["mode"],
+                    "server_baseline_token": root_preflight["server_baseline_token"],
+                    "root_readiness": root_preflight["root_readiness"],
+                },
                 "preflight": preflight, "apply_receipt": receipt, "operator": operator_result,
                 "public_verify": postflight,
             }
@@ -1633,7 +1699,7 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
         client.close()
         if remote_dir is not None and not apply_invoked:
             try:
-                cleanup_client, _ = connect()
+                cleanup_client, _ = connect(APPLY_LOGIN)
                 try:
                     cleanup_bundle(cleanup_client, remote_dir)
                 finally:
@@ -1666,7 +1732,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Exception as exc:
         error = {
-            "schema": SCHEMA, "status": "error", "error_type": type(exc).__name__,
+            "schema": SCHEMA, "status": "error", "roles": ROLES, "error_type": type(exc).__name__,
             "error": str(exc), "target_commit": TARGET_COMMIT,
         }
         receipt = atomic_json_receipt("rosomaha-main-price-error", error)
