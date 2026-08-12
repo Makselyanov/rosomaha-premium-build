@@ -78,6 +78,7 @@ same(config.currency, 'RUB', 'The product config currency must be explicit.');
 same(config.price_semantics, 'catalog_base_price', 'The price semantics must be explicit.');
 truth(Array.isArray(config.products) && config.products.length > 0, 'The versioned product config must not be empty.');
 same(core.productPrefill('?product=eger-1', config.products), 'eger-1', 'Known product IDs must prefill.');
+same(core.productPrefill('?product=pickup-uaz', config.products), 'pickup-uaz-18', 'Legacy pickup IDs must prefill the renamed product.');
 same(core.productPrefill('?product=unknown', config.products), null, 'Unknown product IDs must not prefill.');
 
 const product = config.products.find((item) => item.id === 'eger-1');

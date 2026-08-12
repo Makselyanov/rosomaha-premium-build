@@ -12,6 +12,9 @@
 
   var APPLICANT_TYPES = ['individual', 'sole_proprietor', 'company'];
   var FINANCING_TYPES = ['credit', 'leasing', 'installment', 'unsure'];
+  var PRODUCT_ID_ALIASES = {
+    'pickup-uaz': 'pickup-uaz-18'
+  };
   var ATTRIBUTION_KEYS = [
     'utm_source',
     'utm_medium',
@@ -148,7 +151,8 @@
       return null;
     }
 
-    var product = findProduct(products, requested);
+    var resolved = PRODUCT_ID_ALIASES[requested] || requested;
+    var product = findProduct(products, resolved);
 
     return product ? product.id : null;
   }

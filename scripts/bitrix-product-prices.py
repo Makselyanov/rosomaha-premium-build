@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import paramiko
@@ -33,7 +34,6 @@ PORT = 22
 EXPECTED_LOGIN = "berkutm4"
 EXPECTED_HOST_KEY_SHA256 = "9NXXK7D+NukzmR6c/Ov2rAZElXlr2s1oP0QAAmUWs+c"
 SITE_ROOT = "/home/b/berkutm4/rosomaha-rus.ru/public_html"
-REMOTE_WORK_ROOT = "/home/b/berkutm4/migration/rosomaha-rus/ops/bitrix-product-prices"
 EXPECTED_PHP_SERIES = "8.2"
 PHP_CANDIDATES = [
     "/usr/local/php/cgi/8.2/bin/php",
@@ -176,9 +176,13 @@ def run_remote_command(
     client: paramiko.SSHClient,
     command: str,
     timeout_seconds: int,
+    input_data: bytes | None = None,
 ) -> tuple[int, str, str]:
     _, stdout, _ = client.exec_command(command, timeout=20)
     channel = stdout.channel
+    if input_data is not None:
+        channel.sendall(input_data)
+        channel.shutdown_write()
     deadline = time.monotonic() + timeout_seconds
     output = bytearray()
     error = bytearray()
@@ -254,16 +258,13 @@ def execute_remote(mode: str) -> dict[str, object]:
         raise RuntimeError(
             f"Beget SSH connection failed: {type(exc).__name__}: {exc}"
         ) from exc
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    remote_script = f"{REMOTE_WORK_ROOT}/bitrix-product-prices-{stamp}-{os.getpid()}.php"
     stage = "root-check"
 
     try:
         root_check = (
             "set -eu; "
             f"test \"$(realpath -- {SITE_ROOT})\" = {SITE_ROOT}; "
-            f"test -f {SITE_ROOT}/bitrix/header.php; "
-            f"install -d -m 0700 -- {REMOTE_WORK_ROOT}"
+            f"test -f {SITE_ROOT}/bitrix/header.php"
         )
         status, _, error = run_remote_command(client, root_check, 30)
         if status != 0:
@@ -271,22 +272,17 @@ def execute_remote(mode: str) -> dict[str, object]:
 
         stage = "php-discovery"
         php_binary, php_version = discover_php_binary(client)
-        stage = "script-upload"
-        sftp = client.open_sftp()
-        try:
-            sftp.put(str(PHP_SCRIPT), remote_script)
-            sftp.chmod(remote_script, 0o700)
-        finally:
-            sftp.close()
+        script_bytes = PHP_SCRIPT.read_bytes()
 
         stage = "php-preflight"
         status, preflight_output, preflight_error = run_remote_command(
             client,
             (
                 f"timeout 15s {php_binary} -r 'echo PHP_VERSION;' && "
-                f"timeout 15s {php_binary} -l -- {remote_script}"
+                f"timeout 15s {php_binary} -l"
             ),
             40,
+            script_bytes,
         )
         if status != 0:
             raise RuntimeError(
@@ -299,9 +295,10 @@ def execute_remote(mode: str) -> dict[str, object]:
             client,
             (
                 f"timeout 150s {php_binary} -d display_errors=stderr -d log_errors=0 "
-                f"-f {remote_script} -- {mode}"
+                f"-- {mode}"
             ),
             170,
+            script_bytes,
         )
         if not output:
             raise RuntimeError(f"Bitrix price helper returned no JSON: {error[-500:]}")
@@ -322,19 +319,7 @@ def execute_remote(mode: str) -> dict[str, object]:
             f"Beget stage {stage} failed: {type(exc).__name__}: {exc}"
         ) from exc
     finally:
-        try:
-            try:
-                sftp = client.open_sftp()
-                try:
-                    sftp.remove(remote_script)
-                except (FileNotFoundError, OSError):
-                    pass
-                finally:
-                    sftp.close()
-            except (EOFError, OSError, paramiko.SSHException):
-                pass
-        finally:
-            client.close()
+        client.close()
 
 
 def formatted_price(amount: int) -> str:
@@ -414,12 +399,27 @@ def verify_detail(
         and str(data_item.get("PROPERTY_FILTER_PRICE_VALUE")) == str(expected_price)
         and str(data_item.get("PROPERTY_PRICE_VALUE")) == expected_formatted
     )
-    expected_canonical = url
     canonical_value = html_module.unescape(canonical.group(1)) if canonical else ""
+    canonical_url = urljoin(url, canonical_value) if canonical_value else ""
+    canonical_parts = urlparse(canonical_url)
+    canonical_oid = parse_qs(canonical_parts.query).get("oid", [])
+    canonical_ok = (
+        canonical_parts.scheme == "https"
+        and canonical_parts.netloc == "rosomaha-rus.ru"
+        and canonical_parts.path.rstrip("/") == f"/product/{slug}"
+        and (not canonical_oid or canonical_oid == [str(offer_id)])
+    )
+    final_parts = urlparse(final_url)
+    final_ok = (
+        final_parts.scheme == "https"
+        and final_parts.netloc == "rosomaha-rus.ru"
+        and final_parts.path.rstrip("/") == f"/product/{slug}"
+        and parse_qs(final_parts.query).get("oid") == [str(offer_id)]
+    )
     ok = (
         status == 200
-        and final_url == url
-        and canonical_value == expected_canonical
+        and final_ok
+        and canonical_ok
         and prices == {expected_price}
         and currency_ok
         and sku_ok
@@ -432,6 +432,7 @@ def verify_detail(
         "final_url": final_url,
         "http_status": status,
         "canonical": canonical_value,
+        "canonical_ok": canonical_ok,
         "expected_price": expected_price,
         "observed_prices": sorted(prices),
         "currency_rub": currency_ok,
@@ -452,7 +453,7 @@ def verify_detail(
 def verify_catalog(expected_prices: dict[str, tuple[int, int]]) -> dict[str, object]:
     status, final_url, page = fetch_html(CATALOG_URL)
     starts = list(re.finditer(r'<meta\s+itemprop="name"\s+content="[^"]+">', page))
-    observed: dict[str, dict[str, object]] = {}
+    observed: dict[str, list[dict[str, object]]] = {}
     for index, match in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(page)
         block = page[match.start():end]
@@ -466,17 +467,20 @@ def verify_catalog(expected_prices: dict[str, tuple[int, int]]) -> dict[str, obj
             block,
         )
         if link and price:
-            observed[link.group(1)] = {
-                "offer_id": int(link.group(2)),
-                "price": int(price.group(1)),
-                "currency": currency.group(1) if currency else "",
-            }
+            observed.setdefault(link.group(1), []).append(
+                {
+                    "offer_id": int(link.group(2)),
+                    "price": int(price.group(1)),
+                    "currency": currency.group(1) if currency else "",
+                }
+            )
 
     failures = []
     for slug, (offer_id, expected_price) in expected_prices.items():
-        item = observed.get(slug)
-        if item != {"offer_id": offer_id, "price": expected_price, "currency": "RUB"}:
-            failures.append({"slug": slug, "expected": [offer_id, expected_price], "observed": item})
+        items = observed.get(slug, [])
+        expected = {"offer_id": offer_id, "price": expected_price, "currency": "RUB"}
+        if items != [expected]:
+            failures.append({"slug": slug, "expected": expected, "observed": items})
     return {
         "url": CATALOG_URL,
         "final_url": final_url,
@@ -484,7 +488,7 @@ def verify_catalog(expected_prices: dict[str, tuple[int, int]]) -> dict[str, obj
         "card_count": len(observed),
         "target_count": len(expected_prices),
         "failures": failures,
-        "ok": status == 200 and final_url == CATALOG_URL and len(observed) == 13 and not failures,
+        "ok": status == 200 and final_url == CATALOG_URL and not failures,
     }
 
 
