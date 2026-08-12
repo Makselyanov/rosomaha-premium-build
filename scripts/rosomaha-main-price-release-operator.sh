@@ -11,7 +11,7 @@ BUNDLE_DIR="${2:-}"
 case "$MODE" in
   audit|root-audit) ;;
   apply|rollback)
-    [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-10d9dc6-[0-9a-f]{16}$ ]] || {
+    [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-64ba304-[0-9a-f]{16}$ ]] || {
       echo '{"status":"error","error":"invalid fixed bundle path"}'
       exit 2
     }
@@ -51,8 +51,8 @@ HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
 ROLES = {"audit": AUDIT_LOGIN, "apply": APPLY_LOGIN}
-TARGET_COMMIT = "10d9dc666bccbe9fb250ab29a69ae09710537e77"
-RELEASE_LABEL = "prices-10d9dc6"
+TARGET_COMMIT = "64ba304c6c3128493a30e7408273652a326752d3"
+RELEASE_LABEL = "prices-64ba304"
 APP_ROOT = Path("/var/www/rosomaha")
 DIST_DIR = APP_ROOT / "dist"
 RELEASES_DIR = APP_ROOT / "_releases"
@@ -860,7 +860,7 @@ def open_lock(*, create):
 
 
 def validate_bundle(bundle):
-    match = re.fullmatch(r"/tmp/rosomaha-main-price-release-10d9dc6-([0-9a-f]{16})", str(bundle))
+    match = re.fullmatch(r"/tmp/rosomaha-main-price-release-64ba304-([0-9a-f]{16})", str(bundle))
     if not match:
         raise ReleaseError("invalid bundle path")
     details = os.lstat(bundle)
@@ -1205,7 +1205,7 @@ def apply_release(bundle):
             release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180)
             new_release = resolved(CURRENT_LINK)
             release_switched = new_release != baseline["current_release"]
-            if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-10d9dc6", Path(new_release).name):
+            if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-64ba304", Path(new_release).name):
                 raise ReleaseError("guarded release did not switch to the expected labelled release")
             if exact_label_releases() != [new_release]:
                 raise ReleaseError("exact release target was not uniquely created")

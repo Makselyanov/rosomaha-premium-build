@@ -88,7 +88,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertEqual(helper.AUDIT_LOGIN, "deploy")
         self.assertEqual(helper.APPLY_LOGIN, "root")
         self.assertEqual(helper.ROLES, {"audit": "deploy", "apply": "root"})
-        self.assertEqual(helper.TARGET_COMMIT, "10d9dc666bccbe9fb250ab29a69ae09710537e77")
+        self.assertEqual(helper.TARGET_COMMIT, "64ba304c6c3128493a30e7408273652a326752d3")
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
         self.assertEqual(len(helper.ARTICLES_CZ_ALLOWLIST), 33)
@@ -840,7 +840,50 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertFalse(duplicate["valid"])
         self.assertEqual(duplicate["duplicates"], ["a"])
 
-    def test_articles_cz_index_and_static_union_are_exact(self) -> None:
+    def test_runtime_article_manifest_and_bundle_prove_canonical_payload(self) -> None:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            dist = Path(raw_root) / "dist"
+            (dist / "api").mkdir(parents=True)
+            (dist / "assets").mkdir(parents=True)
+            canonical_raw = b'[{"slug":"article-a"},{"slug":"article-b"}]'
+            info = helper.article_info(canonical_raw, "test")
+            manifest = {
+                "schema": helper.RUNTIME_ARTICLES_SCHEMA,
+                "source": "public/api/articles.json",
+                "count": info["count"],
+                "source_sha256": helper.sha256_bytes(canonical_raw),
+                "slug_digest": info["slug_digest"],
+            }
+            (dist / helper.RUNTIME_ARTICLES_MANIFEST).write_text(
+                json.dumps(manifest, separators=(",", ":")), encoding="utf-8",
+            )
+            (dist / "assets/app.js").write_text(
+                'const articles=["article-a","article-b"];', encoding="utf-8",
+            )
+            evidence = helper.verify_runtime_articles(dist, canonical_raw, info)
+            self.assertTrue(evidence["valid"])
+            self.assertTrue(evidence["all_canonical_slugs_embedded"])
+
+    def test_runtime_article_bundle_missing_canonical_slug_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            dist = Path(raw_root) / "dist"
+            (dist / "api").mkdir(parents=True)
+            (dist / "assets").mkdir(parents=True)
+            canonical_raw = b'[{"slug":"article-a"},{"slug":"article-b"}]'
+            info = helper.article_info(canonical_raw, "test")
+            manifest = {
+                "schema": helper.RUNTIME_ARTICLES_SCHEMA,
+                "source": "public/api/articles.json",
+                "count": info["count"],
+                "source_sha256": helper.sha256_bytes(canonical_raw),
+                "slug_digest": info["slug_digest"],
+            }
+            (dist / helper.RUNTIME_ARTICLES_MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+            (dist / "assets/app.js").write_text('const article="article-a";', encoding="utf-8")
+            with self.assertRaises(helper.HelperError):
+                helper.verify_runtime_articles(dist, canonical_raw, info)
+
+    def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)
             snapshot = root / "canonical"
@@ -864,10 +907,41 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
             (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'manual' };", encoding="utf-8")
             (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
-            result = helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
+            canonical_slugs = ["manual", "tyumen", *slugs, "json-only-article"]
+            result = helper.validate_articles_cz(snapshot, worktree, canonical_slugs)
             self.assertTrue(result["valid"])
-            self.assertEqual(result["union_count"], len(slugs) + 2)
+            self.assertEqual(result["canonical_runtime_count"], len(canonical_slugs))
+            self.assertEqual(result["canonical_cz_count"], len(slugs))
+            self.assertEqual(result["canonical_non_cz_count"], 3)
             self.assertEqual(result["excluded_files"], [])
+
+    def test_articles_cz_validation_does_not_depend_on_legacy_static_sources(self) -> None:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            snapshot = root / "canonical"
+            cz = snapshot / "src/data/articles-cz"
+            worktree = root / "worktree"
+            (worktree / "src/data").mkdir(parents=True)
+            cz.mkdir(parents=True)
+            imports = []
+            canonical_slugs = ["tyumen"]
+            for index, name in enumerate(helper.ARTICLES_CZ_ALLOWLIST):
+                if name == "index.ts":
+                    continue
+                slug = f"cz-{index}"
+                canonical_slugs.append(slug)
+                export_name = f"item{index}Article"
+                (cz / name).write_text(
+                    f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
+                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
+            (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
+            (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'not-canonical' };", encoding="utf-8")
+            (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
+            evidence = helper.validate_articles_cz(snapshot, worktree, canonical_slugs)
+            self.assertTrue(evidence["valid"])
+            self.assertEqual(evidence["canonical_cz_count"], len(canonical_slugs) - 1)
 
     def test_articles_cz_missing_import_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
@@ -925,7 +999,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             result = helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
             self.assertTrue(result["valid"])
 
-    def test_articles_cz_noncanonical_file_is_excluded_from_generated_index(self) -> None:
+    def test_overlay_copies_only_canonical_json_and_does_not_mutate_src(self) -> None:
         helper.TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=helper.TEMP_ROOT) as raw_root:
             root = Path(raw_root)
@@ -961,6 +1035,14 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                 "import { czArticles } from './articles-cz/index';\nexport const x = { slug: 'manual' };",
                 encoding="utf-8",
             )
+            (worktree / "src/data/canonical-articles.ts").write_text(
+                "import payload from 'virtual:canonical-articles';\nexport const canonicalArticles = payload;\n",
+                encoding="utf-8",
+            )
+            (worktree / "vite.config.ts").write_text(
+                "const id = 'virtual:canonical-articles';\n",
+                encoding="utf-8",
+            )
             (worktree / "src/data/tyumen-exhibition.ts").write_text(
                 "export const x = { slug: 'tyumen' };",
                 encoding="utf-8",
@@ -972,10 +1054,13 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             validation = helper.validate_articles_cz(snapshot, worktree, canonical_slugs)
             self.assertEqual(len(validation["excluded_files"]), 1)
             self.assertEqual(validation["excluded_files"][0]["slug"], "draft-only-slug")
+            source_before = helper.tree_manifest(worktree / "src")["digest"]
             helper.overlay_canonical(snapshot, worktree, validation)
-            generated = (target_cz / "index.ts").read_text(encoding="utf-8")
-            self.assertNotIn("draft-only-slug", generated)
-            self.assertNotIn(Path(validation["excluded_files"][0]["name"]).stem, generated)
+            self.assertEqual(helper.tree_manifest(worktree / "src")["digest"], source_before)
+            self.assertEqual(
+                (worktree / "public/api/articles.json").read_bytes(),
+                (snapshot / "public/api/articles.json").read_bytes(),
+            )
 
     def test_articles_cz_index_may_still_import_excluded_allowlisted_file(self) -> None:
         helper.TEMP_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1095,7 +1180,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
 
     def test_remote_bundle_path_is_fixed_to_commit_and_token(self) -> None:
         token = "a" * 64
-        self.assertEqual(helper.remote_bundle_path(token), "/tmp/rosomaha-main-price-release-10d9dc6-aaaaaaaaaaaaaaaa")
+        self.assertEqual(helper.remote_bundle_path(token), "/tmp/rosomaha-main-price-release-64ba304-aaaaaaaaaaaaaaaa")
         with self.assertRaises(helper.HelperError):
             helper.remote_bundle_path("../bad")
 
@@ -1136,7 +1221,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                 "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
             }
 
-        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-10d9dc6"
+        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-64ba304"
         receipt = {"new_release": new_release}
         self.assertEqual(helper.classify_recovery_state(audit(new_release, "new-tree", [new_release]), baseline, receipt), "released_candidate")
         self.assertEqual(helper.classify_recovery_state(audit(baseline["current_release"], "old-tree"), baseline, None), "original")
@@ -1163,13 +1248,13 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             "release_scripts": baseline["release_scripts"],
             "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
         }
-        residual = dict(base_audit, existing_label_releases=["/var/www/rosomaha/_releases/partial-prices-10d9dc6"])
+        residual = dict(base_audit, existing_label_releases=["/var/www/rosomaha/_releases/partial-prices-64ba304"])
         self.assertEqual(helper.classify_recovery_state(residual, baseline, None), "unexpected")
-        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-10d9dc6"
+        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-64ba304"
         released = dict(
             base_audit, current_release=new_release,
             current_tree={"valid": True, "digest": "new-tree"},
-            existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-10d9dc6"],
+            existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-64ba304"],
         )
         self.assertEqual(helper.classify_recovery_state(released, baseline, {"new_release": new_release}), "unexpected")
 

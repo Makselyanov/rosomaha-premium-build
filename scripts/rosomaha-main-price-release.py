@@ -54,12 +54,14 @@ IDENTITY_FILE = Path.home() / ".ssh/id_ed25519"
 APP_ROOT = "/var/www/rosomaha"
 REMOTE_CANONICAL_ARTICLES = f"{APP_ROOT}/public/api/articles.json"
 REMOTE_ARTICLES_CZ = f"{APP_ROOT}/src/data/articles-cz"
-TARGET_COMMIT = "10d9dc666bccbe9fb250ab29a69ae09710537e77"
-RELEASE_LABEL = "prices-10d9dc6"
+TARGET_COMMIT = "64ba304c6c3128493a30e7408273652a326752d3"
+RELEASE_LABEL = "prices-64ba304"
 BASE_URL = "https://xn--80aa8ahaki9a.site"
 
 EXPECTED_ARTICLE_COUNT = 61
 EXPECTED_PRERENDER_ROUTE_COUNT = 96
+RUNTIME_ARTICLES_MANIFEST = "api/articles-runtime-manifest.json"
+RUNTIME_ARTICLES_SCHEMA = "rosomaha-canonical-articles-runtime/v1"
 MAX_HTTP_BYTES = 25 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
@@ -1069,22 +1071,14 @@ def validate_articles_cz(snapshot_root: Path, worktree: Path, canonical_slugs: l
     ):
         raise HelperError("articles-cz index does not import each allowlisted article exactly once")
 
-    source_sets = {
-        "manual": extract_ts_slugs((worktree / "src/data/articles.ts").read_text(encoding="utf-8-sig")),
-        "tyumen": extract_ts_slugs((worktree / "src/data/tyumen-exhibition.ts").read_text(encoding="utf-8-sig")),
-        "cz": cz_slugs,
-    }
-    union = source_sets["manual"] + source_sets["tyumen"] + source_sets["cz"]
-    duplicates = sorted({slug for slug in union if union.count(slug) > 1})
-    if duplicates or sorted(union) != sorted(canonical_slugs):
-        raise HelperError("static manual+tyumen+CZ slug union does not equal canonical JSON exactly once")
     return {
         "cz_slugs": sorted(cz_slugs),
         "included_files": [entry["name"] for entry in included_entries],
         "excluded_files": excluded_entries,
         "filtered_index_sha256": sha256_bytes(render_cz_index(included_entries).encode("utf-8")),
-        "source_counts": {key: len(value) for key, value in source_sets.items()},
-        "union_count": len(union),
+        "canonical_runtime_count": len(canonical_slugs),
+        "canonical_cz_count": len(cz_slugs),
+        "canonical_non_cz_count": len(canonical_set - set(cz_slugs)),
         "valid": True,
     }
 
@@ -1112,40 +1106,17 @@ def overlay_canonical(snapshot_root: Path, worktree: Path, cz_validation: dict[s
     safe_directory(snapshot_root, TEMP_ROOT)
     safe_directory(worktree, TEMP_ROOT)
     public_api = worktree / "public/api"
-    target_cz = worktree / "src/data/articles-cz"
     safe_directory(public_api, worktree)
-    safe_directory(target_cz, worktree)
-    observed = sorted(item.name for item in target_cz.iterdir())
-    if "index.ts" not in observed or not set(observed).issubset(ARTICLES_CZ_ALLOWLIST):
-        raise HelperError("pinned commit articles-cz topology contains unexpected files")
-    for name in observed:
-        safe_regular_file(target_cz / name, worktree)
     shutil.copyfile(snapshot_root / "public/api/articles.json", public_api / "articles.json")
-    for name in ARTICLES_CZ_ALLOWLIST:
-        if name == "index.ts":
-            continue
-        source = snapshot_root / "src/data/articles-cz" / name
-        safe_regular_file(source, snapshot_root)
-        target = target_cz / name
-        if target.exists() or target.is_symlink():
-            safe_regular_file(target, worktree)
-        shutil.copyfile(source, target)
-    articles_source = (worktree / "src/data/articles.ts").read_text(encoding="utf-8-sig")
-    if "from './articles-cz/index'" not in articles_source and 'from "./articles-cz/index"' not in articles_source:
-        raise HelperError("pinned commit lacks the explicit articles-cz/index import fix")
-    included_names = set(cz_validation.get("included_files", []))
-    filtered_entries = []
-    for name in ARTICLES_CZ_ALLOWLIST:
-        if name == "index.ts" or name not in included_names:
-            continue
-        raw = (snapshot_root / "src/data/articles-cz" / name).read_text(encoding="utf-8-sig")
-        filtered_entries.append({
-            "name": name,
-            "stem": Path(name).stem,
-            "slug": extract_ts_slugs(raw)[0],
-            "export_name": extract_ts_export_name(raw, name),
-        })
-    (target_cz / "index.ts").write_text(render_cz_index(filtered_entries), encoding="utf-8", newline="\n")
+    runtime_source = worktree / "src/data/canonical-articles.ts"
+    safe_regular_file(runtime_source, worktree)
+    runtime_raw = runtime_source.read_text(encoding="utf-8-sig")
+    if "virtual:canonical-articles" not in runtime_raw:
+        raise HelperError("pinned commit lacks the canonical runtime article import")
+    vite_config = worktree / "vite.config.ts"
+    safe_regular_file(vite_config, worktree)
+    if "virtual:canonical-articles" not in vite_config.read_text(encoding="utf-8-sig"):
+        raise HelperError("pinned commit lacks the canonical article Vite module")
 
 
 def isolated_build_environment() -> dict[str, str]:
@@ -1179,6 +1150,53 @@ def xml_locations(raw: bytes) -> set[str]:
     return {collapse_text(node.text or "") for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "loc" and node.text}
 
 
+def verify_runtime_articles(dist: Path, canonical_raw: bytes, articles: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = dist / RUNTIME_ARTICLES_MANIFEST
+    details = safe_regular_file(manifest_path, dist)
+    if details.st_size < 2 or details.st_size > 64 * 1024:
+        raise HelperError("candidate runtime article manifest has an unsafe size")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HelperError("candidate runtime article manifest is invalid JSON") from exc
+    expected = {
+        "schema": RUNTIME_ARTICLES_SCHEMA,
+        "source": "public/api/articles.json",
+        "count": articles["count"],
+        "source_sha256": sha256_bytes(canonical_raw),
+        "slug_digest": articles["slug_digest"],
+    }
+    if manifest != expected:
+        raise HelperError("candidate runtime article manifest differs from canonical JSON")
+
+    assets_root = dist / "assets"
+    safe_directory(assets_root, dist)
+    javascript_files = sorted(assets_root.rglob("*.js"))
+    if not javascript_files:
+        raise HelperError("candidate runtime JavaScript bundle is missing")
+    remaining = {slug.encode("ascii") for slug in articles["slugs"]}
+    scanned_bytes = 0
+    for asset in javascript_files:
+        asset_details = safe_regular_file(asset, dist)
+        scanned_bytes += asset_details.st_size
+        if scanned_bytes > MAX_HTTP_BYTES:
+            raise HelperError("candidate runtime JavaScript bundle exceeds the audit limit")
+        raw = asset.read_bytes()
+        remaining = {slug for slug in remaining if slug not in raw}
+        if not remaining:
+            break
+    if remaining:
+        raise HelperError("candidate runtime JavaScript bundle misses canonical article slugs")
+    return {
+        **manifest,
+        "manifest_sha256": sha256_file(manifest_path),
+        "javascript_files_scanned": len(javascript_files),
+        "javascript_bytes_scanned": scanned_bytes,
+        "all_canonical_slugs_embedded": True,
+        "valid": True,
+    }
+
+
 def verify_candidate_dist(dist: Path, snapshot_root: Path, public_baseline: dict[str, Any]) -> dict[str, Any]:
     safe_directory(dist, dist)
     canonical_raw = (snapshot_root / "public/api/articles.json").read_bytes()
@@ -1188,6 +1206,7 @@ def verify_candidate_dist(dist: Path, snapshot_root: Path, public_baseline: dict
     articles = article_info(candidate_public, "candidate-dist")
     if not articles["valid"] or articles["count"] != EXPECTED_ARTICLE_COUNT:
         raise HelperError("candidate dist article count/uniqueness is invalid")
+    runtime_articles = verify_runtime_articles(dist, canonical_raw, articles)
 
     pages: dict[str, Any] = {}
     for path in SEO_SNAPSHOT_PATHS:
@@ -1239,6 +1258,7 @@ def verify_candidate_dist(dist: Path, snapshot_root: Path, public_baseline: dict
         raise HelperError(f"candidate canonical prerender route count is {canonical_routes}, expected {EXPECTED_PRERENDER_ROUTE_COUNT}")
     return {
         "valid": True, "articles": articles, "seo": candidate_snapshot,
+        "runtime_articles": runtime_articles,
         "article_prerenders": len(article_pages), "prerender_routes": len(prerender_pages), "canonical_prerender_routes": canonical_routes,
         "sitemap_article_count": len(article_urls), "model_urls_verified": len(model_urls),
         "canonical_articles_sha256": sha256_bytes(canonical_raw),
@@ -1314,9 +1334,14 @@ def build_candidate(commit: str, snapshot_root: Path, public_baseline: dict[str,
         )
         if head.returncode != 0 or head.stdout.strip() != commit:
             raise HelperError("isolated worktree HEAD differs from pinned commit")
+        source_root = worktree / "src"
+        source_before = tree_manifest(source_root)
         canonical_info = article_info((snapshot_root / "public/api/articles.json").read_bytes(), "canonical")
         cz_validation = validate_articles_cz(snapshot_root, worktree, canonical_info["slugs"])
         overlay_canonical(snapshot_root, worktree, cz_validation)
+        source_after_overlay = tree_manifest(source_root)
+        if source_after_overlay["digest"] != source_before["digest"]:
+            raise HelperError("canonical overlay unexpectedly changed tracked src")
         npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
         if not npm:
             raise HelperError("fixed local npm runtime is unavailable")
@@ -1332,6 +1357,9 @@ def build_candidate(commit: str, snapshot_root: Path, public_baseline: dict[str,
         }
         if completed.returncode != 0:
             raise HelperError(f"isolated candidate build failed: {completed.stderr[-2000:]}")
+        source_after_build = tree_manifest(source_root)
+        if source_after_build["digest"] != source_before["digest"]:
+            raise HelperError("candidate build unexpectedly changed tracked src")
         dist = worktree / "dist"
         verification = verify_candidate_dist(dist, snapshot_root, public_baseline)
         manifest = tree_manifest(dist)
@@ -1341,6 +1369,13 @@ def build_candidate(commit: str, snapshot_root: Path, public_baseline: dict[str,
             "manifest_name": manifest_path.name, "manifest_sha256": sha256_file(manifest_path),
             "tree_digest": manifest["digest"], "file_count": manifest["file_count"],
             "verification": verification, "articles_cz_validation": cz_validation, "build": build_receipt,
+            "source_tree": {
+                "before_digest": source_before["digest"],
+                "after_overlay_digest": source_after_overlay["digest"],
+                "after_build_digest": source_after_build["digest"],
+                "file_count": source_before["file_count"],
+                "unchanged": True,
+            },
         }
     finally:
         removed = run_git(["worktree", "remove", "--force", str(worktree)], timeout=180)
