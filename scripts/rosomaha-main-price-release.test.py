@@ -906,6 +906,12 @@ Allow: /
         self.assertIn("default_robots_group_blocks_root(robots_raw)", verify)
         self.assertNotIn('re.search(r"(?im)^\\s*Disallow:', verify)
 
+    def test_sftp_exclusive_upload_modes_are_writable(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        upload = source[source.index("def sftp_upload_file"):source.index("def upload_bundle")]
+        self.assertEqual(upload.count('sftp.open(temporary, "wx")'), 2)
+        self.assertNotIn('sftp.open(temporary, "xb")', upload)
+
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)

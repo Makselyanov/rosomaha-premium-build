@@ -1515,7 +1515,7 @@ def sftp_upload_file(sftp: paramiko.SFTPClient, local: Path, remote_dir: str, na
     temporary = final + ".part"
     sftp_assert_missing(sftp, final)
     sftp_assert_missing(sftp, temporary)
-    with local.open("rb") as source, sftp.open(temporary, "xb") as target:
+    with local.open("rb") as source, sftp.open(temporary, "wx") as target:
         while True:
             chunk = source.read(1024 * 1024)
             if not chunk:
@@ -1534,7 +1534,7 @@ def sftp_upload_bytes(sftp: paramiko.SFTPClient, raw: bytes, remote_dir: str, na
     temporary = final + ".part"
     sftp_assert_missing(sftp, final)
     sftp_assert_missing(sftp, temporary)
-    with sftp.open(temporary, "xb") as target:
+    with sftp.open(temporary, "wx") as target:
         target.write(raw)
     sftp.posix_rename(temporary, final)
     attr = sftp.lstat(final)
