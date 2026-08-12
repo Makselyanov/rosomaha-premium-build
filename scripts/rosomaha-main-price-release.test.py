@@ -891,6 +891,43 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             self.assertNotIn("draft-only-slug", generated)
             self.assertNotIn(Path(validation["excluded_files"][0]["name"]).stem, generated)
 
+    def test_articles_cz_index_may_still_import_excluded_allowlisted_file(self) -> None:
+        helper.TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=helper.TEMP_ROOT) as raw_root:
+            root = Path(raw_root)
+            snapshot = root / "canonical"
+            cz = snapshot / "src/data/articles-cz"
+            worktree = root / "worktree"
+            (worktree / "src/data").mkdir(parents=True)
+            (snapshot / "public/api").mkdir(parents=True)
+            cz.mkdir(parents=True)
+            canonical_slugs = ["manual", "tyumen"]
+            imports = []
+            for index, name in enumerate(helper.ARTICLES_CZ_ALLOWLIST):
+                if name == "index.ts":
+                    continue
+                slug = f"cz-{index}"
+                if index == 0:
+                    slug = "draft-only-slug"
+                else:
+                    canonical_slugs.append(slug)
+                export_name = f"item{index}Article"
+                (cz / name).write_text(
+                    f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
+                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
+            (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
+            (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'manual' };", encoding="utf-8")
+            (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
+            (snapshot / "public/api/articles.json").write_text(
+                json.dumps([{"slug": slug} for slug in canonical_slugs]),
+                encoding="utf-8",
+            )
+            validation = helper.validate_articles_cz(snapshot, worktree, canonical_slugs)
+            self.assertEqual(len(validation["excluded_files"]), 1)
+            self.assertEqual(validation["excluded_files"][0]["slug"], "draft-only-slug")
+
     def test_tree_manifest_rejects_hardlinked_candidate_file(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)
