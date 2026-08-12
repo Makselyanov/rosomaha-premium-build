@@ -213,39 +213,6 @@ def run_remote_command(
         time.sleep(0.2)
 
 
-def discover_php_binary(client: paramiko.SSHClient) -> tuple[str, str]:
-    quoted_candidates = " ".join(f"'{item}'" for item in PHP_CANDIDATES)
-    command = f"""
-set -eu
-for candidate in {quoted_candidates}; do
-  resolved="$(command -v -- "$candidate" 2>/dev/null || true)"
-  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
-    version="$($resolved -r 'echo PHP_VERSION;' 2>/dev/null || true)"
-    if [ -n "$version" ]; then
-      printf '%s\t%s\n' "$resolved" "$version"
-    fi
-  fi
-done
-"""
-    status, output, error = run_remote_command(client, command, 30)
-    if status != 0:
-        raise RuntimeError(f"Remote PHP discovery failed: {error[-300:]}")
-
-    discovered = []
-    for line in output.splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            discovered.append((parts[0], parts[1]))
-    for binary, version in discovered:
-        if version.startswith(EXPECTED_PHP_SERIES + "."):
-            return binary, version
-
-    available = ",".join(version for _, version in discovered) or "none"
-    raise RuntimeError(
-        f"PHP {EXPECTED_PHP_SERIES} CLI was not found; available={available}"
-    )
-
-
 def execute_remote(mode: str) -> dict[str, object]:
     if mode not in {"audit", "apply"}:
         raise ValueError("mode must be audit or apply")
@@ -258,57 +225,84 @@ def execute_remote(mode: str) -> dict[str, object]:
         raise RuntimeError(
             f"Beget SSH connection failed: {type(exc).__name__}: {exc}"
         ) from exc
-    stage = "root-check"
+    stage = "single-session-preflight-and-operation"
 
     try:
-        root_check = (
-            "set -eu; "
-            f"test \"$(realpath -- {SITE_ROOT})\" = {SITE_ROOT}; "
-            f"test -f {SITE_ROOT}/bitrix/header.php"
-        )
-        status, _, error = run_remote_command(client, root_check, 30)
-        if status != 0:
-            raise RuntimeError(f"Pinned Bitrix root check failed: {error[:300]}")
-
-        stage = "php-discovery"
-        php_binary, php_version = discover_php_binary(client)
         script_bytes = PHP_SCRIPT.read_bytes()
-
-        stage = "php-preflight"
-        status, preflight_output, preflight_error = run_remote_command(
-            client,
-            (
-                f"timeout 15s {php_binary} -r 'echo PHP_VERSION;' && "
-                f"timeout 15s {php_binary} -l"
-            ),
-            40,
-            script_bytes,
-        )
-        if status != 0:
-            raise RuntimeError(
-                "Remote PHP preflight failed: "
-                + (preflight_error or preflight_output)[-500:]
-            )
-
-        stage = "bitrix-operation"
+        encoded_script = base64.b64encode(script_bytes).decode("ascii")
+        expected_script_sha256 = hashlib.sha256(script_bytes).hexdigest()
+        quoted_candidates = " ".join(f"'{item}'" for item in PHP_CANDIDATES)
+        command = f"""
+set -eu
+script_payload='{encoded_script}'
+decoded_script_with_marker="$(
+  printf '%s' "$script_payload" | base64 -d
+  printf '__ROSOMAHA_PAYLOAD_END__'
+)"
+case "$decoded_script_with_marker" in
+  *__ROSOMAHA_PAYLOAD_END__) ;;
+  *) printf 'Decoded helper marker is missing\n' >&2; exit 43 ;;
+esac
+decoded_script="${{decoded_script_with_marker%__ROSOMAHA_PAYLOAD_END__}}"
+decoded_sha256="$(printf '%s' "$decoded_script" | sha256sum | awk '{{print $1}}')"
+test "$decoded_sha256" = '{expected_script_sha256}'
+test "$(realpath -- '{SITE_ROOT}')" = '{SITE_ROOT}'
+test -f '{SITE_ROOT}/bitrix/header.php'
+php_binary=''
+php_version=''
+for candidate in {quoted_candidates}; do
+  resolved="$(command -v -- "$candidate" 2>/dev/null || true)"
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    version="$("$resolved" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    case "$version" in
+      {EXPECTED_PHP_SERIES}.*)
+        php_binary="$resolved"
+        php_version="$version"
+        break
+        ;;
+    esac
+  fi
+done
+if [ -z "$php_binary" ]; then
+  printf 'PHP {EXPECTED_PHP_SERIES} CLI was not found\n' >&2
+  exit 42
+fi
+printf '%s' "$decoded_script" | timeout 15s "$php_binary" -l >/dev/null
+printf '__ROSOMAHA_PHP_VERSION__=%s\n' "$php_version"
+printf '%s' "$decoded_script" | timeout 150s "$php_binary" \
+  -d display_errors=stderr -d log_errors=0 -- '{mode}'
+"""
         status, output, error = run_remote_command(
             client,
-            (
-                f"timeout 150s {php_binary} -d display_errors=stderr -d log_errors=0 "
-                f"-- {mode}"
-            ),
-            170,
-            script_bytes,
+            command,
+            190,
         )
         if not output:
             raise RuntimeError(f"Bitrix price helper returned no JSON: {error[-500:]}")
+        output_lines = output.splitlines()
+        version_marker = "__ROSOMAHA_PHP_VERSION__="
+        php_version = next(
+            (
+                line[len(version_marker):]
+                for line in output_lines
+                if line.startswith(version_marker)
+            ),
+            "",
+        )
         try:
-            payload = json.loads(output.splitlines()[-1])
+            payload = json.loads(output_lines[-1])
         except json.JSONDecodeError as exc:
-            raise RuntimeError("Bitrix price helper returned malformed JSON") from exc
+            detail = (error or output)[-500:]
+            raise RuntimeError(
+                f"Bitrix price helper returned malformed JSON: {detail}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Bitrix price helper returned a non-object JSON payload")
         if status != 0 or payload.get("status") != "ok":
             message = str(payload.get("error") or error or "unknown Bitrix error")
             raise RuntimeError(message[:1000])
+        if not php_version.startswith(EXPECTED_PHP_SERIES + "."):
+            raise RuntimeError("Remote PHP version marker was missing or unexpected")
         payload["runtime"] = {
             "php_version": php_version,
             "php_series_matches_live": php_version.startswith(EXPECTED_PHP_SERIES + "."),
