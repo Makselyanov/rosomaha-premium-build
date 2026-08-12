@@ -472,6 +472,79 @@ def operator_diagnostics(result: dict[str, Any]) -> str:
     return f"exit_code={exit_code}; stdout_tail={stdout_tail!r}; stderr_tail={stderr_tail!r}"
 
 
+SAFE_TOPOLOGY_FIELDS = (
+    "path", "exists", "realpath", "directory", "regular", "symlink", "nlink",
+    "uid", "gid", "mode", "writable", "sticky", "error", "valid",
+)
+MAX_BLOCKED_SUMMARY_CHARS = 8000
+
+
+def safe_topology_entry(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"valid": False, "error": "malformed topology entry"}
+    result: dict[str, Any] = {}
+    for field in SAFE_TOPOLOGY_FIELDS:
+        item = value.get(field)
+        if isinstance(item, (str, int, bool)) or item is None:
+            result[field] = sanitized_diagnostic_tail(item, 500) if isinstance(item, str) else item
+    return result
+
+
+def summarize_blocked_payload(payload: dict[str, Any]) -> str:
+    topology = payload.get("topology")
+    invalid: dict[str, Any] = {}
+    if isinstance(topology, dict):
+        for section in ("directories", "files"):
+            entries = topology.get(section)
+            if not isinstance(entries, dict):
+                invalid[section] = {"valid": False, "error": "malformed topology section"}
+                continue
+            for name in sorted(entries):
+                entry = entries[name]
+                if not isinstance(entry, dict) or entry.get("valid") is not True:
+                    invalid[f"{section}.{name}"] = safe_topology_entry(entry)
+        for name in ("current_link", "temporary"):
+            entry = topology.get(name)
+            if not isinstance(entry, dict) or entry.get("valid") is not True:
+                invalid[name] = safe_topology_entry(entry)
+        if topology.get("valid") is not True and not invalid:
+            invalid["topology"] = {"valid": False, "error": "aggregate topology invalid without an invalid safe child"}
+    else:
+        invalid["topology"] = {"valid": False, "error": "missing topology object"}
+
+    articles_cz = payload.get("articles_cz")
+    cz_summary: dict[str, Any] | None = None
+    if not isinstance(articles_cz, dict) or articles_cz.get("valid") is not True:
+        cz_summary = {
+            "valid": False,
+            "error": sanitized_diagnostic_tail(articles_cz.get("error"), 500) if isinstance(articles_cz, dict) else "missing articles_cz object",
+        }
+        observed = articles_cz.get("observed") if isinstance(articles_cz, dict) else None
+        if isinstance(observed, list):
+            bounded = observed[: len(ARTICLES_CZ_ALLOWLIST)]
+            if all(isinstance(name, str) and re.fullmatch(r"[a-z0-9-]+\.ts", name) for name in bounded):
+                cz_summary["observed"] = bounded
+                cz_summary["observed_truncated"] = len(observed) > len(bounded)
+            else:
+                cz_summary["observed"] = "unsafe filename data omitted"
+
+    blockers = payload.get("blockers")
+    safe_blockers = []
+    if isinstance(blockers, list):
+        safe_blockers = [sanitized_diagnostic_tail(item, 500) for item in blockers[:25] if isinstance(item, str)]
+    elif blockers is not None:
+        safe_blockers = ["malformed blockers field"]
+    summary = {
+        "blockers": safe_blockers,
+        "invalid_topology": invalid,
+        "articles_cz": cz_summary,
+    }
+    encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded) > MAX_BLOCKED_SUMMARY_CHARS:
+        return sanitized_diagnostic_tail(encoded, MAX_BLOCKED_SUMMARY_CHARS)
+    return encoded
+
+
 def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
     lines = [line.strip() for line in str(result.get("stdout") or "").splitlines() if line.strip()]
     line = lines[-1] if lines else ""
@@ -486,7 +559,15 @@ def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
     if payload is None:
         raise HelperError(f"fixed operator returned no valid JSON object line; {operator_diagnostics(result)}")
     if result.get("exit_code") != 0 or payload.get("status") in {"error", "blocked"}:
-        reason = sanitized_diagnostic_tail(payload.get("error") or payload.get("blockers") or "operator rejected the request", 500)
+        if payload.get("status") == "blocked":
+            reason = summarize_blocked_payload(payload)
+            try:
+                exit_code = int(result.get("exit_code", -1))
+            except (TypeError, ValueError):
+                exit_code = -1
+            raise HelperError(f"fixed operator blocked: exit_code={exit_code}; safe_summary={reason}")
+        else:
+            reason = sanitized_diagnostic_tail(payload.get("error") or payload.get("blockers") or "operator rejected the request", 500)
         raise HelperError(f"fixed operator failed: {reason}; {operator_diagnostics(result)}")
     return payload
 

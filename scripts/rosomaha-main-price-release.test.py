@@ -258,6 +258,89 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertNotIn(secret, str(caught.exception))
         self.assertIn("password=[REDACTED]", str(caught.exception))
 
+    def test_blocked_payload_summary_is_safe_deterministic_and_actionable(self) -> None:
+        secret = "password-value-that-must-not-escape"
+        observed = list(helper.ARTICLES_CZ_ALLOWLIST) + ["unexpected-extra.ts", "second-extra.ts"]
+        payload = {
+            "status": "blocked",
+            "blockers": ["unsafe server path topology", "canonical articles-cz manifest is unsafe"],
+            "topology": {
+                "valid": False,
+                "directories": {
+                    "app_root": {"path": "/var/www/rosomaha", "valid": True, "sha256": "do-not-show"},
+                    "dist": {
+                        "path": "/var/www/rosomaha/dist", "exists": True,
+                        "realpath": "/srv/escaped/dist", "directory": True, "symlink": False,
+                        "uid": 1001, "gid": 1001, "mode": "0o755", "writable": False,
+                        "valid": False, "sha256": "do-not-show",
+                    },
+                },
+                "files": {
+                    "server_release": {
+                        "path": "/var/www/rosomaha/scripts/server-release.sh", "exists": True,
+                        "regular": True, "symlink": False, "nlink": 2, "uid": 0, "gid": 0,
+                        "mode": "0o755", "writable": False, "valid": False,
+                        "sha256": "another-do-not-show",
+                    },
+                    "canonical_articles": {"path": "/var/www/rosomaha/public/api/articles.json", "valid": True},
+                },
+                "current_link": {"path": "/var/www/rosomaha/current", "symlink": True, "valid": True},
+                "temporary": {"path": "/tmp", "sticky": True, "valid": True},
+            },
+            "articles_cz": {"valid": False, "error": f"allowlist mismatch password={secret}", "observed": observed},
+            "current_tree": {"files": [{"path": "upload/secret.jpg", "sha256": "tree-secret-hash"}]},
+            "staging_dist": {"files": [{"path": "assets/main.js", "sha256": "dist-secret-hash"}]},
+            "operator_sha256": "operator-secret-hash",
+        }
+        first = helper.summarize_blocked_payload(payload)
+        second = helper.summarize_blocked_payload(payload)
+        self.assertEqual(first, second)
+        summary = json.loads(first)
+        self.assertEqual(sorted(summary["invalid_topology"]), ["directories.dist", "files.server_release"])
+        self.assertEqual(summary["invalid_topology"]["directories.dist"]["realpath"], "/srv/escaped/dist")
+        self.assertEqual(summary["invalid_topology"]["files.server_release"]["nlink"], 2)
+        self.assertEqual(len(summary["articles_cz"]["observed"]), len(helper.ARTICLES_CZ_ALLOWLIST))
+        self.assertTrue(summary["articles_cz"]["observed_truncated"])
+        self.assertNotIn(secret, first)
+        self.assertNotIn("sha256", first)
+        self.assertNotIn("upload/secret.jpg", first)
+        self.assertNotIn("tree-secret-hash", first)
+        self.assertLessEqual(len(first), helper.MAX_BLOCKED_SUMMARY_CHARS)
+
+    def test_parse_blocked_payload_does_not_append_raw_stdout_tail(self) -> None:
+        payload = {
+            "status": "blocked",
+            "blockers": ["unsafe server path topology"],
+            "topology": {
+                "valid": False,
+                "directories": {"dist": {"path": "/var/www/rosomaha/dist", "valid": False, "error": "not writable"}},
+                "files": {},
+                "current_link": {"valid": True},
+                "temporary": {"valid": True},
+            },
+            "articles_cz": {"valid": True},
+            "current_tree": {"files": [{"path": "must-not-leak", "sha256": "must-not-leak"}]},
+        }
+        raw = json.dumps(payload, ensure_ascii=False)
+        with self.assertRaises(helper.HelperError) as caught:
+            helper.parse_operator_json({"exit_code": 3, "stdout": raw, "stderr": "password=must-not-leak"})
+        message = str(caught.exception)
+        self.assertIn("directories.dist", message)
+        self.assertIn("not writable", message)
+        self.assertIn("exit_code=3", message)
+        self.assertNotIn("must-not-leak", message)
+        self.assertNotIn("stdout_tail", message)
+
+    def test_blocked_summary_omits_unsafe_observed_filename_data(self) -> None:
+        payload = {
+            "status": "blocked",
+            "blockers": [],
+            "topology": {"valid": True, "directories": {}, "files": {}, "current_link": {"valid": True}, "temporary": {"valid": True}},
+            "articles_cz": {"valid": False, "error": "mismatch", "observed": ["../../secret.env"]},
+        }
+        summary = json.loads(helper.summarize_blocked_payload(payload))
+        self.assertEqual(summary["articles_cz"]["observed"], "unsafe filename data omitted")
+
     def test_operator_has_no_privileged_or_server_build_path(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
         self.assertNotIn("ROOT_OPERATOR", text)
