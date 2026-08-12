@@ -72,6 +72,32 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertIn("avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts", helper.ARTICLES_CZ_ALLOWLIST)
         self.assertIn("rosomaha-zastryala-v-bolote-spokoynyy-poryadok-deystviy-bez-lishney-suety.ts", helper.ARTICLES_CZ_ALLOWLIST)
 
+    def test_saved_acl_does_not_treat_c_users_path_as_builtin_users(self) -> None:
+        current_sid = "S-1-5-21-111-222-333-1001"
+        saved = (
+            "C:\\Users\\Макс\\.ssh\\id_ed25519\r\n"
+            f"D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1301bf;;;{current_sid})\r\n"
+        )
+        evidence = helper.validate_saved_windows_acl(saved, current_sid)
+        self.assertTrue(evidence["dacl_protected"])
+        self.assertEqual(evidence["allowed_principal_count"], 3)
+
+    def test_saved_acl_rejects_builtin_users_broad_principal(self) -> None:
+        current_sid = "S-1-5-21-111-222-333-1001"
+        # SDDL trustee BU is localization-independent BUILTIN\\Users (S-1-5-32-545).
+        saved = f"id_ed25519\r\nD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;BU)(A;;FR;;;{current_sid})\r\n"
+        with self.assertRaisesRegex(helper.HelperError, "unknown or broad principal"):
+            helper.validate_saved_windows_acl(saved, current_sid)
+
+    def test_saved_acl_rejects_inheritance_and_unknown_sid(self) -> None:
+        current_sid = "S-1-5-21-111-222-333-1001"
+        inherited = f"id_ed25519\r\nD:PAI(A;ID;FR;;;{current_sid})\r\n"
+        with self.assertRaisesRegex(helper.HelperError, "protected from inheritance"):
+            helper.validate_saved_windows_acl(inherited, current_sid)
+        unknown = f"id_ed25519\r\nD:P(A;;FR;;;{current_sid})(A;;FR;;;S-1-5-21-999-888-777-1002)\r\n"
+        with self.assertRaisesRegex(helper.HelperError, "unknown or broad principal"):
+            helper.validate_saved_windows_acl(unknown, current_sid)
+
     def test_operator_embedded_python_compiles(self) -> None:
         raw = OPERATOR_PATH.read_text(encoding="utf-8")
         start = raw.index("<<'PY'\n") + len("<<'PY'\n")

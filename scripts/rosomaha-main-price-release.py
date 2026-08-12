@@ -223,19 +223,95 @@ def atomic_json_receipt(prefix: str, payload: dict[str, Any]) -> Path:
     return target
 
 
-def windows_identity_acl(path: Path) -> dict[str, Any]:
+WINDOWS_SDDL_TRUSTEES = {
+    "BA": "S-1-5-32-544",  # Builtin Administrators
+    "SY": "S-1-5-18",      # Local System
+}
+
+
+def current_windows_sid() -> str:
     completed = subprocess.run(
-        ["icacls.exe", str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=15, check=False,
     )
     if completed.returncode != 0:
-        raise HelperError("cannot prove pinned identity ACL")
-    acl = completed.stdout
-    broad = ("everyone", "authenticated users", "builtin\\users", "\\users", "все:", "пользователи", "прошедшие проверку")
-    if any(marker in acl.casefold() for marker in broad):
-        raise HelperError("pinned identity ACL grants a broad principal")
-    return {"checked": True, "platform": "windows", "broad_principals_absent": True}
+        raise HelperError("cannot prove the current Windows user SID")
+    match = re.search(rb"S-1-[0-9]+(?:-[0-9]+)+", completed.stdout)
+    if match is None:
+        raise HelperError("current Windows user SID is unavailable")
+    return match.group(0).decode("ascii")
+
+
+def validate_saved_windows_acl(saved_acl: str, current_sid: str) -> dict[str, Any]:
+    if not re.fullmatch(r"S-1-[0-9]+(?:-[0-9]+)+", current_sid):
+        raise HelperError("invalid current Windows user SID")
+    descriptor_lines = [
+        line.strip() for line in saved_acl.splitlines()
+        if re.match(r"^D:[A-Z]*(?:\(|$)", line.strip())
+    ]
+    if len(descriptor_lines) != 1:
+        raise HelperError("saved identity ACL has no unique DACL descriptor")
+    descriptor = descriptor_lines[0]
+    match = re.fullmatch(r"D:([A-Z]*)(.*)", descriptor)
+    if match is None:
+        raise HelperError("saved identity DACL is malformed")
+    dacl_flags, ace_source = match.groups()
+    if dacl_flags != "P":
+        raise HelperError("pinned identity DACL must be protected from inheritance")
+    ace_values = re.findall(r"\(([^()]*)\)", ace_source)
+    if not ace_values or "".join(f"({value})" for value in ace_values) != ace_source:
+        raise HelperError("saved identity DACL contains malformed ACE data")
+
+    allowed_sids = {current_sid, "S-1-5-18", "S-1-5-32-544"}
+    observed: list[str] = []
+    for value in ace_values:
+        parts = value.split(";")
+        if len(parts) != 6:
+            raise HelperError("saved identity DACL contains a malformed ACE")
+        ace_type, ace_flags, rights, object_guid, inherit_guid, trustee = parts
+        if ace_type != "A" or ace_flags or object_guid or inherit_guid or not rights:
+            raise HelperError("pinned identity ACL contains inherited, denied, object, or empty access")
+        normalized = WINDOWS_SDDL_TRUSTEES.get(trustee, trustee)
+        if normalized not in allowed_sids:
+            raise HelperError("pinned identity ACL grants an unknown or broad principal")
+        observed.append(normalized)
+    if len(observed) != len(set(observed)):
+        raise HelperError("pinned identity ACL contains duplicate principal entries")
+    if current_sid not in observed:
+        raise HelperError("pinned identity ACL does not grant the current user")
+    return {
+        "checked": True,
+        "platform": "windows",
+        "dacl_protected": True,
+        "inherited_entries": 0,
+        "allowed_principal_count": len(observed),
+        "current_user_present": True,
+    }
+
+
+def windows_identity_acl(path: Path) -> dict[str, Any]:
+    TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="identity-acl-", dir=TEMP_ROOT) as raw_directory:
+        directory = Path(raw_directory)
+        safe_directory(directory, TEMP_ROOT)
+        saved_path = directory / "identity.acl"
+        completed = subprocess.run(
+            ["icacls.exe", str(path), "/save", str(saved_path), "/q"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+        if completed.returncode != 0:
+            raise HelperError("cannot prove pinned identity ACL")
+        safe_regular_file(saved_path, directory)
+        raw = saved_path.read_bytes()
+        if len(raw) < 4 or len(raw) > 1024 * 1024:
+            raise HelperError("saved identity ACL has an invalid size")
+        try:
+            saved_acl = raw.decode("utf-16")
+        except UnicodeError as exc:
+            raise HelperError("saved identity ACL encoding is invalid") from exc
+        return validate_saved_windows_acl(saved_acl, current_windows_sid())
 
 
 def pinned_identity() -> tuple[paramiko.PKey, dict[str, Any]]:
