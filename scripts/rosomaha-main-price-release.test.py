@@ -164,6 +164,78 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertFalse(supported((3, 8, 20)))
         self.assertTrue(supported((3, 9, 0)))
 
+    def test_root_mutation_permission_rules_fail_closed(self) -> None:
+        namespace = operator_namespace()
+        directory_ok = namespace["trusted_directory_permissions"]
+        current_ok = namespace["trusted_current_link_attributes"]
+        entry_ok = namespace["trusted_tree_entry_permissions"]
+        directory = namespace["stat"].S_IFDIR
+        regular = namespace["stat"].S_IFREG
+        symlink = namespace["stat"].S_IFLNK
+        sticky = namespace["stat"].S_ISVTX
+
+        self.assertTrue(directory_ok(0, directory | 0o2775 | sticky, allow_group_write=True, require_sticky=True))
+        self.assertFalse(directory_ok(1000, directory | 0o2775 | sticky, allow_group_write=True, require_sticky=True))
+        self.assertFalse(directory_ok(0, directory | 0o2775, allow_group_write=True, require_sticky=True))
+        self.assertFalse(directory_ok(0, directory | 0o3777, allow_group_write=True, require_sticky=True))
+        self.assertFalse(directory_ok(0, directory | 0o2775, allow_group_write=False, require_sticky=False))
+        self.assertTrue(directory_ok(0, directory | 0o2755, allow_group_write=False, require_sticky=False))
+        self.assertTrue(current_ok(0, symlink | 0o777))
+        self.assertFalse(current_ok(33, symlink | 0o777))
+        self.assertFalse(current_ok(0, regular | 0o644))
+        self.assertTrue(entry_ok(0, directory | 0o755, is_file=False))
+        self.assertFalse(entry_ok(0, directory | 0o775, is_file=False))
+        self.assertTrue(entry_ok(0, regular | 0o644, is_file=True, nlink=1))
+        self.assertFalse(entry_ok(0, regular | 0o664, is_file=True, nlink=1))
+        self.assertFalse(entry_ok(0, regular | 0o644, is_file=True, nlink=2))
+
+    def test_root_mutation_topology_covers_every_parent_and_closed_tree(self) -> None:
+        source = operator_source()
+        mutation = source[source.index("def root_mutation_topology") : source.index("def root_apply_readiness")]
+        for marker in (
+            '"root": trusted_root_directory(Path("/"))',
+            '"var": trusted_root_directory(Path("/var"))',
+            '"var_www": trusted_root_directory(Path("/var/www"))',
+            '"app_root": trusted_root_directory(APP_ROOT, allow_group_write=True, require_sticky=True)',
+            '"releases": trusted_root_directory(RELEASES_DIR)',
+            '"staging_dist": trusted_root_directory(DIST_DIR, allow_group_write=not require_closed_dist)',
+            "current_link = trusted_current_link()",
+            '"current": trusted_closed_tree(Path(current))',
+            '"rollback": trusted_closed_tree(Path(rollback))',
+        ):
+            self.assertIn(marker, mutation)
+        readiness = source[source.index("def root_apply_readiness") : source.index("def audit_state")]
+        self.assertIn("and mutation.get(\"valid\")", readiness)
+
+    def test_candidate_is_closed_before_swap_and_rechecked_before_run(self) -> None:
+        source = operator_source()
+        body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        extracted = body.index("candidate = extract_candidate")
+        candidate_trust = body.index("trusted_closed_tree(candidate, require_root_mode=0o700)", extracted)
+        first_swap = body.index("os.replace(DIST_DIR, staging_backup)")
+        second_swap = body.index("os.replace(candidate, DIST_DIR)")
+        moved_trust = body.index("trusted_closed_tree(DIST_DIR, require_root_mode=0o700)", second_swap)
+        mutation = body.index("mutation_before_run = root_mutation_topology", moved_trust)
+        release = body.index('run_fixed(trusted_scripts["server-release.sh"]', mutation)
+        self.assertLess(candidate_trust, first_swap)
+        self.assertLess(first_swap, second_swap)
+        self.assertLess(second_swap, moved_trust)
+        self.assertLess(moved_trust, mutation)
+        self.assertLess(mutation, release)
+        self.assertIn("exact_label_releases() != []", body[first_swap - 500 : release])
+        self.assertIn("exact_label_releases() != [new_release]", body[release:])
+        self.assertIn("release_trust = trusted_closed_tree(Path(new_release))", body)
+
+    def test_rollback_rechecks_mutation_topology_before_and_after_switch(self) -> None:
+        source = operator_source()
+        body = source[source.index("def rollback_release") : source.index("def main")]
+        before = body.index("mutation_before_rollback = root_mutation_topology")
+        run = body.index('run_fixed(\n                trusted_scripts["server-rollback.sh"]')
+        after = body.index("mutation_after_rollback = root_mutation_topology")
+        self.assertLess(before, run)
+        self.assertLess(run, after)
+        self.assertIn("exact_label_releases() != [exact_new]", body)
+
     def test_fixed_binary_validation_accepts_only_intended_root_owned_realpaths(self) -> None:
         source = operator_source()
         body = source[source.index("def safe_system_binary") : source.index("def safe_directory")]
@@ -191,6 +263,19 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertIn('trusted_scripts["server-release.sh"]', apply_body)
         self.assertIn('trusted_scripts["server-rollback.sh"]', apply_body)
         self.assertIn('trusted_scripts["server-rollback.sh"]', rollback_body)
+
+    def test_fixed_script_runs_with_closed_umask_and_restores_process_state(self) -> None:
+        source = operator_source()
+        runner = source[source.index("def run_fixed") : source.index("def restore_staging")]
+        set_umask = runner.index("previous_umask = os.umask(0o022)")
+        run = runner.index("completed = subprocess.run(", set_umask)
+        restore = runner.index("os.umask(previous_umask)", run)
+        receipt = runner.index("receipt = {", restore)
+        self.assertLess(set_umask, run)
+        self.assertLess(run, restore)
+        self.assertLess(restore, receipt)
+        self.assertIn("try:\n        completed = subprocess.run(", runner)
+        self.assertIn("finally:\n        os.umask(previous_umask)", runner)
 
     def test_trusted_script_snapshot_is_exclusive_private_hashed_and_fsynced(self) -> None:
         source = operator_source()
@@ -598,6 +683,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                 },
                 "scripts": {"server_release": {"path": "/var/www/rosomaha/scripts/server-release.sh", "valid": True, "executable": False, "sha256": "hidden"}},
                 "lock": {"path": "/var/www/rosomaha/.rosomaha-main-price-release.lock", "valid": False, "available": False},
+                "mutation_topology": {"valid": True},
             },
         }
         summary = json.loads(helper.summarize_blocked_payload(payload))

@@ -1117,11 +1117,15 @@ def run_fixed(script_path, argument, timeout):
         "APP_ROOT": str(APP_ROOT), "PATH": FIXED_PATH,
         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
     }
-    completed = subprocess.run(
-        command, cwd=script_path.parent, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout, check=False, env=env,
-    )
+    previous_umask = os.umask(0o022)
+    try:
+        completed = subprocess.run(
+            command, cwd=script_path.parent, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False, env=env,
+        )
+    finally:
+        os.umask(previous_umask)
     receipt = {
         "script": script_path.name, "script_sha256": expected_sha,
         "argument": argument, "exit_code": completed.returncode,

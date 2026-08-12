@@ -531,7 +531,7 @@ def operator_diagnostics(result: dict[str, Any]) -> str:
 
 
 SAFE_TOPOLOGY_FIELDS = (
-    "path", "exists", "realpath", "directory", "regular", "symlink", "nlink",
+    "path", "root", "exists", "realpath", "directory", "regular", "symlink", "nlink",
     "uid", "gid", "mode", "readable", "writable", "executable", "sticky",
     "available", "create_ready", "held_by_operator", "error", "valid",
 )
@@ -617,6 +617,25 @@ def summarize_blocked_payload(payload: dict[str, Any]) -> str:
         lock = readiness.get("lock")
         if not isinstance(lock, dict) or lock.get("valid") is not True:
             readiness_summary["invalid"]["lock"] = safe_topology_entry(lock)
+        mutation = readiness.get("mutation_topology")
+        if not isinstance(mutation, dict):
+            readiness_summary["invalid"]["mutation_topology"] = {"valid": False, "error": "missing mutation topology"}
+        elif mutation.get("valid") is not True:
+            parents = mutation.get("parents")
+            if isinstance(parents, dict):
+                for name in sorted(parents):
+                    entry = parents[name]
+                    if not isinstance(entry, dict) or entry.get("valid") is not True:
+                        readiness_summary["invalid"][f"mutation.parents.{name}"] = safe_topology_entry(entry)
+            link = mutation.get("current_link")
+            if not isinstance(link, dict) or link.get("valid") is not True:
+                readiness_summary["invalid"]["mutation.current_link"] = safe_topology_entry(link)
+            trees = mutation.get("trees")
+            if isinstance(trees, dict):
+                for name in sorted(trees):
+                    entry = trees[name]
+                    if not isinstance(entry, dict) or entry.get("valid") is not True:
+                        readiness_summary["invalid"][f"mutation.trees.{name}"] = safe_topology_entry(entry)
 
     blockers = payload.get("blockers")
     safe_blockers = []
