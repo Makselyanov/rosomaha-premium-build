@@ -309,7 +309,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertIn("os.lstat(OPERATOR_PATH)", snapshot)
         self.assertIn("before.st_mtime_ns", snapshot)
         self.assertIn("after.st_mtime_ns", snapshot)
-        apply_body = source[source.index("def apply(") : source.index("def argument_parser")]
+        apply_body = source[source.index("def apply(") : source.index("def recover_from_baseline")]
         self.assertEqual(apply_body.count("frozen_operator = operator_bytes()"), 1)
         self.assertNotIn("operator_bytes()", apply_body.replace("frozen_operator = operator_bytes()", ""))
         for expected in (
@@ -911,6 +911,19 @@ Allow: /
         upload = source[source.index("def sftp_upload_file"):source.index("def upload_bundle")]
         self.assertEqual(upload.count('sftp.open(temporary, "wx")'), 2)
         self.assertNotIn('sftp.open(temporary, "xb")', upload)
+
+    def test_recover_cli_never_calls_apply(self) -> None:
+        payload = {"status": "recovered_verified_success"}
+        with mock.patch.object(helper, "recover_from_baseline", return_value=(payload, Path("recovery.json"))) as recover, mock.patch.object(
+            helper, "apply",
+        ) as apply:
+            code = helper.main([
+                "--recover", "--commit", helper.TARGET_COMMIT,
+                "--baseline", "baseline.json",
+            ])
+        self.assertEqual(code, 0)
+        recover.assert_called_once()
+        apply.assert_not_called()
 
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:

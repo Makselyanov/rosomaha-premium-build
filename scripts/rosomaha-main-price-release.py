@@ -1936,9 +1936,26 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                 pass
 
 
+def recover_from_baseline(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
+    prove_target_commit(commit)
+    frozen_operator = operator_bytes()
+    baseline, _resolved_baseline, _archive, _manifest = load_baseline_with_operator(baseline_path, frozen_operator)
+    remote_dir = remote_bundle_path(baseline["baseline_token"])
+    recovered, _success = recover_ambiguous_apply(
+        remote_dir,
+        baseline,
+        TimeoutError("the local apply wait ended before a terminal receipt was observed"),
+        frozen_operator,
+    )
+    receipt = atomic_json_receipt("rosomaha-main-price-release-recovery", recovered)
+    return recovered, receipt
+
+
 def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fixed main Rosomaha price-release helper")
-    parser.add_argument("--apply", action="store_true", help="apply only the exact pinned candidate")
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--apply", action="store_true", help="apply only the exact pinned candidate")
+    operation.add_argument("--recover", action="store_true", help="recover a prior ambiguous apply without retrying apply")
     parser.add_argument("--commit", help="exact pinned commit required with --apply")
     parser.add_argument("--baseline", type=Path, help="captured baseline receipt required with --apply")
     return parser
@@ -1953,8 +1970,14 @@ def main(argv: list[str] | None = None) -> int:
             payload, receipt = apply(args.commit, args.baseline)
             print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
             return 0 if payload["status"] in {"released_verified", "recovered_verified_success"} else 2
+        if args.recover:
+            if args.commit != TARGET_COMMIT or args.baseline is None:
+                raise HelperError(f"--recover requires --commit {TARGET_COMMIT} and --baseline <fixed receipt>")
+            payload, receipt = recover_from_baseline(args.commit, args.baseline)
+            print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
+            return 0 if payload["status"] == "recovered_verified_success" else 2
         if args.commit is not None or args.baseline is not None:
-            raise HelperError("--commit/--baseline are accepted only with --apply")
+            raise HelperError("--commit/--baseline are accepted only with --apply or --recover")
         payload, receipt = audit()
         print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
         return 0
