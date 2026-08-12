@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import Request, urlopen
@@ -76,6 +77,87 @@ PRICE_CHANGES = [
         2_500_000,
     ),
 ]
+
+RECOVERY_SETTLE_SECONDS = 165
+RECOVERY_ATTEMPTS = 3
+RECOVERY_RETRY_DELAY_SECONDS = 5
+REMOTE_BACKUP_ROOT = (
+    "/home/b/berkutm4/migration/rosomaha-rus/backups/bitrix-product-prices"
+)
+
+
+def deterministic_operation_id() -> str:
+    """Return the stable identifier for this exact, pinned nine-price rollout."""
+    material = {
+        "version": 1,
+        "domain": "rosomaha-rus.ru",
+        "site_root": SITE_ROOT,
+        "target": "iblock:86+64/PRICE+FILTER_PRICE",
+        "changes": PRICE_CHANGES,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"bitrix-prices-{digest}"
+
+
+def expected_backup_path(operation_id: str) -> str:
+    validate_operation_id(operation_id)
+    return f"{REMOTE_BACKUP_ROOT}/{operation_id}-prices.json"
+
+
+def validate_operation_id(operation_id: str) -> str:
+    if re.fullmatch(r"bitrix-prices-[a-f0-9]{24}", operation_id) is None:
+        raise ValueError("Invalid pinned Bitrix price operation id")
+    return operation_id
+
+
+class RemoteCommandFailure(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        command_dispatched: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.stdout = stdout
+        self.stderr = stderr
+        self.command_dispatched = command_dispatched
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class RemoteOperationFailure(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        mode: str,
+        operation_id: str | None = None,
+        stdout: str = "",
+        stderr: str = "",
+        partial_payload: dict[str, object] | None = None,
+        command_dispatched: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.mode = mode
+        self.operation_id = operation_id
+        self.stdout = stdout
+        self.stderr = stderr
+        self.partial_payload = partial_payload
+        self.command_dispatched = command_dispatched
+
+    @property
+    def ambiguous_apply(self) -> bool:
+        return self.mode == "apply" and self.command_dispatched
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -177,61 +259,109 @@ def run_remote_command(
     command: str,
     timeout_seconds: int,
     input_data: bytes | None = None,
+    on_dispatched: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
-    _, stdout, _ = client.exec_command(command, timeout=20)
-    channel = stdout.channel
-    if input_data is not None:
-        channel.sendall(input_data)
-        channel.shutdown_write()
-    deadline = time.monotonic() + timeout_seconds
     output = bytearray()
     error = bytearray()
+    dispatched = False
 
-    while True:
-        while channel.recv_ready():
-            output.extend(channel.recv(65536))
-        while channel.recv_stderr_ready():
-            error.extend(channel.recv_stderr(65536))
+    try:
+        # Mark the boundary before asking Paramiko to send the exec request.
+        # An exception from exec_command itself cannot prove the server did not
+        # receive the request, so apply must be recovered read-only.
+        dispatched = True
+        if on_dispatched is not None:
+            on_dispatched()
+        _, stdout, _ = client.exec_command(command, timeout=20)
+        channel = stdout.channel
+        if input_data is not None:
+            channel.sendall(input_data)
+            channel.shutdown_write()
+        deadline = time.monotonic() + timeout_seconds
 
-        if channel.exit_status_ready():
+        while True:
             while channel.recv_ready():
                 output.extend(channel.recv(65536))
             while channel.recv_stderr_ready():
                 error.extend(channel.recv_stderr(65536))
-            return (
-                channel.recv_exit_status(),
-                output.decode("utf-8", errors="replace").strip(),
-                error.decode("utf-8", errors="replace").strip(),
-            )
 
-        if time.monotonic() >= deadline:
-            channel.close()
-            raise TimeoutError(
-                f"Remote command exceeded {timeout_seconds} seconds; "
-                f"stderr={error.decode('utf-8', errors='replace')[-500:]}"
-            )
-        time.sleep(0.2)
+            if channel.exit_status_ready():
+                while channel.recv_ready():
+                    output.extend(channel.recv(65536))
+                while channel.recv_stderr_ready():
+                    error.extend(channel.recv_stderr(65536))
+                return (
+                    channel.recv_exit_status(),
+                    output.decode("utf-8", errors="replace").strip(),
+                    error.decode("utf-8", errors="replace").strip(),
+                )
+
+            if time.monotonic() >= deadline:
+                channel.close()
+                raise RemoteCommandFailure(
+                    f"Remote command exceeded {timeout_seconds} seconds",
+                    stdout=output.decode("utf-8", errors="replace").strip(),
+                    stderr=error.decode("utf-8", errors="replace").strip(),
+                    command_dispatched=dispatched,
+                )
+            time.sleep(0.2)
+    except RemoteCommandFailure:
+        raise
+    except Exception as exc:
+        raise RemoteCommandFailure(
+            f"Remote transport failed: {type(exc).__name__}: {exc}",
+            stdout=output.decode("utf-8", errors="replace").strip(),
+            stderr=error.decode("utf-8", errors="replace").strip(),
+            command_dispatched=dispatched,
+        ) from exc
 
 
-def execute_remote(mode: str) -> dict[str, object]:
+def _last_json_object(output: str) -> dict[str, object] | None:
+    for line in reversed(output.splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def execute_remote(
+    mode: str,
+    operation_id: str | None = None,
+    on_dispatched: Callable[[], None] | None = None,
+) -> dict[str, object]:
     if mode not in {"audit", "apply"}:
         raise ValueError("mode must be audit or apply")
+    if mode == "apply":
+        operation_id = validate_operation_id(operation_id or "")
+    elif operation_id is not None:
+        raise ValueError("operation_id is valid only for apply")
     if not PHP_SCRIPT.is_file():
         raise RuntimeError("Pinned Bitrix price operation script is missing")
 
     try:
         client = connect()
     except Exception as exc:
-        raise RuntimeError(
-            f"Beget SSH connection failed: {type(exc).__name__}: {exc}"
+        raise RemoteOperationFailure(
+            f"Beget SSH connection failed: {type(exc).__name__}: {exc}",
+            mode=mode,
+            operation_id=operation_id,
+            command_dispatched=False,
         ) from exc
     stage = "single-session-preflight-and-operation"
+    captured_output = ""
+    captured_error = ""
 
     try:
         script_bytes = PHP_SCRIPT.read_bytes()
         encoded_script = base64.b64encode(script_bytes).decode("ascii")
         expected_script_sha256 = hashlib.sha256(script_bytes).hexdigest()
         quoted_candidates = " ".join(f"'{item}'" for item in PHP_CANDIDATES)
+        remote_args = f"'{mode}'"
+        if mode == "apply":
+            remote_args += f" '{operation_id}'"
         command = f"""
 set -eu
 script_payload='{encoded_script}'
@@ -270,15 +400,37 @@ fi
 printf '%s' "$decoded_script" | timeout 15s "$php_binary" -l >/dev/null
 printf '__ROSOMAHA_PHP_VERSION__=%s\n' "$php_version"
 printf '%s' "$decoded_script" | timeout 150s "$php_binary" \
-  -d display_errors=stderr -d log_errors=0 -- '{mode}'
+  -d display_errors=stderr -d log_errors=0 -- {remote_args}
 """
-        status, output, error = run_remote_command(
-            client,
-            command,
-            190,
-        )
+        try:
+            status, output, error = run_remote_command(
+                client,
+                command,
+                190,
+                on_dispatched=on_dispatched,
+            )
+        except RemoteCommandFailure as exc:
+            partial_payload = _last_json_object(exc.stdout)
+            raise RemoteOperationFailure(
+                f"Beget stage {stage} failed: {exc}",
+                mode=mode,
+                operation_id=operation_id,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                partial_payload=partial_payload,
+                command_dispatched=exc.command_dispatched,
+            ) from exc
+        captured_output = output
+        captured_error = error
         if not output:
-            raise RuntimeError(f"Bitrix price helper returned no JSON: {error[-500:]}")
+            raise RemoteOperationFailure(
+                "Bitrix price helper returned no JSON",
+                mode=mode,
+                operation_id=operation_id,
+                stdout=output,
+                stderr=error,
+                command_dispatched=True,
+            )
         output_lines = output.splitlines()
         version_marker = "__ROSOMAHA_PHP_VERSION__="
         php_version = next(
@@ -293,24 +445,51 @@ printf '%s' "$decoded_script" | timeout 150s "$php_binary" \
             payload = json.loads(output_lines[-1])
         except json.JSONDecodeError as exc:
             detail = (error or output)[-500:]
-            raise RuntimeError(
-                f"Bitrix price helper returned malformed JSON: {detail}"
+            raise RemoteOperationFailure(
+                f"Bitrix price helper returned malformed JSON: {detail}",
+                mode=mode,
+                operation_id=operation_id,
+                stdout=output,
+                stderr=error,
+                partial_payload=_last_json_object(output),
+                command_dispatched=True,
             ) from exc
         if not isinstance(payload, dict):
-            raise RuntimeError("Bitrix price helper returned a non-object JSON payload")
-        if status != 0 or payload.get("status") != "ok":
-            message = str(payload.get("error") or error or "unknown Bitrix error")
-            raise RuntimeError(message[:1000])
+            raise RemoteOperationFailure(
+                "Bitrix price helper returned a non-object JSON payload",
+                mode=mode,
+                operation_id=operation_id,
+                stdout=output,
+                stderr=error,
+                command_dispatched=True,
+            )
         if not php_version.startswith(EXPECTED_PHP_SERIES + "."):
-            raise RuntimeError("Remote PHP version marker was missing or unexpected")
+            raise RemoteOperationFailure(
+                "Remote PHP version marker was missing or unexpected",
+                mode=mode,
+                operation_id=operation_id,
+                stdout=output,
+                stderr=error,
+                partial_payload=payload,
+                command_dispatched=True,
+            )
         payload["runtime"] = {
             "php_version": php_version,
             "php_series_matches_live": php_version.startswith(EXPECTED_PHP_SERIES + "."),
         }
+        payload["remote_exit_status"] = status
         return payload
+    except RemoteOperationFailure:
+        raise
     except Exception as exc:
-        raise RuntimeError(
-            f"Beget stage {stage} failed: {type(exc).__name__}: {exc}"
+        raise RemoteOperationFailure(
+            f"Beget stage {stage} failed: {type(exc).__name__}: {exc}",
+            mode=mode,
+            operation_id=operation_id,
+            stdout=captured_output,
+            stderr=captured_error,
+            partial_payload=_last_json_object(captured_output),
+            command_dispatched=bool(captured_output or captured_error),
         ) from exc
     finally:
         client.close()
@@ -521,6 +700,11 @@ def verify_catalog(expected_prices: dict[str, tuple[int, int]]) -> dict[str, obj
 
 
 def expected_prices_from_remote(remote: dict[str, object]) -> dict[int, int]:
+    classification = remote.get("classification")
+    if classification not in {"all_old", "all_new"}:
+        raise RuntimeError(
+            "Public price verification requires an all_old or all_new database state"
+        )
     rows = remote.get("database_readback")
     if not isinstance(rows, list):
         raise RuntimeError("Remote database readback is missing")
@@ -550,70 +734,568 @@ def verify_public(remote: dict[str, object]) -> dict[str, object]:
     }
 
 
-def write_receipt(
-    mode: str,
-    remote: dict[str, object],
-    public: dict[str, object],
-) -> Path:
-    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    path = REPORT_ROOT / f"ROSOMAHA_BITRIX_PRODUCT_PRICES_{stamp}_{mode.upper()}.json"
-    receipt = {
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "domain": "rosomaha-rus.ru",
-        "mode": mode,
-        "expected_account": EXPECTED_LOGIN,
-        "target": "iblock:86+64/PRICE+FILTER_PRICE",
-        "remote": remote,
-        "public_verification": public,
-        "secrets_exported": False,
+def unavailable_public(reason: str) -> dict[str, object]:
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "details": [],
+        "catalog": None,
+        "ok": False,
     }
-    path.write_text(
-        json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+
+
+def _utc_iso(epoch: float | None = None) -> str:
+    value = datetime.now(timezone.utc) if epoch is None else datetime.fromtimestamp(
+        epoch, timezone.utc
+    )
+    return value.isoformat()
+
+
+def _safe_error(error: BaseException) -> str:
+    message = str(error) or type(error).__name__
+    message = message.replace(EXPECTED_LOGIN, "[pinned-account]")
+    return message[:1000]
+
+
+def backup_marker_evidence(stderr: str, operation_id: str) -> dict[str, object]:
+    marker = re.search(
+        rf"(?:^|\n)STAGE:backup-written:{re.escape(operation_id)}:([a-f0-9]{{64}})(?:\n|$)",
+        stderr,
+    )
+    return {
+        "backup_marker_observed": marker is not None,
+        "backup_sha256_observed": marker.group(1) if marker else None,
+        "expected_backup_path": expected_backup_path(operation_id),
+    }
+
+
+def sanitize_remote(remote: dict[str, object] | None) -> dict[str, object] | None:
+    """Keep receipts useful while excluding Bitrix names, users and raw transport."""
+    if remote is None:
+        return None
+    allowed = {
+        "status",
+        "mode",
+        "operation_id",
+        "classification",
+        "idempotent_noop",
+        "database_mutations",
+        "database_mutations_before_rollback",
+        "property_values_changed",
+        "planned_element_mutations",
+        "updated_ids",
+        "backup_path",
+        "backup_sha256",
+        "backup_permissions",
+        "backup_reused",
+        "remote_exit_status",
+    }
+    safe = {key: remote[key] for key in allowed if key in remote}
+    rows = remote.get("database_readback")
+    if isinstance(rows, list):
+        safe["database_readback"] = [
+            {
+                key: row.get(key)
+                for key in (
+                    "product_id",
+                    "offer_id",
+                    "slug",
+                    "old_price",
+                    "new_price",
+                    "state",
+                    "effective_price",
+                    "snapshot_sha256",
+                )
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ]
+    runtime = remote.get("runtime")
+    if isinstance(runtime, dict):
+        safe["runtime"] = {
+            key: runtime.get(key)
+            for key in ("php_version", "php_series_matches_live")
+            if key in runtime
+        }
+    rollback = remote.get("rollback")
+    if isinstance(rollback, dict):
+        safe["rollback"] = {
+            "status": rollback.get("status"),
+            "result_count": len(rollback.get("results", []))
+            if isinstance(rollback.get("results"), list)
+            else 0,
+            "error_count": len(rollback.get("errors", []))
+            if isinstance(rollback.get("errors"), list)
+            else 0,
+        }
+    if "error" in remote:
+        safe["error"] = str(remote["error"])[:1000]
+    return safe
+
+
+def _atomic_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    os.replace(temporary, path)
+
+
+def pending_receipt_path(operation_id: str) -> Path:
+    validate_operation_id(operation_id)
+    return REPORT_ROOT / f"ROSOMAHA_BITRIX_PRODUCT_PRICES_{operation_id}_PENDING.json"
+
+
+def read_pending(operation_id: str) -> dict[str, object] | None:
+    path = pending_receipt_path(operation_id)
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("operation_id") != operation_id:
+        raise RuntimeError("Pending receipt does not match the requested operation")
+    return payload
+
+
+def update_pending(
+    operation_id: str,
+    state: str,
+    **fields: object,
+) -> Path:
+    path = pending_receipt_path(operation_id)
+    current = read_pending(operation_id) or {
+        "created_at_utc": _utc_iso(),
+        "domain": "rosomaha-rus.ru",
+        "operation_id": operation_id,
+        "target": "iblock:86+64/PRICE+FILTER_PRICE",
+        "expected_backup_path": expected_backup_path(operation_id),
+        "secrets_exported": False,
+        "pii_exported": False,
+    }
+    current.update(fields)
+    current["state"] = state
+    current["updated_at_utc"] = _utc_iso()
+    _atomic_json(path, current)
     return path
+
+
+def write_receipt(
+    mode: str,
+    outcome: str,
+    remote: dict[str, object] | None,
+    public: dict[str, object] | None,
+    operation_id: str | None = None,
+    error: str | None = None,
+) -> Path:
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    suffix = mode.upper()
+    path = REPORT_ROOT / f"ROSOMAHA_BITRIX_PRODUCT_PRICES_{stamp}_{suffix}.json"
+    receipt: dict[str, object] = {
+        "generated_at_utc": _utc_iso(),
+        "domain": "rosomaha-rus.ru",
+        "mode": mode,
+        "outcome": outcome,
+        "operation_id": operation_id,
+        "account_scope_pinned": True,
+        "target": "iblock:86+64/PRICE+FILTER_PRICE",
+        "remote": sanitize_remote(remote),
+        "public_verification": public,
+        "secrets_exported": False,
+        "pii_exported": False,
+    }
+    if error:
+        receipt["error"] = error[:1000]
+    _atomic_json(path, receipt)
+    return path
+
+
+def verify_public_safely(remote: dict[str, object]) -> dict[str, object]:
+    try:
+        return verify_public(remote)
+    except Exception as exc:
+        return unavailable_public(_safe_error(exc))
+
+
+def recovery_outcome(
+    remote: dict[str, object],
+    public: dict[str, object] | None,
+) -> str:
+    classification = remote.get("classification")
+    if classification == "transition_mixed":
+        return "needs_rollback"
+    if classification == "drift":
+        return "blocked"
+    if classification == "all_old":
+        return "recovered_noop" if public and public.get("ok") is True else "indeterminate"
+    if classification == "all_new":
+        return "recovered_success" if public and public.get("ok") is True else "indeterminate"
+    return "indeterminate"
+
+
+def recover_operation(
+    operation_id: str,
+    *,
+    time_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    execute_fn: Callable[..., dict[str, object]] = execute_remote,
+    verify_fn: Callable[[dict[str, object]], dict[str, object]] = verify_public_safely,
+) -> tuple[dict[str, object], int]:
+    operation_id = validate_operation_id(operation_id)
+    if operation_id != deterministic_operation_id():
+        raise RuntimeError("Recovery operation id does not match this pinned rollout")
+    pending = read_pending(operation_id)
+    if pending is None:
+        raise RuntimeError("Pending receipt for this operation was not found")
+
+    not_before = float(pending.get("recovery_not_before_epoch") or 0)
+    now = time_fn()
+    if now < not_before:
+        result = {
+            "status": "settling",
+            "operation_id": operation_id,
+            "retry_after_seconds": max(1, int(not_before - now + 0.999)),
+            "pending_receipt": str(pending_receipt_path(operation_id)),
+            "no_apply_retry": True,
+        }
+        update_pending(operation_id, "settling")
+        return result, 1
+
+    last_error = ""
+    last_remote: dict[str, object] | None = None
+    last_public: dict[str, object] | None = None
+    for attempt in range(1, RECOVERY_ATTEMPTS + 1):
+        try:
+            remote = execute_fn("audit")
+            last_remote = remote
+            if remote.get("status") != "ok":
+                last_error = str(remote.get("error") or "Read-only audit did not succeed")
+            else:
+                classification = remote.get("classification")
+                public = (
+                    verify_fn(remote)
+                    if classification in {"all_old", "all_new"}
+                    else unavailable_public(
+                        "Public expected price is unsafe to infer from a mixed or drift database state"
+                    )
+                )
+                last_public = public
+                outcome = recovery_outcome(remote, public)
+                if outcome in {
+                    "recovered_success",
+                    "recovered_noop",
+                    "needs_rollback",
+                    "blocked",
+                }:
+                    receipt = write_receipt(
+                        "recovery",
+                        outcome,
+                        remote,
+                        public,
+                        operation_id,
+                    )
+                    update_pending(
+                        operation_id,
+                        outcome,
+                        recovery_attempts=attempt,
+                        final_receipt=str(receipt),
+                        remote=sanitize_remote(remote),
+                        public_verification=public,
+                        no_apply_retry=True,
+                    )
+                    result = {
+                        "status": outcome,
+                        "operation_id": operation_id,
+                        "classification": classification,
+                        "database_mutations": 0,
+                        "public_verification": public,
+                        "receipt": str(receipt),
+                        "pending_receipt": str(pending_receipt_path(operation_id)),
+                        "no_apply_retry": True,
+                        "automatic_rollback": False,
+                    }
+                    return result, 0 if outcome == "recovered_success" else 1
+                last_error = "Database and public evidence did not agree"
+        except Exception as exc:
+            last_error = _safe_error(exc)
+
+        if attempt < RECOVERY_ATTEMPTS:
+            sleep_fn(RECOVERY_RETRY_DELAY_SECONDS)
+
+    receipt = write_receipt(
+        "recovery",
+        "indeterminate",
+        last_remote,
+        last_public,
+        operation_id,
+        last_error,
+    )
+    update_pending(
+        operation_id,
+        "indeterminate",
+        recovery_attempts=RECOVERY_ATTEMPTS,
+        final_receipt=str(receipt),
+        remote=sanitize_remote(last_remote),
+        public_verification=last_public,
+        error=last_error,
+        no_apply_retry=True,
+    )
+    return {
+        "status": "indeterminate",
+        "operation_id": operation_id,
+        "error": last_error,
+        "receipt": str(receipt),
+        "pending_receipt": str(pending_receipt_path(operation_id)),
+        "no_apply_retry": True,
+        "automatic_rollback": False,
+    }, 1
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Audit or apply the nine pinned Rosomaha Bitrix price changes."
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--apply",
         action="store_true",
         help="Perform the guarded update. Without this flag the command is read-only.",
     )
+    modes.add_argument(
+        "--recover",
+        metavar="OPERATION_ID",
+        help="Recover an ambiguous apply using fresh read-only audits only.",
+    )
     return parser.parse_args()
+
+
+def run_audit() -> tuple[dict[str, object], int]:
+    remote = execute_remote("audit")
+    classification = remote.get("classification")
+    public = (
+        verify_public_safely(remote)
+        if remote.get("status") == "ok" and classification in {"all_old", "all_new"}
+        else unavailable_public(
+            "Public expected price is unsafe to infer from a mixed, drift, or failed database audit"
+        )
+    )
+    outcome = (
+        "ok"
+        if remote.get("status") == "ok" and public.get("ok") is True
+        else "blocked"
+        if classification in {"transition_mixed", "drift"}
+        else "verification_failed"
+    )
+    receipt = write_receipt("audit", outcome, remote, public)
+    result = {
+        "status": outcome,
+        "mode": "audit",
+        "classification": classification,
+        "database_mutations": 0,
+        "public_verification": public,
+        "receipt": str(receipt),
+        "secrets_exported": False,
+        "pii_exported": False,
+    }
+    return result, 0 if outcome == "ok" else 1
+
+
+def run_apply(
+    *,
+    time_fn: Callable[[], float] = time.time,
+    execute_fn: Callable[..., dict[str, object]] = execute_remote,
+    verify_fn: Callable[[dict[str, object]], dict[str, object]] = verify_public_safely,
+) -> tuple[dict[str, object], int]:
+    operation_id = deterministic_operation_id()
+    existing = read_pending(operation_id)
+    unresolved = {
+        "prepared",
+        "remote_dispatched",
+        "ambiguous_apply",
+        "settling",
+        "indeterminate",
+        "needs_rollback",
+    }
+    if existing and existing.get("state") in unresolved:
+        result = {
+            "status": "blocked_pending_recovery",
+            "operation_id": operation_id,
+            "pending_state": existing.get("state"),
+            "pending_receipt": str(pending_receipt_path(operation_id)),
+            "recovery_command": (
+                f"python scripts/bitrix-product-prices.py --recover {operation_id}"
+            ),
+            "no_apply_retry": True,
+        }
+        return result, 1
+
+    prepared_at = time_fn()
+    update_pending(
+        operation_id,
+        "prepared",
+        prepared_at_utc=_utc_iso(prepared_at),
+        prepared_at_epoch=prepared_at,
+        remote_command_dispatched=False,
+        no_apply_retry=True,
+    )
+    dispatched_at: float | None = None
+
+    def mark_dispatched() -> None:
+        nonlocal dispatched_at
+        dispatched_at = time_fn()
+        update_pending(
+            operation_id,
+            "remote_dispatched",
+            remote_command_dispatched=True,
+            remote_dispatched_at_utc=_utc_iso(dispatched_at),
+            remote_dispatched_at_epoch=dispatched_at,
+            recovery_not_before_utc=_utc_iso(
+                dispatched_at + RECOVERY_SETTLE_SECONDS
+            ),
+            recovery_not_before_epoch=dispatched_at + RECOVERY_SETTLE_SECONDS,
+            no_apply_retry=True,
+        )
+
+    try:
+        remote = execute_fn(
+            "apply",
+            operation_id=operation_id,
+            on_dispatched=mark_dispatched,
+        )
+    except RemoteOperationFailure as exc:
+        if not exc.ambiguous_apply:
+            receipt = write_receipt(
+                "apply",
+                "not_started",
+                exc.partial_payload,
+                None,
+                operation_id,
+                _safe_error(exc),
+            )
+            update_pending(
+                operation_id,
+                "not_started",
+                remote_command_dispatched=False,
+                final_receipt=str(receipt),
+                error=_safe_error(exc),
+                no_apply_retry=True,
+            )
+            return {
+                "status": "not_started",
+                "operation_id": operation_id,
+                "error": _safe_error(exc),
+                "receipt": str(receipt),
+                "pending_receipt": str(pending_receipt_path(operation_id)),
+                "database_mutations": 0,
+                "no_apply_retry": True,
+            }, 1
+
+        effective_dispatched_at = dispatched_at or prepared_at
+        not_before = effective_dispatched_at + RECOVERY_SETTLE_SECONDS
+        marker_evidence = backup_marker_evidence(exc.stderr, operation_id)
+        update_pending(
+            operation_id,
+            "ambiguous_apply",
+            remote_command_dispatched=True,
+            remote_dispatched_at_utc=_utc_iso(effective_dispatched_at),
+            remote_dispatched_at_epoch=effective_dispatched_at,
+            recovery_not_before_utc=_utc_iso(not_before),
+            recovery_not_before_epoch=not_before,
+            partial_remote=sanitize_remote(exc.partial_payload),
+            **marker_evidence,
+            error=_safe_error(exc),
+            no_apply_retry=True,
+        )
+        if time_fn() >= not_before:
+            return recover_operation(
+                operation_id,
+                time_fn=time_fn,
+                execute_fn=execute_fn,
+                verify_fn=verify_fn,
+            )
+        return {
+            "status": "ambiguous_apply",
+            "operation_id": operation_id,
+            "error": _safe_error(exc),
+            "pending_receipt": str(pending_receipt_path(operation_id)),
+            "recovery_not_before_utc": _utc_iso(not_before),
+            "recovery_command": (
+                f"python scripts/bitrix-product-prices.py --recover {operation_id}"
+            ),
+            **marker_evidence,
+            "no_apply_retry": True,
+            "automatic_rollback": False,
+        }, 1
+
+    classification = remote.get("classification")
+    if remote.get("status") == "ok" and classification in {"all_old", "all_new"}:
+        public = verify_fn(remote)
+    else:
+        public = unavailable_public(
+            "Public expected price is unsafe to infer from a mixed, drift, or failed apply"
+        )
+
+    if remote.get("status") == "ok" and classification == "all_new" and public.get("ok") is True:
+        outcome = "success"
+    elif classification == "transition_mixed":
+        outcome = "needs_rollback"
+    elif classification == "drift":
+        outcome = "blocked"
+    elif remote.get("status") == "ok" and classification == "all_old":
+        outcome = "noop_old"
+    else:
+        outcome = "verification_failed"
+
+    receipt = write_receipt("apply", outcome, remote, public, operation_id)
+    update_pending(
+        operation_id,
+        "completed" if outcome == "success" else outcome,
+        final_receipt=str(receipt),
+        remote=sanitize_remote(remote),
+        public_verification=public,
+        no_apply_retry=True,
+    )
+    result = {
+        "status": outcome,
+        "mode": "apply",
+        "operation_id": operation_id,
+        "classification": classification,
+        "database_mutations": remote.get("database_mutations", 0),
+        "updated_ids": remote.get("updated_ids", []),
+        "backup_path": remote.get("backup_path"),
+        "public_verification": public,
+        "receipt": str(receipt),
+        "pending_receipt": str(pending_receipt_path(operation_id)),
+        "no_apply_retry": True,
+        "automatic_rollback": False,
+        "secrets_exported": False,
+        "pii_exported": False,
+    }
+    return result, 0 if outcome == "success" else 1
 
 
 def main() -> int:
     args = parse_args()
-    mode = "apply" if args.apply else "audit"
     try:
-        remote = execute_remote(mode)
-        public = verify_public(remote)
-        receipt = write_receipt(mode, remote, public)
-        result = {
-            "status": "ok" if public["ok"] else "verification_failed",
-            "mode": mode,
-            "database_mutations": remote.get("database_mutations", 0),
-            "updated_ids": remote.get("updated_ids", []),
-            "backup_path": remote.get("backup_path"),
-            "public_verification": public,
-            "receipt": str(receipt),
-            "secrets_exported": False,
-        }
+        if args.recover:
+            result, exit_code = recover_operation(args.recover)
+        elif args.apply:
+            result, exit_code = run_apply()
+        else:
+            result, exit_code = run_audit()
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result["status"] == "ok" else 1
+        return exit_code
     except Exception as exc:
+        mode = "recovery" if args.recover else "apply" if args.apply else "audit"
         print(
             json.dumps(
                 {
                     "status": "error",
                     "mode": mode,
-                    "error": str(exc) or type(exc).__name__,
+                    "error": _safe_error(exc),
                     "secrets_exported": False,
+                    "pii_exported": False,
                 },
                 ensure_ascii=False,
                 indent=2,

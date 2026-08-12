@@ -365,10 +365,13 @@ function rosomahaPricesReadPriceElement(
         $iblockId,
         $filterPricePropertyId
     );
-    $filterPrice = rosomahaPricesExactInteger(
-        $filterPriceRaw,
-        "FILTER_PRICE {$filterPricePropertyId} for element {$elementId}"
-    );
+    $filterPrice = null;
+    if (preg_match('/^[1-9][0-9]*$/D', $filterPriceRaw)) {
+        $candidate = (int) $filterPriceRaw;
+        if ((string) $candidate === $filterPriceRaw) {
+            $filterPrice = $candidate;
+        }
+    }
 
     $element['price'] = $price;
     $element['filter_price'] = $filterPrice;
@@ -454,28 +457,40 @@ function rosomahaPricesClassifyPair(array $change, array $product, array $offer)
         && rosomahaPricesElementMatches($offer, $newPrice);
 
     if ($isOld) {
-        return 'old';
+        return 'all_old';
     }
     if ($isNew) {
-        return 'new';
+        return 'all_new';
     }
 
-    $observed = json_encode(
-        [
-            'product' => [
-                'price' => $product['price'],
-                'filter_price_raw' => $product['filter_price_raw'],
-            ],
-            'offer' => [
-                'price' => $offer['price'],
-                'filter_price_raw' => $offer['filter_price_raw'],
-            ],
-        ],
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-    );
-    throw new RuntimeException(
-        "Price drift or mixed state for product {$change['product_id']}: {$observed}"
-    );
+    if (
+        rosomahaPricesElementWithinTransition($product, $oldPrice, $newPrice)
+        && rosomahaPricesElementWithinTransition($offer, $oldPrice, $newPrice)
+    ) {
+        return 'transition_mixed';
+    }
+
+    return 'drift';
+}
+
+function rosomahaPricesClassifyAllPairs(array $pairs): string
+{
+    $states = array_values(array_unique(array_map(
+        static fn(array $pair): string => (string) ($pair['state'] ?? ''),
+        $pairs
+    )));
+
+    if ($states === ['all_old']) {
+        return 'all_old';
+    }
+    if ($states === ['all_new']) {
+        return 'all_new';
+    }
+    if (in_array('drift', $states, true)) {
+        return 'drift';
+    }
+
+    return 'transition_mixed';
 }
 
 function rosomahaPricesPairFingerprint(array $pair): string
@@ -542,9 +557,9 @@ function rosomahaPricesReadPair(array $change): array
         'old_price' => (int) $change['old_price'],
         'new_price' => (int) $change['new_price'],
         'state' => $state,
-        'effective_price' => $state === 'new'
+        'effective_price' => $state === 'all_new'
             ? (int) $change['new_price']
-            : (int) $change['old_price'],
+            : ($state === 'all_old' ? (int) $change['old_price'] : null),
         'product' => $product,
         'offer' => $offer,
         'link' => $link,
@@ -583,12 +598,65 @@ function rosomahaPricesEnsureBackupRoot(): string
     return $resolved;
 }
 
-function rosomahaPricesWriteBackup(array $pairs): array
+function rosomahaPricesValidateOperationId(string $operationId): string
+{
+    if (!preg_match('/^bitrix-prices-[a-f0-9]{24}$/D', $operationId)) {
+        throw new RuntimeException('Invalid or missing pinned operation id');
+    }
+
+    return $operationId;
+}
+
+function rosomahaPricesExpectedBackupPath(string $operationId): string
+{
+    return ROSOMAHA_PRICE_BACKUP_ROOT . '/' . $operationId . '-prices.json';
+}
+
+function rosomahaPricesBackupMatches(
+    array $payload,
+    string $operationId,
+    array $pairs
+): bool {
+    if (
+        ($payload['operation_id'] ?? null) !== $operationId
+        || ($payload['site_root'] ?? null) !== ROSOMAHA_PRICE_SITE_ROOT
+        || ($payload['product_iblock_id'] ?? null) !== ROSOMAHA_PRODUCT_IBLOCK_ID
+        || ($payload['offer_iblock_id'] ?? null) !== ROSOMAHA_OFFER_IBLOCK_ID
+        || ($payload['property_schema'] ?? null) !== ROSOMAHA_PRICE_PROPERTIES
+        || !is_array($payload['pairs'] ?? null)
+        || count($payload['pairs']) !== count($pairs)
+    ) {
+        return false;
+    }
+
+    foreach ($pairs as $index => $pair) {
+        $saved = $payload['pairs'][$index] ?? null;
+        if (
+            !is_array($saved)
+            || ($saved['product_id'] ?? null) !== $pair['product_id']
+            || ($saved['offer_id'] ?? null) !== $pair['offer_id']
+            || ($saved['slug'] ?? null) !== $pair['slug']
+            || ($saved['state'] ?? null) !== 'all_old'
+            || !isset($saved['snapshot_sha256'])
+            || !hash_equals(
+                (string) $saved['snapshot_sha256'],
+                (string) $pair['snapshot_sha256']
+            )
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function rosomahaPricesWriteBackup(string $operationId, array $pairs): array
 {
     $backupRoot = rosomahaPricesEnsureBackupRoot();
-    $nonce = bin2hex(random_bytes(6));
-    $backupPath = $backupRoot . '/' . gmdate('Ymd\THis\Z') . "-{$nonce}-prices.json";
+    $operationId = rosomahaPricesValidateOperationId($operationId);
+    $backupPath = $backupRoot . '/' . $operationId . '-prices.json';
     $payload = [
+        'operation_id' => $operationId,
         'created_at_utc' => gmdate(DATE_ATOM),
         'site_root' => ROSOMAHA_PRICE_SITE_ROOT,
         'product_iblock_id' => ROSOMAHA_PRODUCT_IBLOCK_ID,
@@ -604,14 +672,50 @@ function rosomahaPricesWriteBackup(array $pairs): array
             | JSON_THROW_ON_ERROR
     ) . "\n";
 
-    $previousUmask = umask(0077);
-    try {
-        $written = file_put_contents($backupPath, $json, LOCK_EX);
-    } finally {
-        umask($previousUmask);
+    $reused = false;
+    if (file_exists($backupPath)) {
+        if (!is_file($backupPath) || is_link($backupPath)) {
+            throw new RuntimeException('Pinned rollback backup path is not a regular file');
+        }
+        $existingJson = file_get_contents($backupPath);
+        if ($existingJson === false) {
+            throw new RuntimeException('Could not read the existing rollback backup');
+        }
+        try {
+            $existing = json_decode($existingJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $error) {
+            throw new RuntimeException('Existing rollback backup is malformed');
+        }
+        if (!is_array($existing) || !rosomahaPricesBackupMatches($existing, $operationId, $pairs)) {
+            throw new RuntimeException('Existing rollback backup does not match the current all-old snapshot');
+        }
+        $reused = true;
+    } else {
+        $previousUmask = umask(0077);
+        try {
+            $handle = fopen($backupPath, 'xb');
+            if ($handle === false) {
+                throw new RuntimeException('Could not exclusively create the rollback backup');
+            }
+            try {
+                if (!flock($handle, LOCK_EX)) {
+                    throw new RuntimeException('Could not lock the rollback backup');
+                }
+                $written = fwrite($handle, $json);
+                if ($written !== strlen($json) || !fflush($handle)) {
+                    throw new RuntimeException('Could not write the complete price rollback backup');
+                }
+            } finally {
+                fclose($handle);
+            }
+        } finally {
+            umask($previousUmask);
+        }
     }
-    if ($written !== strlen($json)) {
-        throw new RuntimeException('Could not write the complete price rollback backup');
+    clearstatcache(true, $backupPath);
+    $backupStat = lstat($backupPath);
+    if (!is_array($backupStat) || (int) ($backupStat['nlink'] ?? 0) !== 1) {
+        throw new RuntimeException('Rollback backup must be a single-link regular file');
     }
     if (!chmod($backupPath, 0600)) {
         throw new RuntimeException('Could not restrict price rollback backup permissions');
@@ -622,10 +726,17 @@ function rosomahaPricesWriteBackup(array $pairs): array
         throw new RuntimeException('Price rollback backup permissions are not 0600');
     }
 
+    $backupSha256 = hash_file('sha256', $backupPath);
+    if (!is_string($backupSha256) || !preg_match('/^[a-f0-9]{64}$/D', $backupSha256)) {
+        throw new RuntimeException('Could not calculate the rollback backup SHA-256');
+    }
+
     return [
+        'operation_id' => $operationId,
         'path' => $backupPath,
-        'sha256' => hash_file('sha256', $backupPath),
+        'sha256' => $backupSha256,
         'permissions' => '0600',
+        'reused' => $reused,
     ];
 }
 
@@ -740,6 +851,7 @@ $mode = $argv[1] ?? 'audit';
 if (!in_array($mode, ['audit', 'apply'], true)) {
     rosomahaPricesResult(['status' => 'error', 'error' => 'Expected audit or apply'], 2);
 }
+$operationId = $mode === 'apply' ? (string) ($argv[2] ?? '') : null;
 
 ini_set('display_errors', '0');
 set_time_limit(120);
@@ -757,6 +869,9 @@ define('BX_NO_ACCELERATOR_RESET', true);
 define('DisableEventsCheck', true);
 
 try {
+    if ($mode === 'apply') {
+        $operationId = rosomahaPricesValidateOperationId((string) $operationId);
+    }
     rosomahaPricesValidateAllowlist();
     rosomahaPricesStage('bootstrap-start');
     $prolog = ROSOMAHA_PRICE_SITE_ROOT . '/bitrix/modules/main/include/prolog_before.php';
@@ -777,12 +892,17 @@ try {
     $schema = rosomahaPricesValidateSchema();
     rosomahaPricesStage('schema-validated');
     $before = rosomahaPricesReadAllPairs();
+    $classification = rosomahaPricesClassifyAllPairs($before);
 
     if ($mode === 'audit') {
-        $oldPairs = count(array_filter($before, static fn(array $pair): bool => $pair['state'] === 'old'));
+        $oldPairs = count(array_filter(
+            $before,
+            static fn(array $pair): bool => $pair['state'] === 'all_old'
+        ));
         rosomahaPricesResult([
             'status' => 'ok',
             'mode' => 'audit',
+            'classification' => $classification,
             'database_mutations' => 0,
             'planned_element_mutations' => $oldPairs * 2,
             'schema' => $schema,
@@ -790,8 +910,41 @@ try {
         ]);
     }
 
-    $backup = rosomahaPricesWriteBackup($before);
-    rosomahaPricesStage('backup-written');
+    if ($classification === 'all_new') {
+        rosomahaPricesResult([
+            'status' => 'ok',
+            'mode' => 'apply',
+            'operation_id' => $operationId,
+            'classification' => 'all_new',
+            'idempotent_noop' => true,
+            'database_mutations' => 0,
+            'property_values_changed' => 0,
+            'updated_ids' => [],
+            'backup_path' => null,
+            'backup_sha256' => null,
+            'schema' => $schema,
+            'before' => $before,
+            'database_readback' => $before,
+        ]);
+    }
+
+    if ($classification !== 'all_old') {
+        rosomahaPricesResult([
+            'status' => 'blocked',
+            'mode' => 'apply',
+            'operation_id' => $operationId,
+            'classification' => $classification,
+            'database_mutations' => 0,
+            'error' => 'Apply requires every pinned pair to be all_old; no mutations were made',
+            'schema' => $schema,
+            'database_readback' => $before,
+        ], 3);
+    }
+
+    $backup = rosomahaPricesWriteBackup((string) $operationId, $before);
+    rosomahaPricesStage(
+        'backup-written:' . (string) $operationId . ':' . (string) $backup['sha256']
+    );
     $attempted = [];
     $updatedIds = [];
 
@@ -805,9 +958,10 @@ try {
                 );
             }
 
-            if ($freshPair['state'] === 'new') {
-                rosomahaPricesStage('already-new-' . (int) $change['product_id']);
-                continue;
+            if ($freshPair['state'] !== 'all_old') {
+                throw new RuntimeException(
+                    "Concurrent transition detected for product {$change['product_id']}"
+                );
             }
 
             $productPrice = rosomahaPricesProperty('product_price');
@@ -895,7 +1049,7 @@ try {
             ];
 
             $pairAfter = rosomahaPricesReadPair($change);
-            if ($pairAfter['state'] !== 'new') {
+            if ($pairAfter['state'] !== 'all_new') {
                 throw new RuntimeException(
                     "Pair readback failed for product {$change['product_id']}"
                 );
@@ -907,7 +1061,7 @@ try {
         rosomahaPricesStage('caches-cleared');
         $after = rosomahaPricesReadAllPairs();
         foreach ($after as $pair) {
-            if ($pair['state'] !== 'new') {
+            if ($pair['state'] !== 'all_new') {
                 throw new RuntimeException(
                     "Final database readback is not new for product {$pair['product_id']}"
                 );
@@ -915,12 +1069,25 @@ try {
         }
     } catch (Throwable $updateError) {
         $rollback = rosomahaPricesRollback($attempted);
+        $rollbackReadback = [];
+        $rollbackClassification = 'indeterminate';
+        $rollbackReadbackError = null;
+        try {
+            $rollbackReadback = rosomahaPricesReadAllPairs();
+            $rollbackClassification = rosomahaPricesClassifyAllPairs($rollbackReadback);
+        } catch (Throwable $readbackError) {
+            $rollbackReadbackError = $readbackError->getMessage();
+        }
         rosomahaPricesResult([
             'status' => 'error',
             'mode' => 'apply',
+            'operation_id' => $operationId,
+            'classification' => $rollbackClassification,
             'error' => $updateError->getMessage(),
             'database_mutations_before_rollback' => count($updatedIds),
             'rollback' => $rollback,
+            'rollback_readback_error' => $rollbackReadbackError,
+            'database_readback' => $rollbackReadback,
             'backup_path' => $backup['path'],
             'backup_sha256' => $backup['sha256'],
         ], 1);
@@ -929,12 +1096,15 @@ try {
     rosomahaPricesResult([
         'status' => 'ok',
         'mode' => 'apply',
+        'operation_id' => $operationId,
+        'classification' => 'all_new',
         'database_mutations' => count($updatedIds),
         'property_values_changed' => count($updatedIds) * 2,
         'updated_ids' => $updatedIds,
         'backup_path' => $backup['path'],
         'backup_sha256' => $backup['sha256'],
         'backup_permissions' => $backup['permissions'],
+        'backup_reused' => $backup['reused'],
         'schema' => $schema,
         'before' => $before,
         'database_readback' => $after,
@@ -947,6 +1117,11 @@ try {
     rosomahaPricesResult([
         'status' => 'error',
         'mode' => $mode,
+        'operation_id' => $operationId,
+        'expected_backup_path' => $mode === 'apply' && is_string($operationId)
+            && preg_match('/^bitrix-prices-[a-f0-9]{24}$/D', $operationId)
+            ? rosomahaPricesExpectedBackupPath($operationId)
+            : null,
         'error' => $error->getMessage(),
     ], 1);
 }
