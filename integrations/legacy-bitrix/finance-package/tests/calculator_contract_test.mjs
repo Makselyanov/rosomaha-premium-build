@@ -134,6 +134,22 @@ while ((match = entryPattern.exec(block[1])) !== null) {
 }
 same(config.products, sourceEntries, 'The packaged product values must exactly match classicVariants; regenerate before install if this fails.');
 
+const productsBlock = sourceProducts.match(/export const products: Product\[\] = \[([\s\S]*?)\n\];/);
+truth(Boolean(productsBlock), 'The canonical products source block must be readable.');
+const activeProductPrices = new Map();
+const productEntryPattern = /^  \{\r?\n    id: '([^']+)',\r?\n    slug: '[^']+',[\s\S]*?^    basePrice: ([0-9]+),/gm;
+while ((match = productEntryPattern.exec(productsBlock[1])) !== null) {
+  activeProductPrices.set(match[1], Number(match[2]));
+}
+for (const variant of sourceEntries) {
+  truth(activeProductPrices.has(variant.id), `The active product list must contain variant ${variant.id}.`);
+  same(
+    activeProductPrices.get(variant.id),
+    variant.price_rub,
+    `The active product and variant prices must match for ${variant.id}.`,
+  );
+}
+
 const browserSource = await readFile(browserPath, 'utf8');
 const coreSource = await readFile(corePath, 'utf8');
 const publicPageSource = await readFile(path.join(packageRoot, 'payload/webroot/finansirovanie/index.php'), 'utf8');

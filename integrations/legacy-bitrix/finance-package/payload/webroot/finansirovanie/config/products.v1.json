@@ -1,6 +1,6 @@
 {
   "contract": "rosomaha-finance-products/v1",
-  "catalog_version": "classic-variants-2026-08-10-v1",
+  "catalog_version": "classic-variants-2026-08-12-v2",
   "source_file": "src/data/products.ts#classicVariants",
   "currency": "RUB",
   "price_semantics": "catalog_base_price",
@@ -21,55 +21,55 @@
       "id": "standart-plus-suzuki",
       "name": "Стандарт ПЛЮС (Suzuki)",
       "slug": "standart-plus-1-5-litra",
-      "price_rub": 1300000
+      "price_rub": 1350000
     },
     {
       "id": "standart-plus-uaz",
       "name": "Стандарт ПЛЮС (УАЗ)",
       "slug": "rosomakha-standart-plyus-uaz-timken",
-      "price_rub": 1400000
+      "price_rub": 1450000
     },
     {
       "id": "extrime-uaz",
       "name": "Экстрим (УАЗ)",
       "slug": "extrime-s-1-5l-dvs-1nz-fe",
-      "price_rub": 1800000
+      "price_rub": 1850000
     },
     {
       "id": "extrime-toyota",
       "name": "Экстрим (Toyota)",
       "slug": "extrime-1-5-litra-mosty-toyota",
-      "price_rub": 2050000
+      "price_rub": 2100000
     },
     {
       "id": "extrime-plus-toyota",
       "name": "Экстрим ПЛЮС (Toyota)",
       "slug": "extrime-plus-s-1-8l-dvs-1zz-fe",
-      "price_rub": 2150000
+      "price_rub": 2200000
     },
     {
       "id": "hunter-toyota",
       "name": "Хантер (Toyota)",
       "slug": "hunter-s-1-5l-dvs-1nz-fe",
-      "price_rub": 2180000
+      "price_rub": 2230000
     },
     {
       "id": "pickup-uaz-timken",
       "name": "Пикап (УАЗ Тимкен)",
       "slug": "snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1nz-fe-1-5-litra-s-mostami-uaz-timken",
-      "price_rub": 1800000
+      "price_rub": 1850000
     },
     {
-      "id": "pickup-uaz",
+      "id": "pickup-uaz-18",
       "name": "Пикап (УАЗ)",
       "slug": "snegobolotokhod-rosomakha-pikap-dvs-1-8-litra-uaz",
-      "price_rub": 2250000
+      "price_rub": 2300000
     },
     {
       "id": "pickup-toyota",
       "name": "Пикап (Toyota)",
       "slug": "snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota",
-      "price_rub": 2450000
+      "price_rub": 2500000
     },
     {
       "id": "sixwheel-toyota",
