@@ -310,6 +310,109 @@ def safe_file(path, *, root, readable=True, writable=False):
     }
 
 
+def trusted_directory_permissions(uid, mode, *, allow_group_write, require_sticky):
+    permissions = stat.S_IMODE(mode)
+    if uid != 0 or permissions & stat.S_IWOTH:
+        return False
+    if permissions & stat.S_IWGRP and not allow_group_write:
+        return False
+    if require_sticky and not mode & stat.S_ISVTX:
+        return False
+    return True
+
+
+def trusted_current_link_attributes(uid, mode):
+    return uid == 0 and stat.S_ISLNK(mode)
+
+
+def trusted_tree_entry_permissions(uid, mode, *, is_file, nlink=1):
+    if uid != 0 or stat.S_IMODE(mode) & 0o022 or stat.S_ISLNK(mode):
+        return False
+    if is_file:
+        return stat.S_ISREG(mode) and nlink == 1
+    return stat.S_ISDIR(mode)
+
+
+def trusted_root_directory(path, *, allow_group_write=False, require_sticky=False):
+    try:
+        details = os.lstat(path)
+        realpath = path.resolve(strict=True)
+        valid = bool(
+            stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+            and str(realpath) == str(path)
+            and trusted_directory_permissions(
+                details.st_uid, details.st_mode,
+                allow_group_write=allow_group_write, require_sticky=require_sticky,
+            )
+        )
+        return {
+            "path": str(path), "exists": True, "realpath": str(realpath),
+            "directory": stat.S_ISDIR(details.st_mode), "symlink": stat.S_ISLNK(details.st_mode),
+            "uid": details.st_uid, "gid": details.st_gid,
+            "mode": oct(stat.S_IMODE(details.st_mode)), "sticky": bool(details.st_mode & stat.S_ISVTX),
+            "group_writable": bool(details.st_mode & stat.S_IWGRP),
+            "world_writable": bool(details.st_mode & stat.S_IWOTH), "valid": valid,
+        }
+    except OSError as exc:
+        return {"path": str(path), "exists": False, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def trusted_current_link():
+    try:
+        details = os.lstat(CURRENT_LINK)
+        target = resolved(CURRENT_LINK)
+        valid = bool(
+            trusted_current_link_attributes(details.st_uid, details.st_mode)
+            and CURRENT_LINK.parent.resolve(strict=True) == APP_ROOT.resolve(strict=True)
+            and target is not None and release_path(target)
+        )
+        return {
+            "path": str(CURRENT_LINK), "exists": True, "symlink": stat.S_ISLNK(details.st_mode),
+            "uid": details.st_uid, "gid": details.st_gid, "realpath": target, "valid": valid,
+        }
+    except OSError as exc:
+        return {"path": str(CURRENT_LINK), "exists": False, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def trusted_closed_tree(root, *, require_root_mode=None):
+    root_info = trusted_root_directory(root)
+    if require_root_mode is not None:
+        root_info["valid"] = bool(root_info.get("valid") and root_info.get("mode") == oct(require_root_mode))
+    if not root_info.get("valid"):
+        return {"root": str(root), "valid": False, "error": "untrusted tree root", "root_info": root_info}
+    file_count = 0
+    directory_count = 0
+    for current, dir_names, file_names in os.walk(root, followlinks=False):
+        dir_names.sort()
+        file_names.sort()
+        current_path = Path(current)
+        for name in dir_names:
+            item = current_path / name
+            details = os.lstat(item)
+            if (
+                not trusted_tree_entry_permissions(details.st_uid, details.st_mode, is_file=False)
+                or not within(root, item)
+            ):
+                return {"root": str(root), "valid": False, "error": f"untrusted tree directory: {item}"}
+            directory_count += 1
+        for name in file_names:
+            item = current_path / name
+            details = os.lstat(item)
+            if (
+                not trusted_tree_entry_permissions(
+                    details.st_uid, details.st_mode, is_file=True, nlink=details.st_nlink,
+                ) or not within(root, item)
+            ):
+                return {"root": str(root), "valid": False, "error": f"untrusted tree file: {item}"}
+            file_count += 1
+            if file_count > MAX_CANDIDATE_FILES:
+                return {"root": str(root), "valid": False, "error": "trusted tree file-count limit exceeded"}
+    return {
+        "root": str(root), "valid": True, "root_info": root_info,
+        "file_count": file_count, "directory_count": directory_count,
+    }
+
+
 def tree_manifest(root):
     root_info = safe_directory(root, root=APP_ROOT)
     if not root_info["valid"]:
@@ -437,6 +540,16 @@ def rollback_target(current):
         return None
 
 
+def exact_label_releases():
+    try:
+        return sorted(
+            str(item.resolve(strict=True)) for item in RELEASES_DIR.iterdir()
+            if item.name.endswith(f"-{RELEASE_LABEL}") and release_path(str(item))
+        )
+    except OSError:
+        return ["unreadable"]
+
+
 def topology():
     """Actor-neutral read topology used by both audit roles."""
     dirs = {
@@ -546,7 +659,33 @@ def lock_readiness():
     }
 
 
+def root_mutation_topology(current, rollback, *, require_closed_dist=False):
+    parents = {
+        "root": trusted_root_directory(Path("/")),
+        "var": trusted_root_directory(Path("/var")),
+        "var_www": trusted_root_directory(Path("/var/www")),
+        "app_root": trusted_root_directory(APP_ROOT, allow_group_write=True, require_sticky=True),
+        "releases": trusted_root_directory(RELEASES_DIR),
+        # Mutable staging may be group-writable before the atomic swap, but its
+        # root ownership and sticky parent prevent a non-root rename race.
+        "staging_dist": trusted_root_directory(DIST_DIR, allow_group_write=not require_closed_dist),
+    }
+    current_link = trusted_current_link()
+    trees = {
+        "current": trusted_closed_tree(Path(current)) if current else {"valid": False, "error": "current missing"},
+        "rollback": trusted_closed_tree(Path(rollback)) if rollback else {"valid": False, "error": "rollback missing"},
+    }
+    valid = bool(
+        all(item.get("valid") for item in parents.values())
+        and current_link.get("valid") and all(item.get("valid") for item in trees.values())
+    )
+    return {"valid": valid, "parents": parents, "current_link": current_link, "trees": trees}
+
+
 def root_apply_readiness(topo, command_paths, lock_already_held=False):
+    current = resolved(CURRENT_LINK)
+    rollback = rollback_target(current)
+    mutation = root_mutation_topology(current, rollback)
     writable_directories = {
         name: safe_directory(path, root=APP_ROOT, writable=True)
         for name, path in {
@@ -583,6 +722,7 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         and all(item.get("valid") and item.get("verified_sha256") for item in scripts.values())
         and lock.get("valid") and all(item.get("valid") for item in command_paths.values())
         and python_runtime_supported()
+        and mutation.get("valid")
     )
     return {
         "valid": valid, "writable_directories": writable_directories,
@@ -590,6 +730,7 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         "lock": lock, "commands_available": all(item.get("valid") for item in command_paths.values()),
         "python_version": list(sys.version_info[:3]),
         "python_version_supported": python_runtime_supported(),
+        "mutation_topology": mutation,
     }
 
 
@@ -611,13 +752,7 @@ def audit_state(mode, lock_already_held=False):
     staging = tree_manifest(DIST_DIR)
     current_tree = tree_manifest(Path(current)) if current else {"valid": False, "error": "current release missing"}
     command_paths = {name: safe_system_binary(FIXED_BIN_PATHS[name]) for name in FIXED_COMMANDS}
-    try:
-        existing_label_releases = sorted(
-            str(item.resolve(strict=True)) for item in RELEASES_DIR.iterdir()
-            if item.name.endswith(f"-{RELEASE_LABEL}") and release_path(str(item))
-        )
-    except OSError:
-        existing_label_releases = ["unreadable"]
+    existing_label_releases = exact_label_releases()
     blockers = []
     if not identity["valid"]:
         blockers.append("exact operator role identity is not proved")
@@ -1034,6 +1169,9 @@ def apply_release(bundle):
         failure = None
         automatic_rollback = None
         try:
+            candidate_trust = trusted_closed_tree(candidate, require_root_mode=0o700)
+            if not candidate_trust.get("valid"):
+                raise ReleaseError("extracted candidate is not a closed root-owned tree")
             trusted_root, trusted_scripts = materialize_trusted_scripts(bundle, token, "apply")
             # Candidate extraction can take time. Re-prove the complete shared
             # baseline immediately before the first staging mutation.
@@ -1042,14 +1180,37 @@ def apply_release(bundle):
                 raise ReleaseError("server topology changed under the release lock")
             if tree_manifest(DIST_DIR).get("digest") != final_fresh["staging_dist"].get("digest"):
                 raise ReleaseError("staging dist changed under lock")
+            if exact_label_releases() != []:
+                raise ReleaseError("exact release target label appeared before apply")
             os.replace(DIST_DIR, staging_backup)
             os.replace(candidate, DIST_DIR)
             candidate_at_dist = True
+            moved_trust = trusted_closed_tree(DIST_DIR, require_root_mode=0o700)
+            moved_manifest = tree_manifest(DIST_DIR)
+            if (
+                not moved_trust.get("valid")
+                or not moved_manifest.get("valid")
+                or moved_manifest.get("digest") != baseline["candidate"]["tree_digest"]
+            ):
+                raise ReleaseError("candidate staging tree changed during atomic swap")
+            mutation_before_run = root_mutation_topology(
+                baseline["current_release"], baseline["rollback_release"], require_closed_dist=True,
+            )
+            if not mutation_before_run.get("valid") or exact_label_releases() != []:
+                raise ReleaseError("root mutation topology changed before fixed release")
             release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180)
             new_release = resolved(CURRENT_LINK)
             release_switched = new_release != baseline["current_release"]
             if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-10d9dc6", Path(new_release).name):
                 raise ReleaseError("guarded release did not switch to the expected labelled release")
+            if exact_label_releases() != [new_release]:
+                raise ReleaseError("exact release target was not uniquely created")
+            release_trust = trusted_closed_tree(Path(new_release))
+            mutation_after_run = root_mutation_topology(
+                new_release, baseline["current_release"], require_closed_dist=True,
+            )
+            if not release_trust.get("valid") or not mutation_after_run.get("valid"):
+                raise ReleaseError("released root mutation topology is unsafe")
             released_manifest = tree_manifest(Path(new_release))
             if not released_manifest["valid"] or released_manifest["digest"] != baseline["candidate"]["tree_digest"]:
                 raise ReleaseError("released tree differs from candidate")
@@ -1096,6 +1257,11 @@ def apply_release(bundle):
                         180,
                     )
                     verify_exact_baseline_state(baseline, require_staging=False)
+                    rollback_topology = root_mutation_topology(
+                        baseline["current_release"], new_release, require_closed_dist=True,
+                    )
+                    if not rollback_topology.get("valid") or exact_label_releases() != [new_release]:
+                        raise ReleaseError("automatic rollback root topology is unsafe")
                 except Exception as rollback_exc:
                     failure = ReleaseError(f"apply failed and automatic rollback was not proved: {type(rollback_exc).__name__}: {rollback_exc}")
         finally:
@@ -1107,6 +1273,9 @@ def apply_release(bundle):
         if failure is not None:
             try:
                 verify_exact_baseline_state(baseline, require_staging=True)
+                labels_after_failure = exact_label_releases()
+                if not release_switched and labels_after_failure != []:
+                    raise ReleaseError("failed release left a residual exact-label target")
             except Exception as recovery_exc:
                 raise ReleaseError(
                     f"release failure left an unproved recovery state: {type(recovery_exc).__name__}: {recovery_exc}"
@@ -1167,6 +1336,9 @@ def rollback_release(bundle):
             raise ReleaseError("exact baseline release tree changed before rollback")
         if tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
             raise ReleaseError("restored staging dist changed before rollback")
+        mutation_before_rollback = root_mutation_topology(exact_new, baseline["current_release"])
+        if not mutation_before_rollback.get("valid") or exact_label_releases() != [exact_new]:
+            raise ReleaseError("root mutation topology changed before rollback")
         trusted_root, trusted_scripts = materialize_trusted_scripts(
             bundle, baseline["baseline_token"][:16], "rollback",
         )
@@ -1175,6 +1347,9 @@ def rollback_release(bundle):
                 trusted_scripts["server-rollback.sh"], Path(baseline["current_release"]).name, 180,
             )
             verification = verify_exact_baseline_state(baseline, require_staging=True)
+            mutation_after_rollback = root_mutation_topology(baseline["current_release"], exact_new)
+            if not mutation_after_rollback.get("valid") or exact_label_releases() != [exact_new]:
+                raise ReleaseError("root mutation topology is unsafe after rollback")
             return {
                 "schema": SCHEMA, "status": "rolled_back", "mode": "rollback", "completed_at": utc_now(),
                 "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
