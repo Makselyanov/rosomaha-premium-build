@@ -807,6 +807,38 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             with self.assertRaises(helper.HelperError):
                 helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
 
+    def test_articles_cz_index_comment_is_not_counted_as_import(self) -> None:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            snapshot = root / "canonical"
+            cz = snapshot / "src/data/articles-cz"
+            worktree = root / "worktree"
+            (worktree / "src/data").mkdir(parents=True)
+            cz.mkdir(parents=True)
+            slugs = []
+            imports = [
+                "// Автоматически сгенерировано Контент Заводом.",
+                "// Подключение в src/data/articles.ts: `import { czArticles } from './articles-cz'; ... ...czArticles`",
+                "import type { Article } from '../articles';",
+                "",
+            ]
+            for index, name in enumerate(helper.ARTICLES_CZ_ALLOWLIST):
+                if name == "index.ts":
+                    continue
+                slug = f"cz-{index}"
+                slugs.append(slug)
+                export_name = f"item{index}Article"
+                (cz / name).write_text(
+                    f"export const {export_name}: Article = {{ slug: '{slug}' }};\n",
+                    encoding="utf-8",
+                )
+                imports.append(f"import {{ {export_name} }} from './{Path(name).stem}';")
+            (cz / "index.ts").write_text("\n".join(imports), encoding="utf-8")
+            (worktree / "src/data/articles.ts").write_text("export const x = { slug: 'manual' };", encoding="utf-8")
+            (worktree / "src/data/tyumen-exhibition.ts").write_text("export const x = { slug: 'tyumen' };", encoding="utf-8")
+            result = helper.validate_articles_cz(snapshot, worktree, ["manual", "tyumen", *slugs])
+            self.assertTrue(result["valid"])
+
     def test_articles_cz_noncanonical_file_is_excluded_from_generated_index(self) -> None:
         helper.TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=helper.TEMP_ROOT) as raw_root:

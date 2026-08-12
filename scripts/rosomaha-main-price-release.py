@@ -1039,7 +1039,7 @@ def validate_articles_cz(snapshot_root: Path, worktree: Path, canonical_slugs: l
         else:
             excluded_entries.append({"name": name, "stem": stem, "slug": slug, "export_name": export_name})
     index_raw = (cz_root / "index.ts").read_text(encoding="utf-8-sig")
-    imports = re.findall(r"\bfrom\s+['\"]\./([^'\"]+)['\"]", index_raw)
+    imports = re.findall(r"(?m)^\s*import\s+.+?\s+from\s+['\"]\./([^'\"]+)['\"]", index_raw)
     expected_stems = sorted(entry["stem"] for entry in included_entries)
     if sorted(imports) != expected_stems or len(imports) != len(set(imports)):
         raise HelperError("articles-cz index does not import each allowlisted article exactly once")
