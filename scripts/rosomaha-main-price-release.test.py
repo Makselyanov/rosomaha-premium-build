@@ -883,6 +883,23 @@ class MainPriceReleaseV3Test(unittest.TestCase):
             with self.assertRaises(helper.HelperError):
                 helper.verify_runtime_articles(dist, canonical_raw, info)
 
+    def test_robots_root_block_is_scoped_to_default_group(self) -> None:
+        allowed = """User-agent: *
+Allow: /
+
+User-agent: AhrefsBot
+Disallow: /
+Sitemap: https://xn--80aa8ahaki9a.site/sitemap-index.xml
+"""
+        blocked = """User-agent: *
+Disallow: /
+
+User-agent: Googlebot
+Allow: /
+"""
+        self.assertFalse(helper.default_robots_group_blocks_root(allowed))
+        self.assertTrue(helper.default_robots_group_blocks_root(blocked))
+
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)

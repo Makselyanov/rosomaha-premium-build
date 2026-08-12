@@ -1150,6 +1150,29 @@ def xml_locations(raw: bytes) -> set[str]:
     return {collapse_text(node.text or "") for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "loc" and node.text}
 
 
+def default_robots_group_blocks_root(raw: str) -> bool:
+    agents: list[str] = []
+    directives_started = False
+    for source_line in raw.splitlines():
+        line = source_line.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        name, value = (part.strip() for part in line.split(":", 1))
+        name = name.lower()
+        if name == "user-agent":
+            if directives_started:
+                agents = []
+                directives_started = False
+            agents.append(value.lower())
+            continue
+        if name not in {"allow", "disallow"}:
+            continue
+        directives_started = True
+        if "*" in agents and name == "disallow" and value == "/":
+            return True
+    return False
+
+
 def verify_runtime_articles(dist: Path, canonical_raw: bytes, articles: dict[str, Any]) -> dict[str, Any]:
     manifest_path = dist / RUNTIME_ARTICLES_MANIFEST
     details = safe_regular_file(manifest_path, dist)
@@ -1233,7 +1256,8 @@ def verify_candidate_dist(dist: Path, snapshot_root: Path, public_baseline: dict
     if not {f"{BASE_URL}/sitemap-articles.xml", f"{BASE_URL}/sitemap-models.xml"}.issubset(sitemap_index):
         raise HelperError("candidate sitemap index misses required child sitemaps")
     robots = (dist / "robots.txt").read_text(encoding="utf-8-sig")
-    if re.search(r"(?im)^\s*Disallow:\s*/\s*$", robots) or f"Sitemap: {BASE_URL}/sitemap-index.xml" not in robots:
+    sitemap_pattern = rf"(?im)^\s*Sitemap:\s*{re.escape(BASE_URL)}/sitemap-index\.xml\s*$"
+    if default_robots_group_blocks_root(robots) or not re.search(sitemap_pattern, robots):
         raise HelperError("candidate robots.txt blocks the site or misses the sitemap index")
 
     article_pages = []
