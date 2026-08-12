@@ -383,24 +383,54 @@ def run_remote(client: paramiko.SSHClient, command: str, stdin_bytes: bytes, tim
     channel.exec_command(command)
     channel.sendall(stdin_bytes)
     channel.shutdown_write()
+    try:
+        return drain_remote_channel(channel, timeout)
+    except Exception:
+        channel.close()
+        raise
+
+
+def drain_remote_channel(channel: Any, timeout: int) -> dict[str, Any]:
     stdout = bytearray()
     stderr = bytearray()
     deadline = time.monotonic() + timeout
-    while not channel.exit_status_ready():
-        while channel.recv_ready():
-            stdout.extend(channel.recv(65536))
-        while channel.recv_stderr_ready():
-            stderr.extend(channel.recv_stderr(65536))
+
+    def ensure_deadline() -> None:
         if time.monotonic() >= deadline:
             channel.close()
-            raise HelperError("fixed remote operator timed out")
-        time.sleep(0.05)
-    while channel.recv_ready():
-        stdout.extend(channel.recv(65536))
-    while channel.recv_stderr_ready():
-        stderr.extend(channel.recv_stderr(65536))
+            raise HelperError("fixed remote operator timed out before full EOF")
+
+    while True:
+        progress = False
+        while channel.recv_ready():
+            ensure_deadline()
+            chunk = channel.recv(65536)
+            if not chunk:
+                break
+            stdout.extend(chunk)
+            progress = True
+        while channel.recv_stderr_ready():
+            ensure_deadline()
+            chunk = channel.recv_stderr(65536)
+            if not chunk:
+                break
+            stderr.extend(chunk)
+            progress = True
+
+        exit_ready = channel.exit_status_ready()
+        eof_or_closed = bool(getattr(channel, "eof_received", False) or getattr(channel, "closed", False))
+        if exit_ready and eof_or_closed and not channel.recv_ready() and not channel.recv_stderr_ready():
+            break
+        ensure_deadline()
+        if not progress:
+            time.sleep(0.01)
+
+    # Calling recv_exit_status only after all buffers reached EOF avoids the
+    # Paramiko window-size deadlock documented for large remote output.
+    exit_code = channel.recv_exit_status()
+    channel.close()
     return {
-        "exit_code": channel.recv_exit_status(),
+        "exit_code": exit_code,
         "stdout": bytes(stdout).decode("utf-8", errors="replace"),
         "stderr": bytes(stderr).decode("utf-8", errors="replace"),
     }
@@ -443,18 +473,16 @@ def operator_diagnostics(result: dict[str, Any]) -> str:
 
 
 def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
+    lines = [line.strip() for line in str(result.get("stdout") or "").splitlines() if line.strip()]
+    line = lines[-1] if lines else ""
     payload: dict[str, Any] | None = None
-    for raw_line in reversed(str(result.get("stdout") or "").splitlines()):
-        line = raw_line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
+    if line.startswith("{") and line.endswith("}"):
         try:
             candidate = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            candidate = None
         if isinstance(candidate, dict):
             payload = candidate
-            break
     if payload is None:
         raise HelperError(f"fixed operator returned no valid JSON object line; {operator_diagnostics(result)}")
     if result.get("exit_code") != 0 or payload.get("status") in {"error", "blocked"}:

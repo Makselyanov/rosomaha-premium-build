@@ -117,10 +117,114 @@ class MainPriceReleaseV2Test(unittest.TestCase):
     def test_parse_operator_json_accepts_banner_and_exact_json_line(self) -> None:
         payload = helper.parse_operator_json({
             "exit_code": 0,
-            "stdout": "Welcome to fixed host\nnotice {not json}\n{\"status\":\"ok\",\"mode\":\"audit\"}\ntrailing banner\n",
+            "stdout": "Welcome to fixed host\nnotice {not json}\n{\"status\":\"ok\",\"mode\":\"audit\"}\n",
             "stderr": "",
         })
         self.assertEqual(payload["mode"], "audit")
+
+    def test_parse_operator_json_rejects_trailing_non_json_after_receipt(self) -> None:
+        with self.assertRaisesRegex(helper.HelperError, "no valid JSON object line"):
+            helper.parse_operator_json({
+                "exit_code": 0,
+                "stdout": '{"status":"ok","mode":"audit"}\ntruncated trailing output',
+                "stderr": "",
+            })
+
+    def test_run_remote_drains_large_delayed_output_after_exit_status_ready(self) -> None:
+        final_payload = {"status": "ok", "mode": "audit", "proof": "complete"}
+        final_line = json.dumps(final_payload, separators=(",", ":")).encode("utf-8") + b"\n"
+
+        class DelayedChannel:
+            def __init__(self) -> None:
+                self.stdout = bytearray(b"leading-banner-" + (b"A" * 140_000) + b"\n")
+                self.stderr = bytearray(b"W" * 70_000)
+                self.delay_polls = 3
+                self.final_added = False
+                self.eof_received = False
+                self.closed = False
+                self.command = None
+                self.stdin = bytearray()
+
+            def settimeout(self, _timeout):
+                return None
+
+            def exec_command(self, command):
+                self.command = command
+
+            def sendall(self, raw):
+                self.stdin.extend(raw)
+
+            def shutdown_write(self):
+                return None
+
+            def recv_ready(self):
+                if self.stdout:
+                    return True
+                if not self.final_added:
+                    if self.delay_polls:
+                        self.delay_polls -= 1
+                        return False
+                    self.stdout.extend(final_line)
+                    self.final_added = True
+                    return True
+                if not self.stderr:
+                    self.eof_received = True
+                return False
+
+            def recv(self, size):
+                raw = bytes(self.stdout[:size])
+                del self.stdout[:size]
+                return raw
+
+            def recv_stderr_ready(self):
+                return bool(self.stderr)
+
+            def recv_stderr(self, size):
+                raw = bytes(self.stderr[:size])
+                del self.stderr[:size]
+                return raw
+
+            def exit_status_ready(self):
+                return True
+
+            def recv_exit_status(self):
+                if not self.eof_received:
+                    raise AssertionError("recv_exit_status called before full EOF")
+                return 0
+
+            def close(self):
+                self.closed = True
+
+        class FakeTransport:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+            def is_active(self):
+                return True
+
+            def open_session(self, timeout):
+                self.open_timeout = timeout
+                return self.channel
+
+        class FakeClient:
+            def __init__(self, transport) -> None:
+                self.transport = transport
+
+            def get_transport(self):
+                return self.transport
+
+        channel = DelayedChannel()
+        client = FakeClient(FakeTransport(channel))
+        with mock.patch.object(helper.time, "sleep"):
+            result = helper.run_remote(client, "bash -s -- audit", b"operator", 30)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertGreater(len(result["stdout"]), 140_000)
+        self.assertEqual(len(result["stderr"]), 70_000)
+        self.assertTrue(result["stdout"].endswith(final_line.decode("utf-8")))
+        self.assertEqual(helper.parse_operator_json(result), final_payload)
+        self.assertEqual(channel.command, "bash -s -- audit")
+        self.assertEqual(bytes(channel.stdin), b"operator")
+        self.assertTrue(channel.closed)
 
     def test_parse_operator_json_rejects_embedded_json_and_returns_bounded_diagnostics(self) -> None:
         secret = "x" * 80
