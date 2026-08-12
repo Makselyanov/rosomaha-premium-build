@@ -216,6 +216,45 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertLess(final_baseline, switched)
         self.assertLess(switched, post_source)
 
+    def test_operator_bytes_are_one_inode_stable_snapshot(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        snapshot = source[source.index("def operator_bytes") : source.index("def run_remote")]
+        self.assertIn('getattr(os, "O_NOFOLLOW", 0)', snapshot)
+        self.assertIn("os.fstat(fd)", snapshot)
+        self.assertIn("os.lstat(OPERATOR_PATH)", snapshot)
+        self.assertIn("before.st_mtime_ns", snapshot)
+        self.assertIn("after.st_mtime_ns", snapshot)
+        apply_body = source[source.index("def apply(") : source.index("def argument_parser")]
+        self.assertEqual(apply_body.count("frozen_operator = operator_bytes()"), 1)
+        self.assertNotIn("operator_bytes()", apply_body.replace("frozen_operator = operator_bytes()", ""))
+        for expected in (
+            'remote_audit(client, "root-audit", APPLY_LOGIN, frozen_operator)',
+            "upload_bundle(client, resolved_baseline, archive, manifest, baseline, frozen_operator)",
+            'invoke_operator(client, "apply", remote_dir, frozen_operator)',
+            "recover_ambiguous_apply(remote_dir, baseline, exc, frozen_operator)",
+        ):
+            self.assertIn(expected, apply_body)
+
+    def test_operator_upload_uses_frozen_bytes_not_mutable_path(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        upload = source[source.index("def sftp_upload_bytes") : source.index("def cleanup_bundle_sftp")]
+        self.assertIn("sftp_upload_bytes(sftp, frozen_operator", upload)
+        self.assertIn('baseline.get("operator_sha256") != sha256_bytes(frozen_operator)', upload)
+        self.assertNotIn("OPERATOR_PATH", upload)
+
+    def test_apply_aborts_if_frozen_operator_hash_differs_from_baseline(self) -> None:
+        payload = {
+            "schema": helper.SCHEMA, "status": "ready", "account": helper.AUDIT_LOGIN,
+            "roles": helper.ROLES, "target_commit": helper.TARGET_COMMIT,
+            "release_label": helper.RELEASE_LABEL, "operator_sha256": helper.sha256_bytes(b"old"),
+        }
+        payload["baseline_token"] = helper.calculate_baseline_token(payload)
+        with mock.patch.object(helper, "safe_baseline_path", return_value=Path("baseline.json")), mock.patch.object(
+            Path, "read_text", return_value=json.dumps(payload),
+        ):
+            with self.assertRaisesRegex(helper.HelperError, "fixed operator changed after baseline capture"):
+                helper.load_baseline_with_operator(Path("baseline.json"), b"new")
+
     def test_connect_rejects_unpinned_role_before_loading_key(self) -> None:
         with mock.patch.object(helper, "pinned_identity") as pinned:
             with self.assertRaisesRegex(helper.HelperError, "unsupported pinned SSH role"):
@@ -232,13 +271,13 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertIn('remote_audit(client, "audit", AUDIT_LOGIN, frozen_operator)', audit_body)
         self.assertNotIn("APPLY_LOGIN", audit_body)
         self.assertIn("connect(APPLY_LOGIN)", apply_body)
-        self.assertIn('remote_audit(client, "root-audit", APPLY_LOGIN)', apply_body)
+        self.assertIn('remote_audit(client, "root-audit", APPLY_LOGIN, frozen_operator)', apply_body)
         self.assertIn("connect(APPLY_LOGIN)", recovery_body)
 
     def test_root_preflight_happens_before_any_bundle_upload(self) -> None:
         source = HELPER_PATH.read_text(encoding="utf-8")
         body = source[source.index("def apply(") : source.index("def argument_parser")]
-        self.assertLess(body.index('remote_audit(client, "root-audit", APPLY_LOGIN)'), body.index("upload_bundle("))
+        self.assertLess(body.index('remote_audit(client, "root-audit", APPLY_LOGIN, frozen_operator)'), body.index("upload_bundle("))
         self.assertLess(body.index('root_preflight["server_baseline_token"]'), body.index("upload_bundle("))
 
     def test_operator_modes_and_identity_gates_are_split(self) -> None:
@@ -914,7 +953,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertNotIn('invoke_operator(client, "apply"', body)
         self.assertIn("ambiguous_apply_requires_recovery", body)
         self.assertIn("bundle_preserved", body)
-        self.assertIn("raw_remote_audit(client)", body)
+        self.assertIn("raw_remote_audit(client, frozen_operator)", body)
 
     def test_recovery_classifies_released_original_and_unexpected(self) -> None:
         baseline = {
