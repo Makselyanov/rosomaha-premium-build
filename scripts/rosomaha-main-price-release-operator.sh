@@ -40,7 +40,6 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 
 MODE = sys.argv[1]
@@ -95,15 +94,15 @@ class ReleaseError(RuntimeError):
     pass
 
 
-def utc_now() -> str:
+def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def sha256_bytes(raw: bytes) -> str:
+def sha256_bytes(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -111,25 +110,25 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def canonical_json(value: Any) -> bytes:
+def canonical_json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def resolved(path: Path) -> str | None:
+def resolved(path):
     try:
         return str(path.resolve(strict=True))
     except OSError:
         return None
 
 
-def within(root: Path, path: Path) -> bool:
+def within(root, path):
     try:
         return os.path.commonpath((str(root.resolve(strict=True)), str(path.resolve(strict=True)))) == str(root.resolve(strict=True))
     except (OSError, ValueError):
         return False
 
 
-def safe_directory(path: Path, *, root: Path, optional: bool = False, writable: bool = False) -> dict[str, Any]:
+def safe_directory(path, *, root, optional=False, writable=False):
     try:
         details = os.lstat(path)
     except FileNotFoundError:
@@ -152,7 +151,7 @@ def safe_directory(path: Path, *, root: Path, optional: bool = False, writable: 
     }
 
 
-def safe_file(path: Path, *, root: Path, writable: bool = False) -> dict[str, Any]:
+def safe_file(path, *, root, writable=False):
     try:
         details = os.lstat(path)
     except OSError as exc:
@@ -175,11 +174,11 @@ def safe_file(path: Path, *, root: Path, writable: bool = False) -> dict[str, An
     }
 
 
-def tree_manifest(root: Path) -> dict[str, Any]:
+def tree_manifest(root):
     root_info = safe_directory(root, root=APP_ROOT)
     if not root_info["valid"]:
         return {"root": str(root), "valid": False, "error": "unsafe tree root"}
-    files: list[dict[str, Any]] = []
+    files = []
     directories = 0
     for current, dir_names, file_names in os.walk(root, followlinks=False):
         current_path = Path(current)
@@ -202,8 +201,8 @@ def tree_manifest(root: Path) -> dict[str, Any]:
     return {"root": str(root), "valid": True, "files": files, "file_count": len(files), "directory_count": directories, "digest": digest}
 
 
-def article_info(raw: bytes, source: str) -> dict[str, Any]:
-    info: dict[str, Any] = {"source": source, "sha256": sha256_bytes(raw), "bytes": len(raw), "valid": False}
+def article_info(raw, source):
+    info = {"source": source, "sha256": sha256_bytes(raw), "bytes": len(raw), "valid": False}
     try:
         payload = json.loads(raw.decode("utf-8-sig"))
         if not isinstance(payload, list):
@@ -225,7 +224,7 @@ def article_info(raw: bytes, source: str) -> dict[str, Any]:
     return info
 
 
-def article_file(path: Path, source: str) -> dict[str, Any]:
+def article_file(path, source):
     try:
         file_state = safe_file(path, root=APP_ROOT)
         if not file_state["valid"]:
@@ -235,7 +234,7 @@ def article_file(path: Path, source: str) -> dict[str, Any]:
         return {"source": source, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def articles_cz_manifest() -> dict[str, Any]:
+def articles_cz_manifest():
     directory = safe_directory(ARTICLES_CZ_DIR, root=APP_ROOT)
     if not directory["valid"]:
         return {"valid": False, "error": "unsafe articles-cz directory"}
@@ -255,9 +254,9 @@ def articles_cz_manifest() -> dict[str, Any]:
         return {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def live_articles() -> dict[str, Any]:
+def live_articles():
     request = urllib.request.Request(PUBLIC_ARTICLES_URL, headers={"User-Agent": "RosomahaFixedPriceRelease/2.0", "Accept": "application/json"})
-    last_error: Exception | None = None
+    last_error = None
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=25) as response:
@@ -276,7 +275,7 @@ def live_articles() -> dict[str, Any]:
     return {"source": "live", "valid": False, "error": f"{type(last_error).__name__}: {last_error}"}
 
 
-def release_path(value: str | None) -> bool:
+def release_path(value):
     if not value:
         return False
     try:
@@ -287,7 +286,7 @@ def release_path(value: str | None) -> bool:
         return False
 
 
-def rollback_target(current: str | None) -> str | None:
+def rollback_target(current):
     try:
         candidates = []
         for item in RELEASES_DIR.iterdir():
@@ -299,7 +298,7 @@ def rollback_target(current: str | None) -> str | None:
         return None
 
 
-def topology() -> dict[str, Any]:
+def topology():
     dirs = {
         "app_root": safe_directory(APP_ROOT, root=APP_ROOT, writable=True),
         "public": safe_directory(APP_ROOT / "public", root=APP_ROOT),
@@ -337,7 +336,7 @@ def topology() -> dict[str, Any]:
     return {"directories": dirs, "files": files, "current_link": current_link, "temporary": tmp_info, "valid": valid}
 
 
-def audit_state() -> dict[str, Any]:
+def audit_state():
     login = pwd.getpwuid(os.getuid()).pw_name
     current = resolved(CURRENT_LINK)
     rollback = rollback_target(current)
@@ -384,7 +383,7 @@ def audit_state() -> dict[str, Any]:
         blockers.append("fixed server command is unavailable")
     if existing_label_releases:
         blockers.append("the exact release label already exists; replay is forbidden")
-    result: dict[str, Any] = {
+    result = {
         "schema": SCHEMA, "mode": "audit", "captured_at": utc_now(), "host": HOST,
         "account": EXPECTED_LOGIN, "app_root": str(APP_ROOT), "current_release": current,
         "rollback_release": rollback, "articles": articles, "articles_cz": cz_manifest, "article_parity": article_parity,
@@ -396,7 +395,7 @@ def audit_state() -> dict[str, Any]:
     return result
 
 
-def server_baseline_material(value: dict[str, Any]) -> dict[str, Any]:
+def server_baseline_material(value):
     article_keys = ("sha256", "bytes", "count", "unique_count", "duplicates", "slug_digest", "valid")
     articles = {
         name: {key: value["articles"][name].get(key) for key in article_keys}
@@ -416,11 +415,11 @@ def server_baseline_material(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def full_baseline_token(value: dict[str, Any]) -> str:
+def full_baseline_token(value):
     return sha256_bytes(canonical_json({key: item for key, item in value.items() if key != "baseline_token"}))
 
 
-def open_lock(*, create: bool):
+def open_lock(*, create):
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(LOCK_PATH, flags)
@@ -444,7 +443,7 @@ def open_lock(*, create: bool):
         raise
 
 
-def validate_bundle(bundle: Path) -> dict[str, Any]:
+def validate_bundle(bundle):
     match = re.fullmatch(r"/tmp/rosomaha-main-price-release-10d9dc6-([0-9a-f]{16})", str(bundle))
     if not match:
         raise ReleaseError("invalid bundle path")
@@ -477,7 +476,7 @@ def validate_bundle(bundle: Path) -> dict[str, Any]:
     return baseline
 
 
-def verify_fresh_baseline(baseline: dict[str, Any]) -> dict[str, Any]:
+def verify_fresh_baseline(baseline):
     if baseline.get("server_baseline_token") != sha256_bytes(canonical_json(server_baseline_material(baseline))):
         raise ReleaseError("stored server baseline token is invalid")
     fresh = audit_state()
@@ -488,7 +487,7 @@ def verify_fresh_baseline(baseline: dict[str, Any]) -> dict[str, Any]:
     return fresh
 
 
-def verify_exact_baseline_state(baseline: dict[str, Any], *, require_staging: bool) -> dict[str, Any]:
+def verify_exact_baseline_state(baseline, *, require_staging):
     topo = topology()
     if not topo["valid"]:
         raise ReleaseError("server topology is unsafe after recovery")
@@ -515,7 +514,7 @@ def verify_exact_baseline_state(baseline: dict[str, Any], *, require_staging: bo
     return {"topology": topo, "baseline_tree": baseline_tree, "articles": list(articles), "articles_cz": cz_manifest}
 
 
-def extract_candidate(bundle: Path, baseline: dict[str, Any]) -> Path:
+def extract_candidate(bundle, baseline):
     token = baseline["baseline_token"][:16]
     candidate = APP_ROOT / f".price-candidate-{token}"
     if candidate.exists() or candidate.is_symlink():
@@ -570,7 +569,7 @@ def extract_candidate(bundle: Path, baseline: dict[str, Any]) -> Path:
         raise
 
 
-def run_fixed(command: list[str], timeout: int) -> dict[str, Any]:
+def run_fixed(command, timeout):
     completed = subprocess.run(command, cwd=APP_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False, env={**os.environ, "APP_ROOT": str(APP_ROOT)})
     receipt = {"command": command, "exit_code": completed.returncode, "stdout_tail": completed.stdout[-4000:], "stderr_tail": completed.stderr[-4000:]}
     if completed.returncode != 0:
@@ -578,7 +577,7 @@ def run_fixed(command: list[str], timeout: int) -> dict[str, Any]:
     return receipt
 
 
-def restore_staging(candidate_at_dist: bool, staging_backup: Path, candidate_used: Path) -> None:
+def restore_staging(candidate_at_dist, staging_backup, candidate_used):
     if candidate_at_dist:
         if not DIST_DIR.exists() or DIST_DIR.is_symlink():
             raise ReleaseError("candidate staging dist disappeared")
@@ -591,7 +590,7 @@ def restore_staging(candidate_at_dist: bool, staging_backup: Path, candidate_use
         shutil.rmtree(candidate_used)
 
 
-def apply_release(bundle: Path) -> dict[str, Any]:
+def apply_release(bundle):
     validate_bundle(bundle)
     with open_lock(create=True) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -606,10 +605,10 @@ def apply_release(bundle: Path) -> dict[str, Any]:
             raise ReleaseError("staging backup path already exists")
         candidate_at_dist = False
         release_switched = False
-        new_release: str | None = None
-        apply_receipt: dict[str, Any] | None = None
-        failure: Exception | None = None
-        automatic_rollback: dict[str, Any] | None = None
+        new_release = None
+        apply_receipt = None
+        failure = None
+        automatic_rollback = None
         try:
             if not topology()["valid"]:
                 raise ReleaseError("server topology changed under the release lock")
@@ -668,7 +667,7 @@ def apply_release(bundle: Path) -> dict[str, Any]:
         return apply_receipt
 
 
-def rollback_release(bundle: Path) -> dict[str, Any]:
+def rollback_release(bundle):
     with open_lock(create=False) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         baseline = validate_bundle(bundle)
@@ -714,7 +713,7 @@ def rollback_release(bundle: Path) -> dict[str, Any]:
         }
 
 
-def main() -> int:
+def main():
     try:
         if MODE == "audit":
             result = audit_state()

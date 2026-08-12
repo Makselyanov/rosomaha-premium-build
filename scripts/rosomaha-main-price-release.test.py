@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ast
 import json
 import os
 import tempfile
@@ -103,6 +104,55 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         start = raw.index("<<'PY'\n") + len("<<'PY'\n")
         end = raw.rindex("\nPY")
         compile(raw[start:end], str(OPERATOR_PATH), "exec")
+
+    def test_operator_embedded_python_is_python38_syntax_compatible(self) -> None:
+        raw = OPERATOR_PATH.read_text(encoding="utf-8")
+        start = raw.index("<<'PY'\n") + len("<<'PY'\n")
+        end = raw.rindex("\nPY")
+        source = raw[start:end]
+        ast.parse(source, str(OPERATOR_PATH), feature_version=(3, 8))
+        self.assertNotIn(" | None", source)
+        self.assertNotRegex(source, r":\s*(?:dict|list|tuple|set)\[")
+
+    def test_parse_operator_json_accepts_banner_and_exact_json_line(self) -> None:
+        payload = helper.parse_operator_json({
+            "exit_code": 0,
+            "stdout": "Welcome to fixed host\nnotice {not json}\n{\"status\":\"ok\",\"mode\":\"audit\"}\ntrailing banner\n",
+            "stderr": "",
+        })
+        self.assertEqual(payload["mode"], "audit")
+
+    def test_parse_operator_json_rejects_embedded_json_and_returns_bounded_diagnostics(self) -> None:
+        secret = "x" * 80
+        result = {
+            "exit_code": 127,
+            "stdout": "prefix {\"status\":\"ok\"} suffix\n" + ("A" * 700) + f"\ntoken={secret}",
+            "stderr": f"password: {secret}\nAuthorization: Bearer {secret}\nSyntaxError: invalid syntax",
+        }
+        with self.assertRaises(helper.HelperError) as caught:
+            helper.parse_operator_json(result)
+        message = str(caught.exception)
+        self.assertIn("exit_code=127", message)
+        self.assertIn("SyntaxError: invalid syntax", message)
+        self.assertNotIn(secret, message)
+        self.assertIn("[REDACTED]", message)
+        diagnostics = helper.operator_diagnostics(result)
+        stdout_tail = diagnostics.split("stdout_tail=", 1)[1].split("; stderr_tail=", 1)[0]
+        stderr_tail = diagnostics.split("stderr_tail=", 1)[1]
+        self.assertLessEqual(len(stdout_tail), 502)
+        self.assertLessEqual(len(stderr_tail), 502)
+
+    def test_parse_operator_json_redacts_failed_payload_reason(self) -> None:
+        secret = "secret-value-that-must-not-escape"
+        result = {
+            "exit_code": 1,
+            "stdout": json.dumps({"status": "error", "error": f"password={secret}"}),
+            "stderr": "",
+        }
+        with self.assertRaises(helper.HelperError) as caught:
+            helper.parse_operator_json(result)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertIn("password=[REDACTED]", str(caught.exception))
 
     def test_operator_has_no_privileged_or_server_build_path(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")

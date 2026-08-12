@@ -406,16 +406,60 @@ def run_remote(client: paramiko.SSHClient, command: str, stdin_bytes: bytes, tim
     }
 
 
-def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
-    lines = [line for line in result["stdout"].splitlines() if line.strip()]
-    if not lines:
-        raise HelperError("fixed operator returned no JSON receipt")
+def sanitized_diagnostic_tail(value: Any, limit: int = 500) -> str:
+    text = str(value or "")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(
+        r"-----BEGIN [^-]*(?:PRIVATE|OPENSSH) KEY-----.*?-----END [^-]*(?:PRIVATE|OPENSSH) KEY-----",
+        "[REDACTED-PRIVATE-KEY]",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|token|secret|password|passwd|api[_ -]?key|private[_ -]?key)\b"
+        r"(\s*[:=]\s*|\s+)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"(?i)([?&](?:access_token|token|secret|password|api[_-]?key)=)[^&\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9_~+/=-]{48,}(?![A-Za-z0-9])", "[REDACTED-OPAQUE]", text)
+    text = "".join(character if character in "\r\n\t" or ord(character) >= 32 else "?" for character in text)
+    return text[-limit:]
+
+
+def operator_diagnostics(result: dict[str, Any]) -> str:
     try:
-        payload = json.loads(lines[-1])
-    except json.JSONDecodeError as exc:
-        raise HelperError("fixed operator returned invalid JSON") from exc
-    if result["exit_code"] != 0 or payload.get("status") in {"error", "blocked"}:
-        raise HelperError(f"fixed operator failed: {payload.get('error') or payload.get('blockers')}")
+        exit_code = int(result.get("exit_code", -1))
+    except (TypeError, ValueError):
+        exit_code = -1
+    stdout_tail = sanitized_diagnostic_tail(result.get("stdout"), 500)
+    stderr_tail = sanitized_diagnostic_tail(result.get("stderr"), 500)
+    return f"exit_code={exit_code}; stdout_tail={stdout_tail!r}; stderr_tail={stderr_tail!r}"
+
+
+def parse_operator_json(result: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] | None = None
+    for raw_line in reversed(str(result.get("stdout") or "").splitlines()):
+        line = raw_line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+            break
+    if payload is None:
+        raise HelperError(f"fixed operator returned no valid JSON object line; {operator_diagnostics(result)}")
+    if result.get("exit_code") != 0 or payload.get("status") in {"error", "blocked"}:
+        reason = sanitized_diagnostic_tail(payload.get("error") or payload.get("blockers") or "operator rejected the request", 500)
+        raise HelperError(f"fixed operator failed: {reason}; {operator_diagnostics(result)}")
     return payload
 
 
