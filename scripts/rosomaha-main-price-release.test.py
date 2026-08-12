@@ -900,6 +900,12 @@ Allow: /
         self.assertFalse(helper.default_robots_group_blocks_root(allowed))
         self.assertTrue(helper.default_robots_group_blocks_root(blocked))
 
+    def test_public_robots_guard_uses_default_group_parser(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        verify = source[source.index("def public_verify"):source.index("def recovery_audit_matches")]
+        self.assertIn("default_robots_group_blocks_root(robots_raw)", verify)
+        self.assertNotIn('re.search(r"(?im)^\\s*Disallow:', verify)
+
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)

@@ -1669,7 +1669,8 @@ def public_verify(baseline: dict[str, Any], *, stage: str) -> dict[str, Any]:
             raise HelperError(f"public infrastructure URL is not exact HTTP 200: {route}")
         checks[route] = {"status": item["status"], "sha256": sha256_bytes(item["raw"]), "attempts": item["attempts"]}
     robots_raw = read_http(f"{BASE_URL}/robots.txt", accept="text/plain")["raw"].decode("utf-8-sig")
-    if re.search(r"(?im)^\s*Disallow:\s*/\s*$", robots_raw) or f"Sitemap: {BASE_URL}/sitemap-index.xml" not in robots_raw:
+    sitemap_pattern = rf"(?im)^\s*Sitemap:\s*{re.escape(BASE_URL)}/sitemap-index\.xml\s*$"
+    if default_robots_group_blocks_root(robots_raw) or not re.search(sitemap_pattern, robots_raw):
         raise HelperError("public robots.txt blocks crawling or misses sitemap index")
     sitemap_articles = read_http(f"{BASE_URL}/sitemap-articles.xml", accept="application/xml")["raw"]
     expected_article_urls = {f"{BASE_URL}/articles/{slug}" for slug in articles["slugs"]}
