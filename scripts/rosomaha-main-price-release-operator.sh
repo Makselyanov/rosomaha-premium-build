@@ -68,17 +68,36 @@ ROLLBACK_SCRIPT_SHA256 = "aeee52f314036112501a7acc0af5fa09ee7c081327fb867b91c64b
 FIXED_COMMANDS = ("python3", "rsync", "bash", "date", "git", "mkdir", "ln", "readlink", "find", "sort")
 ARTICLES_CZ_ALLOWLIST = (
     "avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts",
+    "bolotohod-ili-kvadrotsikl-kak-vybrat-rosomahu-pod-svoy-marshrut.ts",
     "bolotohod-ili-smert-pochemu-aprel-ubivaet-tehniku-silnee-chem-yanvar.ts",
     "chto-esli-vash-bolotohod-zastryal-nochyu-v-glushi-realnaya-istoriya-spaseniya-i-vyvody.ts",
+    "den-pobedy.ts",
     "dve-nedeli-na-kolesah-dnevnik-motoputeshestviya-po-yuzhnomu-uralu-vesnoy.ts",
+    "elektrika-rosomahi-vo-vlazhnosti-5-voprosov-i-bezopasnyy-chek-list.ts",
     "esli-rosomaha-zaglohla-v-vode-bezopasnyy-poryadok-deystviy-na-marshrute.ts",
     "gryazevoy-turizm-2026-gayd-po-luchshim-marshrutam-tsentralnoy-rossii-i-ne-tolko-dlya-kvadrotsiklov-i-bolotohodov.ts",
     "index.ts",
+    "interesnoe-2.ts",
+    "interesnoe.ts",
     "kak-podderzhat-ohlazhdenie-rosomahi-v-letnyuyu-zharu-prakticheskiy-poryadok.ts",
+    "kak-podgotovit-mosty-rosomahi-k-letnemu-bezdorozhyu-profilakticheskiy-osmotr.ts",
+    "kak-proyti-glubokuyu-koleyu-na-rosomahe-prakticheskie-sovety-po-preodoleniyu-letnih-prepyatstviy.ts",
+    "lebyodka-na-rosomahe-v-letnem-lesu-bezopasnoe-samovytaskivanie.ts",
+    "letnyaya-podveska-rosomahi-proverka-nastroyka-i-obsluzhivanie-pered-bezdorozhem.ts",
     "marshrut-na-bolotohode-v-zharu-chek-list-spokoynoy-poezdki-na-rosomahe.ts",
     "maslo-filtry-rezina-chto-realno-nuzhno-menyat-kazhduyu-vesnu-a-chto-marketing.ts",
+    "pered-brodom-na-rosomahe-7-proverok-kotorye-nelzya-propuskat.ts",
+    "perevozka-gruza-na-rosomahe-ohota-rybalka-i-letniy-marshrut.ts",
+    "perevozka-gruzov-letom-kak-podgotovit-rosomahu-k-ekspeditsii-s-maksimalnoy-zagruzkoy.ts",
+    "podgotovka-rosomahi-k-vodnomu-marshrutu-bezopasnyy-chek-list.ts",
+    "polnyy-chek-list-podgotovki-kvadrotsikla-k-letnemu-sezonu-2026.ts",
     "posle-silnogo-dozhdya-kogda-menyat-marshrut-na-rosomahe.ts",
+    "proverka-rosomahi-posle-marshruta-pyat-shagov-k-osennemu-sezonu.ts",
     "rosomaha-zastryala-v-bolote-spokoynyy-poryadok-deystviy-bez-lishney-suety.ts",
+    "shiny-dlya-letnego-bezdorozhya-chto-vybrat-dlya-gryazi-peska-i-kamenistyh-marshrutov.ts",
+    "shiny-dlya-letney-gryazi-na-rosomahe-vybor-protektora-pod-marshrut.ts",
+    "smeshnoe-2.ts",
+    "smeshnoe.ts",
     "top-5-neochevidnyh-problem-s-kotorymi-stalkivayutsya-vladeltsy-kvadrotsiklov-vesnoy-i-kak-ih-izbezhat.ts",
     "vesenniy-tyuning-7-byudzhetnyh-apgreydov-kotorye-preobrazyat-vash-kvadrotsikl-k-letu.ts",
 )
@@ -91,6 +110,20 @@ BUNDLE_FILES = (
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
+MAX_SCRIPT_BYTES = 256 * 1024
+FIXED_BIN_PATHS = {
+    "bash": "/bin/bash",
+    "python3": "/usr/bin/python3",
+    "rsync": "/usr/bin/rsync",
+    "date": "/usr/bin/date",
+    "git": "/usr/bin/git",
+    "mkdir": "/usr/bin/mkdir",
+    "ln": "/usr/bin/ln",
+    "readlink": "/usr/bin/readlink",
+    "find": "/usr/bin/find",
+    "sort": "/usr/bin/sort",
+}
+FIXED_PATH = "/usr/bin:/bin"
 
 
 class ReleaseError(RuntimeError):
@@ -188,14 +221,16 @@ def tree_manifest(root):
     files = []
     directories = 0
     for current, dir_names, file_names in os.walk(root, followlinks=False):
+        dir_names.sort()
+        file_names.sort()
         current_path = Path(current)
-        for name in sorted(dir_names):
+        for name in dir_names:
             item = current_path / name
             details = os.lstat(item)
             if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode) or not within(root, item):
                 return {"root": str(root), "valid": False, "error": f"unsafe directory: {item}"}
             directories += 1
-        for name in sorted(file_names):
+        for name in file_names:
             item = current_path / name
             details = os.lstat(item)
             if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode) or details.st_nlink != 1 or not within(root, item):
@@ -204,6 +239,7 @@ def tree_manifest(root):
             files.append({"path": relative, "bytes": details.st_size, "sha256": sha256_file(item)})
             if len(files) > MAX_CANDIDATE_FILES:
                 return {"root": str(root), "valid": False, "error": "tree file-count limit exceeded"}
+    files.sort(key=lambda item: item["path"])
     digest = sha256_bytes(canonical_json(files))
     return {"root": str(root), "valid": True, "files": files, "file_count": len(files), "directory_count": directories, "digest": digest}
 
