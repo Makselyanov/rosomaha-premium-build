@@ -1109,25 +1109,28 @@ def run_apply(
 ) -> tuple[dict[str, object], int]:
     operation_id = deterministic_operation_id()
     existing = read_pending(operation_id)
-    unresolved = {
-        "prepared",
-        "remote_dispatched",
-        "ambiguous_apply",
-        "settling",
-        "indeterminate",
-        "needs_rollback",
-    }
-    if existing and existing.get("state") in unresolved:
+    if existing and existing.get("no_apply_retry") is True:
         result = {
             "status": "blocked_pending_recovery",
             "operation_id": operation_id,
             "pending_state": existing.get("state"),
             "pending_receipt": str(pending_receipt_path(operation_id)),
-            "recovery_command": (
-                f"python scripts/bitrix-product-prices.py --recover {operation_id}"
-            ),
             "no_apply_retry": True,
+            "reason": (
+                "This pinned operation is single-shot and its receipt forbids every "
+                "later apply; use read-only recovery evidence, never another apply"
+            ),
         }
+        if existing.get("state") in {
+            "prepared",
+            "remote_dispatched",
+            "ambiguous_apply",
+            "settling",
+            "indeterminate",
+        }:
+            result["recovery_command"] = (
+                f"python scripts/bitrix-product-prices.py --recover {operation_id}"
+            )
         return result, 1
 
     prepared_at = time_fn()

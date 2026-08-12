@@ -322,6 +322,50 @@ class RecoverySafetyTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         execute.assert_not_called()
 
+    def test_recovered_noop_permanently_blocks_second_apply(self) -> None:
+        calls: list[str] = []
+
+        def ambiguous_apply(mode: str, **kwargs: object) -> dict[str, object]:
+            calls.append(mode)
+            self.assertEqual(mode, "apply")
+            callback = kwargs["on_dispatched"]
+            assert callable(callback)
+            callback()
+            raise MODULE.RemoteOperationFailure(
+                "connection lost",
+                mode="apply",
+                operation_id=self.operation_id,
+                command_dispatched=True,
+            )
+
+        first, first_exit = MODULE.run_apply(
+            time_fn=lambda: 1000,
+            execute_fn=ambiguous_apply,
+            verify_fn=Mock(),
+        )
+        self.assertEqual(first["status"], "ambiguous_apply")
+        self.assertEqual(first_exit, 1)
+
+        audit = Mock(return_value=remote_state("all_old"))
+        recovered, recovered_exit = MODULE.recover_operation(
+            self.operation_id,
+            time_fn=lambda: 1166,
+            sleep_fn=Mock(),
+            execute_fn=audit,
+            verify_fn=Mock(return_value={"ok": True, "proof": "old"}),
+        )
+        self.assertEqual(recovered["status"], "recovered_noop")
+        self.assertEqual(recovered_exit, 1)
+        audit.assert_called_once_with("audit")
+
+        second_apply = Mock()
+        blocked, blocked_exit = MODULE.run_apply(execute_fn=second_apply)
+        self.assertEqual(blocked["status"], "blocked_pending_recovery")
+        self.assertEqual(blocked["pending_state"], "recovered_noop")
+        self.assertEqual(blocked_exit, 1)
+        second_apply.assert_not_called()
+        self.assertEqual(calls, ["apply"])
+
 
 class TransportEvidenceTests(unittest.TestCase):
     def test_exec_request_exception_is_conservatively_ambiguous(self) -> None:
