@@ -476,7 +476,9 @@ SAFE_TOPOLOGY_FIELDS = (
     "path", "exists", "realpath", "directory", "regular", "symlink", "nlink",
     "uid", "gid", "mode", "writable", "sticky", "error", "valid",
 )
-MAX_BLOCKED_SUMMARY_CHARS = 8000
+MAX_SAFE_OBSERVED_ARTICLES_CZ = 128
+MAX_SAFE_ARTICLE_FILENAME_CHARS = 240
+MAX_BLOCKED_SUMMARY_CHARS = 64 * 1024
 
 
 def safe_topology_entry(value: Any) -> dict[str, Any]:
@@ -521,8 +523,13 @@ def summarize_blocked_payload(payload: dict[str, Any]) -> str:
         }
         observed = articles_cz.get("observed") if isinstance(articles_cz, dict) else None
         if isinstance(observed, list):
-            bounded = observed[: len(ARTICLES_CZ_ALLOWLIST)]
-            if all(isinstance(name, str) and re.fullmatch(r"[a-z0-9-]+\.ts", name) for name in bounded):
+            bounded = observed[:MAX_SAFE_OBSERVED_ARTICLES_CZ]
+            if all(
+                isinstance(name, str)
+                and len(name) <= MAX_SAFE_ARTICLE_FILENAME_CHARS
+                and re.fullmatch(r"[a-z0-9-]+\.ts", name)
+                for name in bounded
+            ):
                 cz_summary["observed"] = bounded
                 cz_summary["observed_truncated"] = len(observed) > len(bounded)
             else:

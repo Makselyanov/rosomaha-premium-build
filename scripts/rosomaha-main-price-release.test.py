@@ -299,8 +299,8 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         self.assertEqual(sorted(summary["invalid_topology"]), ["directories.dist", "files.server_release"])
         self.assertEqual(summary["invalid_topology"]["directories.dist"]["realpath"], "/srv/escaped/dist")
         self.assertEqual(summary["invalid_topology"]["files.server_release"]["nlink"], 2)
-        self.assertEqual(len(summary["articles_cz"]["observed"]), len(helper.ARTICLES_CZ_ALLOWLIST))
-        self.assertTrue(summary["articles_cz"]["observed_truncated"])
+        self.assertEqual(summary["articles_cz"]["observed"], observed)
+        self.assertFalse(summary["articles_cz"]["observed_truncated"])
         self.assertNotIn(secret, first)
         self.assertNotIn("sha256", first)
         self.assertNotIn("upload/secret.jpg", first)
@@ -340,6 +340,30 @@ class MainPriceReleaseV2Test(unittest.TestCase):
         }
         summary = json.loads(helper.summarize_blocked_payload(payload))
         self.assertEqual(summary["articles_cz"]["observed"], "unsafe filename data omitted")
+
+    def test_blocked_summary_preserves_more_than_fourteen_safe_cz_names(self) -> None:
+        observed = [f"canonical-article-{index:03d}.ts" for index in range(32)]
+        payload = {
+            "status": "blocked",
+            "blockers": ["canonical articles-cz manifest is unsafe"],
+            "topology": {"valid": True, "directories": {}, "files": {}, "current_link": {"valid": True}, "temporary": {"valid": True}},
+            "articles_cz": {"valid": False, "error": "articles-cz allowlist mismatch", "observed": observed},
+        }
+        summary = json.loads(helper.summarize_blocked_payload(payload))
+        self.assertEqual(summary["articles_cz"]["observed"], observed)
+        self.assertFalse(summary["articles_cz"]["observed_truncated"])
+
+    def test_blocked_summary_truncates_cz_names_only_above_128(self) -> None:
+        observed = [f"canonical-article-{index:03d}.ts" for index in range(130)]
+        payload = {
+            "status": "blocked",
+            "blockers": [],
+            "topology": {"valid": True, "directories": {}, "files": {}, "current_link": {"valid": True}, "temporary": {"valid": True}},
+            "articles_cz": {"valid": False, "error": "mismatch", "observed": observed},
+        }
+        summary = json.loads(helper.summarize_blocked_payload(payload))
+        self.assertEqual(summary["articles_cz"]["observed"], observed[:128])
+        self.assertTrue(summary["articles_cz"]["observed_truncated"])
 
     def test_operator_has_no_privileged_or_server_build_path(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
