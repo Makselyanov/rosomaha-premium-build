@@ -117,7 +117,11 @@ function rosomahaPricesResult(array $payload, int $exitCode = 0): void
 
 function rosomahaPricesStage(string $stage): void
 {
-    fwrite(STDERR, "STAGE:{$stage}\n");
+    $stderr = fopen('php://stderr', 'wb');
+    if ($stderr !== false) {
+        fwrite($stderr, "STAGE:{$stage}\n");
+        fclose($stderr);
+    }
 }
 
 function rosomahaPricesProperty(string $key): array
