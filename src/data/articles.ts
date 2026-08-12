@@ -1,5 +1,5 @@
 import { tyumenExhibitionArticle } from './tyumen-exhibition';
-import { czArticles } from './articles-cz';
+import { czArticles } from './articles-cz/index';
 
 export interface Article {
 	id: string;
