@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -83,9 +84,10 @@ class FakeResponse:
         return self.url
 
 
-class MainPriceReleaseV3Test(unittest.TestCase):
+class MainPriceReleaseV4Test(unittest.TestCase):
     def test_fixed_identity_and_commit_are_pinned(self) -> None:
-        self.assertEqual(helper.SCHEMA, "rosomaha-main-price-release/v3")
+        self.assertEqual(helper.SCHEMA, "rosomaha-main-price-release/v4")
+        self.assertEqual(helper.DELTA_SCHEMA, "rosomaha-main-price-delta/v1")
         self.assertEqual(helper.AUDIT_LOGIN, "deploy")
         self.assertEqual(helper.APPLY_LOGIN, "root")
         self.assertEqual(helper.ROLES, {"audit": "deploy", "apply": "root"})
@@ -211,7 +213,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
     def test_candidate_is_closed_before_swap_and_rechecked_before_run(self) -> None:
         source = operator_source()
         body = source[source.index("def apply_release") : source.index("def rollback_release")]
-        extracted = body.index("candidate = extract_candidate")
+        extracted = body.index("candidate, delta_reconstruction = reconstruct_candidate")
         candidate_trust = body.index("trusted_closed_tree(candidate, require_root_mode=0o700)", extracted)
         first_swap = body.index("os.replace(DIST_DIR, staging_backup)")
         second_swap = body.index("os.replace(candidate, DIST_DIR)")
@@ -281,7 +283,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
     def test_trusted_script_snapshot_is_exclusive_private_hashed_and_fsynced(self) -> None:
         source = operator_source()
         reader = source[source.index("def read_verified_script") : source.index("def canonical_json")]
-        writer = source[source.index("def write_new_regular") : source.index("def extract_candidate")]
+        writer = source[source.index("def write_new_regular") : source.index("def reconstruct_candidate")]
         self.assertIn('getattr(os, "O_NOFOLLOW", 0)', reader)
         self.assertIn("os.fstat(fd)", reader)
         self.assertIn("sha256_bytes(raw) != expected_sha", reader)
@@ -315,7 +317,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertNotIn("operator_bytes()", apply_body.replace("frozen_operator = operator_bytes()", ""))
         for expected in (
             'remote_audit(client, "root-audit", APPLY_LOGIN, frozen_operator)',
-            "upload_bundle(client, resolved_baseline, archive, manifest, baseline, frozen_operator)",
+            "client, resolved_baseline, archive, delta_manifest, target_manifest,",
             'invoke_operator(client, "apply", remote_dir, frozen_operator)',
             "recover_ambiguous_apply(remote_dir, baseline, exc, frozen_operator)",
         ):
@@ -428,7 +430,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
 
             def listdir(self, remote_dir: str):  # noqa: ANN001
                 self.listdir_remote_dir = remote_dir
-                return ["candidate.tar.gz.part", "operator.sh"]
+                return ["delta.tar.gz.part", "operator.sh"]
 
             def lstat(self, path: str):  # noqa: ANN001
                 if path == remote_dir:
@@ -446,7 +448,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertTrue(helper.cleanup_bundle_sftp(sftp, remote_dir))
         self.assertEqual(
             sftp.removed,
-            [f"{remote_dir}/candidate.tar.gz.part", f"{remote_dir}/operator.sh"],
+            [f"{remote_dir}/delta.tar.gz.part", f"{remote_dir}/operator.sh"],
         )
         self.assertEqual(sftp.rmdir_calls, [remote_dir])
 
@@ -489,7 +491,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
                 return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1000, st_nlink=1)
 
             def listdir(self, _remote_dir: str):
-                return ["candidate.tar.gz.part"]
+                return ["delta.tar.gz.part"]
 
             def remove(self, _path: str):
                 self.remove_called = True
@@ -853,7 +855,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
     def test_operator_rechecks_full_baseline_immediately_before_swap_and_after_release(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
         body = text[text.index("def apply_release") : text.index("def rollback_release")]
-        extract_at = body.index("candidate = extract_candidate")
+        extract_at = body.index("candidate, delta_reconstruction = reconstruct_candidate")
         final_at = body.index("final_fresh = verify_fresh_baseline", extract_at)
         swap_at = body.index("os.replace(DIST_DIR, staging_backup)")
         self.assertLess(extract_at, final_at)
@@ -864,7 +866,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
 
     def test_operator_rollback_proves_articles_cz_baseline(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
-        verifier = text[text.index("def verify_exact_baseline_state"):text.index("def extract_candidate")]
+        verifier = text[text.index("def verify_exact_baseline_state"):text.index("def reconstruct_candidate")]
         rollback = text[text.index("def rollback_release"):text.index("def main")]
         self.assertIn("cz_manifest = articles_cz_manifest()", verifier)
         self.assertIn('baseline.get("articles_cz", {}).get("digest")', verifier)
@@ -879,7 +881,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
     def test_operator_requires_raw_article_sha_parity(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
         self.assertIn('len({item.get("sha256") for item in articles.values()}) == 1', text)
-        self.assertIn('articles["sha256"] != canonical["sha256"]', text)
+        self.assertIn('articles["sha256"] == canonical["sha256"]', text)
         self.assertIn('current_articles.get("sha256") != baseline["articles"]["canonical"].get("sha256")', text)
 
     def test_exact_price_value_rejects_fractional_and_float(self) -> None:
@@ -1469,7 +1471,7 @@ Allow: /
             mock.patch.object(helper, "operator_bytes", return_value=b"operator"),
             mock.patch.object(
                 helper, "load_baseline_with_operator",
-                return_value=(baseline, Path("baseline.json"), Path("candidate.tar.gz"), Path("candidate-manifest.json")),
+                return_value=(baseline, Path("baseline.json"), Path("delta.tar.gz"), Path("delta-manifest.json"), Path("target-manifest.json")),
             ),
             mock.patch.object(helper, "connect", return_value=(client, {"login": helper.APPLY_LOGIN})),
             mock.patch.object(
@@ -1500,7 +1502,7 @@ Allow: /
             helper, "operator_bytes", return_value=b"operator",
         ), mock.patch.object(
             helper, "load_baseline_with_operator",
-            return_value=(baseline, Path("baseline.json"), Path("candidate.tar.gz"), Path("candidate-manifest.json")),
+            return_value=(baseline, Path("baseline.json"), Path("delta.tar.gz"), Path("delta-manifest.json"), Path("target-manifest.json")),
         ), mock.patch.object(helper, "connect", return_value=(client, {"login": helper.APPLY_LOGIN})), mock.patch.object(
             helper, "remote_audit",
             return_value={"server_baseline_token": "server-token", "account": helper.APPLY_LOGIN,
@@ -1518,18 +1520,192 @@ Allow: /
         self.assertEqual(payload["status"], "verification_failed_rolled_back_cleanup_required")
         self.assertTrue(payload["bundle_preserved"])
 
-    def test_candidate_archive_members_are_fixed_under_dist(self) -> None:
+    def test_delta_archive_members_are_exact_changed_files_under_delta(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
             root = Path(raw_root)
             dist = root / "dist"
             dist.mkdir()
             (dist / "index.html").write_text("ok", encoding="utf-8")
-            manifest = helper.tree_manifest(dist)
-            archive, _manifest_path = helper.write_candidate_archive(dist, manifest, root)
+            base = root / "base"
+            base.mkdir()
+            (base / "old.txt").write_text("old", encoding="utf-8")
+            target_manifest = helper.tree_manifest(dist)
+            base_manifest = helper.tree_manifest(base)
+            archive, _delta_path, _target_path, delta = helper.write_delta_bundle(
+                dist, target_manifest, base_manifest, root,
+            )
             import tarfile
             with tarfile.open(archive, "r:gz") as handle:
                 names = handle.getnames()
-            self.assertEqual(names, ["dist/index.html"])
+            self.assertEqual(names, ["delta/index.html"])
+            self.assertEqual(delta["deleted"], ["old.txt"])
+
+    def test_v4_target_manifest_rejects_extra_missing_and_hash_mutation(self) -> None:
+        namespace = operator_namespace()
+        validate = namespace["validate_target_manifest"]
+        canonical_json = namespace["canonical_json"]
+        sha256_bytes = namespace["sha256_bytes"]
+        release_error = namespace["ReleaseError"]
+        files = [{"path": "index.html", "bytes": 2, "sha256": "a" * 64}]
+        valid = {
+            "valid": True, "files": files, "file_count": 1,
+            "directory_count": 0, "digest": sha256_bytes(canonical_json(files)),
+        }
+        self.assertEqual(validate(valid), valid)
+        extra = json.loads(json.dumps(valid))
+        extra["files"].append({"path": "extra.txt", "bytes": 1, "sha256": "b" * 64})
+        with self.assertRaises(release_error):
+            validate(extra)
+        missing = json.loads(json.dumps(valid))
+        missing["files"] = []
+        with self.assertRaises(release_error):
+            validate(missing)
+        mutated = json.loads(json.dumps(valid))
+        mutated["files"][0]["sha256"] = "c" * 64
+        with self.assertRaises(release_error):
+            validate(mutated)
+
+    def test_v4_delta_manifest_binds_exact_add_modify_delete_and_archive_hash(self) -> None:
+        namespace = operator_namespace()
+        canonical_json = namespace["canonical_json"]
+        sha256_bytes = namespace["sha256_bytes"]
+        release_error = namespace["ReleaseError"]
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            base_files = [
+                {"path": "delete.txt", "bytes": 3, "sha256": "d" * 64},
+                {"path": "index.html", "bytes": 3, "sha256": "a" * 64},
+            ]
+            target_files = [
+                {"path": "added.txt", "bytes": 2, "sha256": "b" * 64},
+                {"path": "index.html", "bytes": 4, "sha256": "c" * 64},
+            ]
+            make_manifest = lambda files: {  # noqa: E731
+                "valid": True, "files": files, "file_count": len(files),
+                "directory_count": 0, "digest": sha256_bytes(canonical_json(files)),
+            }
+            base = make_manifest(base_files)
+            target = make_manifest(target_files)
+            target_path = root / "target-manifest.json"
+            target_path.write_bytes(canonical_json(target) + b"\n")
+            archive = root / "delta.tar.gz"
+            archive.write_bytes(b"fixed archive")
+            changed, deleted = namespace["expected_delta"](base, target)
+            delta = {
+                "schema": namespace["DELTA_SCHEMA"],
+                "base": namespace["manifest_summary"](base),
+                "target": {
+                    **namespace["manifest_summary"](target),
+                    "manifest_sha256": namespace["sha256_file"](target_path),
+                },
+                "changed": changed, "deleted": deleted,
+                "added_count": 1, "modified_count": 1,
+                "changed_count": 2, "deleted_count": 1,
+                "expanded_bytes": 6,
+                "archive": {
+                    "name": "delta.tar.gz", "sha256": namespace["sha256_file"](archive),
+                    "bytes": archive.stat().st_size,
+                },
+            }
+            baseline = {"staging_dist": base}
+            self.assertEqual(
+                namespace["validate_delta_manifest"](delta, baseline, target, archive),
+                (changed, deleted),
+            )
+            wrong_delete = json.loads(json.dumps(delta))
+            wrong_delete["deleted"] = []
+            with self.assertRaises(release_error):
+                namespace["validate_delta_manifest"](wrong_delete, baseline, target, archive)
+            wrong_hash = json.loads(json.dumps(delta))
+            wrong_hash["changed"][0]["sha256"] = "e" * 64
+            with self.assertRaises(release_error):
+                namespace["validate_delta_manifest"](wrong_hash, baseline, target, archive)
+            archive.write_bytes(b"tampered archive")
+            with self.assertRaises(release_error):
+                namespace["validate_delta_manifest"](delta, baseline, target, archive)
+
+    def test_v4_delta_archive_rejects_traversal_symlink_extra_and_missing_member(self) -> None:
+        namespace = operator_namespace()
+        validate = namespace["validated_delta_archive_members"]
+        release_error = namespace["ReleaseError"]
+        expected = {"index.html": {"path": "index.html", "bytes": 2, "sha256": "a" * 64, "kind": "modified"}}
+
+        def member(name: str, *, kind: bytes = tarfile.REGTYPE, size: int = 2):
+            item = tarfile.TarInfo(name)
+            item.type = kind
+            item.size = size
+            return item
+
+        class FakeArchive:
+            def __init__(self, members):
+                self.members = members
+
+            def getmembers(self):
+                return self.members
+
+        self.assertEqual(validate(FakeArchive([member("delta/index.html")]), expected)[0][1], "index.html")
+        for invalid in (
+            [member("delta/../index.html")],
+            [member("delta/index.html", kind=tarfile.SYMTYPE)],
+            [member("delta/index.html"), member("delta/extra.html")],
+            [],
+        ):
+            with self.assertRaises(release_error):
+                validate(FakeArchive(invalid), expected)
+
+    def test_v4_delta_base_drift_is_fail_closed(self) -> None:
+        namespace = operator_namespace()
+        release_error = namespace["ReleaseError"]
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            base = root / "base"
+            base.mkdir()
+            source = base / "index.html"
+            source.write_text("ok", encoding="utf-8")
+            expected = helper.tree_manifest(base)
+            namespace["APP_ROOT"] = root
+            namespace["DIST_DIR"] = base
+            original_tree_manifest = namespace["tree_manifest"]
+            drifted = json.loads(json.dumps(expected))
+            drifted["digest"] = "f" * 64
+            namespace["tree_manifest"] = mock.Mock(return_value=drifted)
+            try:
+                with self.assertRaises(release_error):
+                    namespace["copy_delta_base"](root / "candidate", {"staging_dist": expected})
+            finally:
+                namespace["tree_manifest"] = original_tree_manifest
+
+
+    def test_v4_delta_base_symlink_is_fail_closed_without_platform_symlink_support(self) -> None:
+        namespace = operator_namespace()
+        release_error = namespace["ReleaseError"]
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            root = Path(raw_root)
+            source = root / "source.html"
+            source.write_text("ok", encoding="utf-8")
+            item = {
+                "path": "source.html", "bytes": source.stat().st_size,
+                "sha256": helper.sha256_file(source),
+            }
+            real_lstat = namespace["os"].lstat
+
+            def symlink_lstat(path):
+                if Path(path) == source:
+                    return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+                return real_lstat(path)
+
+            with mock.patch.object(namespace["os"], "lstat", side_effect=symlink_lstat):
+                with self.assertRaises(release_error):
+                    namespace["copy_regular_verified"](source, root / "copied.html", item)
+
+    def test_v4_transport_upload_excludes_full_candidate_archive(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        upload = source[source.index("def upload_bundle") : source.index("def cleanup_bundle_sftp")]
+        self.assertIn('"delta.tar.gz"', upload)
+        self.assertIn('"delta-manifest.json"', upload)
+        self.assertIn('"target-manifest.json"', upload)
+        self.assertNotIn("candidate.tar.gz", upload)
+        self.assertNotIn("candidate-manifest.json", upload)
 
 
 if __name__ == "__main__":

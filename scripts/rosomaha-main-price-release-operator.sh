@@ -46,7 +46,8 @@ from pathlib import Path, PurePosixPath
 MODE = sys.argv[1]
 BUNDLE_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
 
-SCHEMA = "rosomaha-main-price-release/v3"
+SCHEMA = "rosomaha-main-price-release/v4"
+DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
 HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
@@ -103,12 +104,15 @@ ARTICLES_CZ_ALLOWLIST = (
 )
 BUNDLE_FILES = (
     "baseline.json",
-    "candidate.tar.gz",
-    "candidate-manifest.json",
+    "delta.tar.gz",
+    "delta-manifest.json",
+    "target-manifest.json",
     "operator.sh",
 )
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
+MAX_DELTA_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_DELTA_FILES = 1_000
+MAX_TARGET_BYTES = 1024 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
 MAX_SCRIPT_BYTES = 256 * 1024
 FIXED_BIN_PATHS = {
@@ -859,6 +863,113 @@ def open_lock(*, create):
         raise
 
 
+def valid_relative_path(value):
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096 or "\\" in value or "\x00" in value:
+        return False
+    pure = PurePosixPath(value)
+    return bool(
+        not pure.is_absolute() and pure.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in pure.parts)
+    )
+
+
+def validate_target_manifest(value):
+    expected_keys = {"valid", "files", "file_count", "directory_count", "digest"}
+    if not isinstance(value, dict) or set(value) != expected_keys or value.get("valid") is not True:
+        raise ReleaseError("target manifest shape mismatch")
+    files = value.get("files")
+    if not isinstance(files, list) or not files or len(files) > MAX_CANDIDATE_FILES:
+        raise ReleaseError("target manifest file list is invalid")
+    paths = []
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"path", "bytes", "sha256"}:
+            raise ReleaseError("target manifest entry shape mismatch")
+        path = item.get("path")
+        size = item.get("bytes")
+        digest = item.get("sha256")
+        if (
+            not valid_relative_path(path) or isinstance(size, bool) or not isinstance(size, int) or size < 0
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ReleaseError("target manifest entry is invalid")
+        paths.append(path)
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ReleaseError("target manifest paths are not exact sorted unique paths")
+    path_set = set(paths)
+    for path in paths:
+        if any(parent.as_posix() in path_set for parent in PurePosixPath(path).parents if parent.as_posix() != "."):
+            raise ReleaseError("target manifest has a file/directory path conflict")
+    if (
+        value.get("file_count") != len(files)
+        or isinstance(value.get("directory_count"), bool)
+        or not isinstance(value.get("directory_count"), int)
+        or value["directory_count"] < 0
+        or sum(item["bytes"] for item in files) > MAX_TARGET_BYTES
+        or value.get("digest") != sha256_bytes(canonical_json(files))
+    ):
+        raise ReleaseError("target manifest digest/count mismatch")
+    return value
+
+
+def manifest_summary(value):
+    return {
+        "digest": value["digest"], "file_count": value["file_count"],
+        "directory_count": value["directory_count"],
+        "files_digest": sha256_bytes(canonical_json(value["files"])),
+    }
+
+
+def observed_manifest_summary(value):
+    return manifest_summary(tree_contract(value))
+
+
+def expected_delta(base, target):
+    base_files = {item["path"]: item for item in base["files"]}
+    target_files = {item["path"]: item for item in target["files"]}
+    changed = []
+    for path, item in sorted(target_files.items()):
+        previous = base_files.get(path)
+        if previous != item:
+            changed.append({**item, "kind": "added" if previous is None else "modified"})
+    return changed, sorted(set(base_files) - set(target_files))
+
+
+def validate_delta_manifest(delta, baseline, target, archive):
+    if not isinstance(delta, dict) or set(delta) != {
+        "schema", "base", "target", "changed", "deleted", "added_count",
+        "modified_count", "changed_count", "deleted_count", "expanded_bytes", "archive",
+    } or delta.get("schema") != DELTA_SCHEMA:
+        raise ReleaseError("delta manifest shape/schema mismatch")
+    base = baseline.get("staging_dist")
+    if not isinstance(base, dict) or not isinstance(base.get("files"), list):
+        raise ReleaseError("baseline does not contain the full staging manifest")
+    validate_target_manifest({key: base.get(key) for key in ("valid", "files", "file_count", "directory_count", "digest")})
+    target_raw = (Path(archive).parent / "target-manifest.json").read_bytes()
+    expected_base = manifest_summary(base)
+    expected_target = {**manifest_summary(target), "manifest_sha256": sha256_bytes(target_raw)}
+    if delta.get("base") != expected_base or delta.get("target") != expected_target:
+        raise ReleaseError("delta base/target binding mismatch")
+    changed, deleted = expected_delta(base, target)
+    if delta.get("changed") != changed or delta.get("deleted") != deleted:
+        raise ReleaseError("delta change/delete set mismatch")
+    expanded = sum(item["bytes"] for item in changed)
+    if (
+        len(changed) > MAX_DELTA_FILES or expanded > MAX_DELTA_EXPANDED_BYTES
+        or delta.get("added_count") != sum(item["kind"] == "added" for item in changed)
+        or delta.get("modified_count") != sum(item["kind"] == "modified" for item in changed)
+        or delta.get("changed_count") != len(changed)
+        or delta.get("deleted_count") != len(deleted)
+        or delta.get("expanded_bytes") != expanded
+    ):
+        raise ReleaseError("delta count/expanded-size mismatch")
+    archive_info = delta.get("archive")
+    if archive_info != {
+        "name": "delta.tar.gz", "sha256": sha256_file(archive), "bytes": archive.stat().st_size,
+    }:
+        raise ReleaseError("delta archive binding mismatch")
+    return changed, deleted
+
+
 def validate_bundle(bundle):
     match = re.fullmatch(r"/tmp/rosomaha-main-price-release-64ba304-([0-9a-f]{16})", str(bundle))
     if not match:
@@ -866,6 +977,10 @@ def validate_bundle(bundle):
     details = os.lstat(bundle)
     if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode) or str(bundle.resolve(strict=True)) != str(bundle) or details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o700:
         raise ReleaseError("unsafe bundle directory")
+    observed_names = sorted(item.name for item in bundle.iterdir())
+    expected_names = sorted(BUNDLE_FILES)
+    if observed_names not in (expected_names, sorted((*BUNDLE_FILES, "apply-receipt.json"))):
+        raise ReleaseError("bundle file set mismatch")
     for name in BUNDLE_FILES:
         path = bundle / name
         item = os.lstat(path)
@@ -889,15 +1004,35 @@ def validate_bundle(bundle):
         raise ReleaseError("full bundle baseline token mismatch")
     if sha256_file(bundle / "operator.sh") != baseline.get("operator_sha256"):
         raise ReleaseError("bundle operator mismatch")
-    archive = bundle / "candidate.tar.gz"
-    if archive.stat().st_size > MAX_ARCHIVE_BYTES or sha256_file(archive) != baseline.get("candidate", {}).get("archive_sha256"):
-        raise ReleaseError("candidate archive mismatch")
-    manifest_raw = (bundle / "candidate-manifest.json").read_bytes()
-    if sha256_bytes(manifest_raw) != baseline.get("candidate", {}).get("manifest_sha256"):
-        raise ReleaseError("candidate manifest mismatch")
-    manifest = json.loads(manifest_raw.decode("utf-8"))
-    if manifest.get("digest") != baseline.get("candidate", {}).get("tree_digest"):
-        raise ReleaseError("candidate tree digest mismatch")
+    candidate = baseline.get("candidate", {})
+    archive = bundle / "delta.tar.gz"
+    if (
+        archive.stat().st_size > MAX_DELTA_ARCHIVE_BYTES
+        or archive.stat().st_size != candidate.get("archive_bytes")
+        or sha256_file(archive) != candidate.get("archive_sha256")
+    ):
+        raise ReleaseError("candidate delta archive mismatch")
+    delta_raw = (bundle / "delta-manifest.json").read_bytes()
+    target_raw = (bundle / "target-manifest.json").read_bytes()
+    if sha256_bytes(delta_raw) != candidate.get("delta_manifest_sha256"):
+        raise ReleaseError("candidate delta manifest mismatch")
+    if sha256_bytes(target_raw) != candidate.get("target_manifest_sha256"):
+        raise ReleaseError("candidate target manifest mismatch")
+    target = validate_target_manifest(json.loads(target_raw.decode("utf-8")))
+    delta = json.loads(delta_raw.decode("utf-8"))
+    validate_delta_manifest(delta, baseline, target, archive)
+    if (
+        target.get("digest") != candidate.get("tree_digest")
+        or target.get("file_count") != candidate.get("file_count")
+        or target.get("directory_count") != candidate.get("directory_count")
+        or baseline.get("staging_dist", {}).get("digest") != candidate.get("base_tree_digest")
+        or candidate.get("delta") != {
+            "added_count": delta["added_count"], "modified_count": delta["modified_count"],
+            "changed_count": delta["changed_count"], "deleted_count": delta["deleted_count"],
+            "expanded_bytes": delta["expanded_bytes"],
+        }
+    ):
+        raise ReleaseError("candidate delta baseline summary mismatch")
     return baseline
 
 
@@ -1036,59 +1171,236 @@ def materialize_trusted_scripts(bundle, token, purpose):
         raise
 
 
-def extract_candidate(bundle, baseline):
+def tree_contract(value):
+    return {
+        key: value.get(key)
+        for key in ("valid", "files", "file_count", "directory_count", "digest")
+    }
+
+
+def copy_regular_verified(source, target, expected):
+    source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(source, source_flags)
+    target_fd = -1
+    try:
+        before = os.fstat(source_fd)
+        linked = os.lstat(source)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or stat.S_ISLNK(linked.st_mode)
+            or (before.st_dev, before.st_ino) != (linked.st_dev, linked.st_ino)
+            or before.st_size != expected["bytes"]
+        ):
+            raise ReleaseError(f"unsafe delta base file: {source}")
+        mode = stat.S_IMODE(before.st_mode)
+        if mode & 0o022:
+            raise ReleaseError(f"writable delta base file: {source}")
+        target_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        old_umask = os.umask(0)
+        try:
+            target_fd = os.open(target, target_flags, mode)
+        finally:
+            os.umask(old_umask)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(target_fd, view)
+                if written <= 0:
+                    raise ReleaseError(f"short delta base write: {target}")
+                view = view[written:]
+        os.fsync(target_fd)
+        after = os.fstat(source_fd)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or copied != expected["bytes"] or digest.hexdigest() != expected["sha256"]
+        ):
+            raise ReleaseError(f"delta base file changed during copy: {source}")
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        os.close(source_fd)
+    copied_info = os.lstat(target)
+    if (
+        not stat.S_ISREG(copied_info.st_mode) or stat.S_ISLNK(copied_info.st_mode)
+        or copied_info.st_nlink != 1 or copied_info.st_uid != 0
+        or copied_info.st_size != expected["bytes"] or sha256_file(target) != expected["sha256"]
+    ):
+        raise ReleaseError(f"copied delta base file mismatch: {target}")
+
+
+def copy_delta_base(candidate, baseline):
+    expected = baseline["staging_dist"]
+    before = tree_manifest(DIST_DIR)
+    if canonical_json(tree_contract(before)) != canonical_json(tree_contract(expected)):
+        raise ReleaseError("delta base tree differs before reconstruction")
+    trust = trusted_closed_tree(DIST_DIR)
+    if not trust.get("valid"):
+        raise ReleaseError("delta base tree is not a trusted closed tree")
+    expected_files = {item["path"]: item for item in expected["files"]}
+    old_umask = os.umask(0)
+    try:
+        os.mkdir(candidate, 0o700)
+    finally:
+        os.umask(old_umask)
+    for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False):
+        dir_names.sort()
+        file_names.sort()
+        current_path = Path(current)
+        relative_current = current_path.relative_to(DIST_DIR)
+        target_current = candidate / relative_current
+        for name in dir_names:
+            source_dir = current_path / name
+            source_info = os.lstat(source_dir)
+            if (
+                not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
+                or source_info.st_uid != 0 or stat.S_IMODE(source_info.st_mode) & 0o022
+                or not within(DIST_DIR, source_dir)
+            ):
+                raise ReleaseError(f"unsafe delta base directory: {source_dir}")
+            target_dir = target_current / name
+            old_umask = os.umask(0)
+            try:
+                os.mkdir(target_dir, stat.S_IMODE(source_info.st_mode))
+            finally:
+                os.umask(old_umask)
+        for name in file_names:
+            source = current_path / name
+            relative = source.relative_to(DIST_DIR).as_posix()
+            item = expected_files.get(relative)
+            if item is None:
+                raise ReleaseError(f"unexpected delta base file: {relative}")
+            copy_regular_verified(source, target_current / name, item)
+    copied = tree_manifest(candidate)
+    if canonical_json(tree_contract(copied)) != canonical_json(tree_contract(expected)):
+        raise ReleaseError("root-private delta base copy mismatch")
+    return before
+
+
+def remove_empty_candidate_directories(candidate):
+    for current, _dir_names, _file_names in os.walk(candidate, topdown=False, followlinks=False):
+        path = Path(current)
+        if path == candidate:
+            continue
+        details = os.lstat(path)
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode) or not within(candidate, path):
+            raise ReleaseError(f"unsafe candidate directory during prune: {path}")
+        if not any(path.iterdir()):
+            os.rmdir(path)
+
+
+def validated_delta_archive_members(archive, expected_changed):
+    members = archive.getmembers()
+    if len(members) > MAX_DELTA_FILES:
+        raise ReleaseError("delta archive member-count limit exceeded")
+    regular = []
+    for member in members:
+        pure = PurePosixPath(member.name)
+        if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] != "delta":
+            raise ReleaseError(f"unsafe delta archive path: {member.name}")
+        relative = PurePosixPath(*pure.parts[1:]).as_posix()
+        if (
+            not member.isfile() or member.issym() or member.islnk()
+            or not valid_relative_path(relative) or relative not in expected_changed
+        ):
+            raise ReleaseError(f"unsafe delta archive member: {member.name}")
+        if member.size != expected_changed[relative]["bytes"]:
+            raise ReleaseError(f"delta archive member declared size mismatch: {relative}")
+        regular.append((member, relative))
+    paths = [relative for _, relative in regular]
+    if len(paths) != len(set(paths)) or set(paths) != set(expected_changed):
+        raise ReleaseError("delta archive/manifest path set mismatch")
+    return regular
+
+
+def reconstruct_candidate(bundle, baseline):
     token = baseline["baseline_token"][:16]
     candidate = APP_ROOT / f".price-candidate-{token}"
     if candidate.exists() or candidate.is_symlink():
-        raise ReleaseError("candidate extraction path already exists")
-    manifest = json.loads((bundle / "candidate-manifest.json").read_text(encoding="utf-8"))
-    expected = {item["path"]: item for item in manifest.get("files", [])}
-    if not expected or len(expected) > MAX_CANDIDATE_FILES or len(expected) != len(manifest.get("files", [])):
-        raise ReleaseError("invalid candidate manifest")
-    if any(not isinstance(item.get("bytes"), int) or item["bytes"] < 0 for item in expected.values()) or sum(item["bytes"] for item in expected.values()) > MAX_EXPANDED_BYTES:
-        raise ReleaseError("candidate expanded-size limit exceeded")
-    old_umask = os.umask(0)
+        raise ReleaseError("candidate reconstruction path already exists")
+    target = validate_target_manifest(json.loads((bundle / "target-manifest.json").read_text(encoding="utf-8")))
+    delta = json.loads((bundle / "delta-manifest.json").read_text(encoding="utf-8"))
+    changed, deleted = validate_delta_manifest(delta, baseline, target, bundle / "delta.tar.gz")
+    expected_changed = {item["path"]: item for item in changed}
     try:
-        candidate.mkdir(mode=0o700)
-    finally:
-        os.umask(old_umask)
-    try:
-        with tarfile.open(bundle / "candidate.tar.gz", "r:gz") as archive:
-            members = archive.getmembers()
-            regular = []
-            for member in members:
-                pure = PurePosixPath(member.name)
-                if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] != "dist":
-                    raise ReleaseError(f"unsafe archive path: {member.name}")
-                relative = PurePosixPath(*pure.parts[1:]).as_posix()
-                if member.isdir():
-                    continue
-                if not member.isfile() or member.issym() or member.islnk() or not relative or relative not in expected:
-                    raise ReleaseError(f"unsafe archive member: {member.name}")
-                if member.size != expected[relative]["bytes"]:
-                    raise ReleaseError(f"archive member declared size mismatch: {relative}")
-                regular.append((member, relative))
-            if {relative for _, relative in regular} != set(expected):
-                raise ReleaseError("archive/manifest path set mismatch")
+        copy_delta_base(candidate, baseline)
+        for relative in deleted:
+            target_path = candidate / Path(relative)
+            info = safe_file(target_path, root=candidate)
+            if not info.get("valid") or info.get("uid") != 0:
+                raise ReleaseError(f"unsafe candidate deletion path: {relative}")
+            os.unlink(target_path)
+        with tarfile.open(bundle / "delta.tar.gz", "r:gz") as archive:
+            regular = validated_delta_archive_members(archive, expected_changed)
             for member, relative in regular:
-                target = candidate / Path(relative)
-                ensure_candidate_parent(candidate, target.parent)
+                output = candidate / Path(relative)
+                ensure_candidate_parent(candidate, output.parent)
+                item = expected_changed[relative]
+                existing = safe_file(output, root=candidate) if output.exists() or output.is_symlink() else None
+                if item["kind"] == "modified":
+                    if not existing or not existing.get("valid") or existing.get("uid") != 0:
+                        raise ReleaseError(f"delta modified path is unavailable: {relative}")
+                    os.unlink(output)
+                elif existing is not None:
+                    raise ReleaseError(f"delta added path already exists: {relative}")
                 source = archive.extractfile(member)
                 if source is None:
-                    raise ReleaseError(f"archive member unreadable: {relative}")
-                raw = source.read()
-                item = expected[relative]
+                    raise ReleaseError(f"delta archive member unreadable: {relative}")
+                raw = source.read(item["bytes"] + 1)
                 if len(raw) != item["bytes"] or sha256_bytes(raw) != item["sha256"]:
-                    raise ReleaseError(f"archive member hash mismatch: {relative}")
-                write_new_regular(target, raw, 0o644)
+                    raise ReleaseError(f"delta archive member hash mismatch: {relative}")
+                write_new_regular(output, raw, 0o644)
+        remove_empty_candidate_directories(candidate)
         actual = tree_manifest(candidate)
-        if not actual["valid"] or actual["digest"] != manifest["digest"]:
-            raise ReleaseError("extracted candidate tree mismatch")
+        target_exact = canonical_json(tree_contract(actual)) == canonical_json(target)
+        if not target_exact:
+            raise ReleaseError("reconstructed candidate full target manifest mismatch")
+        base_after = tree_manifest(DIST_DIR)
+        base_expected = tree_contract(baseline["staging_dist"])
+        base_exact = canonical_json(tree_contract(base_after)) == canonical_json(base_expected)
+        if not base_exact:
+            raise ReleaseError("original delta base changed during reconstruction")
         articles = article_file(candidate / "api/articles.json", "candidate")
         canonical = baseline["articles"]["canonical"]
-        if not articles["valid"] or articles["sha256"] != canonical["sha256"] or articles["slug_digest"] != canonical["slug_digest"]:
+        article_exact = bool(
+            articles["valid"] and articles["sha256"] == canonical["sha256"]
+            and articles["slug_digest"] == canonical["slug_digest"]
+        )
+        if not article_exact:
             raise ReleaseError("candidate article export differs from canonical export")
-        return candidate
+        evidence = {
+            "base": {
+                "expected": manifest_summary(base_expected),
+                "observed_before": observed_manifest_summary(before),
+                "observed_after": observed_manifest_summary(base_after),
+                "exact_match": base_exact,
+            },
+            "target": {
+                "expected": manifest_summary(target),
+                "observed": observed_manifest_summary(actual),
+                "exact_match": target_exact,
+            },
+            "delta": {
+                "added": sum(item["kind"] == "added" for item in changed),
+                "modified": sum(item["kind"] == "modified" for item in changed),
+                "changed": len(changed), "deleted": len(deleted),
+            },
+            "article_parity": {
+                "expected_sha256": canonical["sha256"],
+                "observed_sha256": articles["sha256"],
+                "expected_slug_digest": canonical["slug_digest"],
+                "observed_slug_digest": articles["slug_digest"],
+                "exact_match": article_exact,
+            },
+            "exact_match": base_exact and target_exact and article_exact,
+        }
+        return candidate, evidence
     except Exception:
         shutil.rmtree(candidate, ignore_errors=True)
         raise
@@ -1157,7 +1469,7 @@ def apply_release(bundle):
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         baseline = validate_bundle(bundle)
         fresh = verify_fresh_baseline(baseline)
-        candidate = extract_candidate(bundle, baseline)
+        candidate, delta_reconstruction = reconstruct_candidate(bundle, baseline)
         token = baseline["baseline_token"][:16]
         trusted_root = None
         trusted_scripts = None
@@ -1194,7 +1506,8 @@ def apply_release(bundle):
             if (
                 not moved_trust.get("valid")
                 or not moved_manifest.get("valid")
-                or moved_manifest.get("digest") != baseline["candidate"]["tree_digest"]
+                or canonical_json(tree_contract(moved_manifest))
+                != canonical_json(validate_target_manifest(json.loads((bundle / "target-manifest.json").read_text(encoding="utf-8"))))
             ):
                 raise ReleaseError("candidate staging tree changed during atomic swap")
             mutation_before_run = root_mutation_topology(
@@ -1216,7 +1529,11 @@ def apply_release(bundle):
             if not release_trust.get("valid") or not mutation_after_run.get("valid"):
                 raise ReleaseError("released root mutation topology is unsafe")
             released_manifest = tree_manifest(Path(new_release))
-            if not released_manifest["valid"] or released_manifest["digest"] != baseline["candidate"]["tree_digest"]:
+            if (
+                not released_manifest["valid"]
+                or canonical_json(tree_contract(released_manifest))
+                != canonical_json(validate_target_manifest(json.loads((bundle / "target-manifest.json").read_text(encoding="utf-8"))))
+            ):
                 raise ReleaseError("released tree differs from candidate")
             current_articles = article_file(Path(new_release) / "api/articles.json", "released")
             if current_articles.get("sha256") != baseline["articles"]["canonical"].get("sha256"):
@@ -1244,6 +1561,7 @@ def apply_release(bundle):
                 "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
                 "previous_release": baseline["current_release"], "new_release": new_release,
                 "candidate_tree_digest": baseline["candidate"]["tree_digest"], "release": release_receipt,
+                "delta_reconstruction": delta_reconstruction,
             }
             receipt_path = bundle / "apply-receipt.json"
             write_new_regular(

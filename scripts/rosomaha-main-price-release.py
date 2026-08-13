@@ -41,7 +41,8 @@ OPERATOR_PATH = PROJECT_ROOT / "scripts/rosomaha-main-price-release-operator.sh"
 REPORT_ROOT = PROJECT_ROOT / "marketing-audits/releases"
 TEMP_ROOT = PROJECT_ROOT / ".codex_tmp/main-price-release"
 
-SCHEMA = "rosomaha-main-price-release/v3"
+SCHEMA = "rosomaha-main-price-release/v4"
+DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
 HOST = "90.156.168.115"
 PORT = 22
 AUDIT_LOGIN = "deploy"
@@ -63,7 +64,9 @@ EXPECTED_PRERENDER_ROUTE_COUNT = 96
 RUNTIME_ARTICLES_MANIFEST = "api/articles-runtime-manifest.json"
 RUNTIME_ARTICLES_SCHEMA = "rosomaha-canonical-articles-runtime/v1"
 MAX_HTTP_BYTES = 25 * 1024 * 1024
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_DELTA_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_DELTA_FILES = 1_000
 MAX_CANDIDATE_FILES = 20_000
 MAX_OPERATOR_BYTES = 512 * 1024
 
@@ -425,7 +428,7 @@ def operator_bytes() -> bytes:
         os.close(fd)
     required = (
         b"AUDIT_LOGIN = \"deploy\"", b"APPLY_LOGIN = \"root\"",
-        b"SCHEMA = \"rosomaha-main-price-release/v3\"",
+        b"SCHEMA = \"rosomaha-main-price-release/v4\"",
     )
     if any(marker not in raw for marker in required):
         raise HelperError("fixed operator identity marker is missing")
@@ -1316,15 +1319,40 @@ def tree_manifest(root: Path) -> dict[str, Any]:
     }
 
 
-def write_candidate_archive(dist: Path, manifest: dict[str, Any], artifact_root: Path) -> tuple[Path, Path]:
-    manifest_path = artifact_root / "candidate-manifest.json"
-    manifest_path.write_bytes(canonical_json(manifest) + b"\n")
-    archive_path = artifact_root / "candidate.tar.gz"
+def manifest_files_digest(manifest: dict[str, Any]) -> str:
+    return sha256_bytes(canonical_json(manifest.get("files", [])))
+
+
+def delta_material(base: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    base_files = {item["path"]: item for item in base["files"]}
+    target_files = {item["path"]: item for item in target["files"]}
+    changed = []
+    for path, item in sorted(target_files.items()):
+        previous = base_files.get(path)
+        if previous != item:
+            changed.append({**item, "kind": "added" if previous is None else "modified"})
+    deleted = sorted(set(base_files) - set(target_files))
+    return {"changed": changed, "deleted": deleted}
+
+
+def write_delta_bundle(
+    dist: Path, target: dict[str, Any], base: dict[str, Any], artifact_root: Path,
+) -> tuple[Path, Path, Path, dict[str, Any]]:
+    if not base.get("valid") or not target.get("valid"):
+        raise HelperError("delta source/target manifest is not valid")
+    material = delta_material(base, target)
+    changed = material["changed"]
+    expanded_bytes = sum(item["bytes"] for item in changed)
+    if len(changed) > MAX_DELTA_FILES or expanded_bytes > MAX_DELTA_EXPANDED_BYTES:
+        raise HelperError("candidate delta exceeds fixed limits")
+    target_manifest_path = artifact_root / "target-manifest.json"
+    target_manifest_path.write_bytes(canonical_json(target) + b"\n")
+    archive_path = artifact_root / "delta.tar.gz"
     with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-        for item in manifest["files"]:
+        for item in changed:
             source = dist / PurePosixPath(item["path"])
             safe_regular_file(source, dist)
-            tar_info = tarfile.TarInfo(f"dist/{item['path']}")
+            tar_info = tarfile.TarInfo(f"delta/{item['path']}")
             tar_info.size = item["bytes"]
             tar_info.mode = 0o644
             tar_info.uid = 0
@@ -1334,12 +1362,40 @@ def write_candidate_archive(dist: Path, manifest: dict[str, Any], artifact_root:
             tar_info.mtime = 0
             with source.open("rb") as handle:
                 archive.addfile(tar_info, handle)
-    if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
-        raise HelperError("candidate archive exceeds fixed size limit")
-    return archive_path, manifest_path
+    if archive_path.stat().st_size > MAX_DELTA_ARCHIVE_BYTES:
+        raise HelperError("candidate delta archive exceeds fixed size limit")
+    delta = {
+        "schema": DELTA_SCHEMA,
+        "base": {
+            "digest": base["digest"], "file_count": base["file_count"],
+            "directory_count": base["directory_count"],
+            "files_digest": manifest_files_digest(base),
+        },
+        "target": {
+            "digest": target["digest"], "file_count": target["file_count"],
+            "directory_count": target["directory_count"],
+            "files_digest": manifest_files_digest(target),
+            "manifest_sha256": sha256_file(target_manifest_path),
+        },
+        **material,
+        "added_count": sum(item["kind"] == "added" for item in changed),
+        "modified_count": sum(item["kind"] == "modified" for item in changed),
+        "changed_count": len(changed), "deleted_count": len(material["deleted"]),
+        "expanded_bytes": expanded_bytes,
+        "archive": {
+            "name": archive_path.name, "sha256": sha256_file(archive_path),
+            "bytes": archive_path.stat().st_size,
+        },
+    }
+    delta_manifest_path = artifact_root / "delta-manifest.json"
+    delta_manifest_path.write_bytes(canonical_json(delta) + b"\n")
+    return archive_path, delta_manifest_path, target_manifest_path, delta
 
 
-def build_candidate(commit: str, snapshot_root: Path, public_baseline: dict[str, Any], canonical: dict[str, Any]) -> dict[str, Any]:
+def build_candidate(
+    commit: str, snapshot_root: Path, public_baseline: dict[str, Any],
+    canonical: dict[str, Any], base_manifest: dict[str, Any],
+) -> dict[str, Any]:
     prove_target_commit(commit)
     artifact_root = snapshot_root.parent
     worktree = artifact_root / "worktree"
@@ -1387,11 +1443,23 @@ def build_candidate(commit: str, snapshot_root: Path, public_baseline: dict[str,
         dist = worktree / "dist"
         verification = verify_candidate_dist(dist, snapshot_root, public_baseline)
         manifest = tree_manifest(dist)
-        archive_path, manifest_path = write_candidate_archive(dist, manifest, artifact_root)
+        archive_path, delta_manifest_path, target_manifest_path, delta = write_delta_bundle(
+            dist, manifest, base_manifest, artifact_root,
+        )
         candidate = {
             "archive_name": archive_path.name, "archive_sha256": sha256_file(archive_path), "archive_bytes": archive_path.stat().st_size,
-            "manifest_name": manifest_path.name, "manifest_sha256": sha256_file(manifest_path),
+            "delta_manifest_name": delta_manifest_path.name,
+            "delta_manifest_sha256": sha256_file(delta_manifest_path),
+            "target_manifest_name": target_manifest_path.name,
+            "target_manifest_sha256": sha256_file(target_manifest_path),
             "tree_digest": manifest["digest"], "file_count": manifest["file_count"],
+            "directory_count": manifest["directory_count"],
+            "base_tree_digest": base_manifest["digest"],
+            "delta": {
+                "added_count": delta["added_count"], "modified_count": delta["modified_count"],
+                "changed_count": delta["changed_count"], "deleted_count": delta["deleted_count"],
+                "expanded_bytes": delta["expanded_bytes"],
+            },
             "verification": verification, "articles_cz_validation": cz_validation, "build": build_receipt,
             "source_tree": {
                 "before_digest": source_before["digest"],
@@ -1431,7 +1499,9 @@ def audit() -> tuple[dict[str, Any], Path]:
         raise HelperError("public canonical article endpoint is not exact HTTP 200")
     if public_info["sha256"] != canonical["articles"]["sha256"]:
         raise HelperError("public article raw SHA differs from the SFTP canonical snapshot")
-    candidate = build_candidate(TARGET_COMMIT, snapshot_root, public_baseline, canonical)
+    candidate = build_candidate(
+        TARGET_COMMIT, snapshot_root, public_baseline, canonical, server["staging_dist"],
+    )
 
     payload = {key: value for key, value in server.items() if key != "captured_at"}
     payload.update({
@@ -1441,7 +1511,10 @@ def audit() -> tuple[dict[str, Any], Path]:
         "operator_sha256": sha256_bytes(frozen_operator),
         "canonical_snapshot": canonical, "public_articles": public_info,
         "public_seo_baseline": public_baseline, "candidate": candidate,
-        "artifacts": {"root_token": snapshot_root.parent.name, "archive": "candidate.tar.gz", "manifest": "candidate-manifest.json"},
+        "artifacts": {
+            "root_token": snapshot_root.parent.name, "archive": "delta.tar.gz",
+            "delta_manifest": "delta-manifest.json", "target_manifest": "target-manifest.json",
+        },
     })
     payload["baseline_token"] = calculate_baseline_token(payload)
     receipt = atomic_json_receipt("rosomaha-main-price-baseline", payload)
@@ -1457,12 +1530,12 @@ def safe_baseline_path(path: Path) -> Path:
     return resolved
 
 
-def load_baseline(path: Path) -> tuple[dict[str, Any], Path, Path, Path]:
+def load_baseline(path: Path) -> tuple[dict[str, Any], Path, Path, Path, Path]:
     frozen_operator = operator_bytes()
     return load_baseline_with_operator(path, frozen_operator)
 
 
-def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dict[str, Any], Path, Path, Path]:
+def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dict[str, Any], Path, Path, Path, Path]:
     resolved = safe_baseline_path(path)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if payload.get("schema") != SCHEMA or payload.get("status") != "ready":
@@ -1479,16 +1552,20 @@ def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dic
     if not isinstance(root_token, str) or not re.fullmatch(r"[0-9a-f]{16}", root_token):
         raise HelperError("baseline artifact root token is invalid")
     artifact_root = TEMP_ROOT / root_token
-    archive = artifact_root / "candidate.tar.gz"
-    manifest = artifact_root / "candidate-manifest.json"
+    archive = artifact_root / "delta.tar.gz"
+    delta_manifest = artifact_root / "delta-manifest.json"
+    target_manifest = artifact_root / "target-manifest.json"
     safe_regular_file(archive, TEMP_ROOT)
-    safe_regular_file(manifest, TEMP_ROOT)
+    safe_regular_file(delta_manifest, TEMP_ROOT)
+    safe_regular_file(target_manifest, TEMP_ROOT)
     candidate = payload["candidate"]
     if sha256_file(archive) != candidate["archive_sha256"] or archive.stat().st_size != candidate["archive_bytes"]:
         raise HelperError("local candidate archive differs from baseline")
-    if sha256_file(manifest) != candidate["manifest_sha256"]:
-        raise HelperError("local candidate manifest differs from baseline")
-    return payload, resolved, archive, manifest
+    if sha256_file(delta_manifest) != candidate["delta_manifest_sha256"]:
+        raise HelperError("local delta manifest differs from baseline")
+    if sha256_file(target_manifest) != candidate["target_manifest_sha256"]:
+        raise HelperError("local target manifest differs from baseline")
+    return payload, resolved, archive, delta_manifest, target_manifest
 
 
 def remote_bundle_path(baseline_token: str) -> str:
@@ -1543,7 +1620,8 @@ def sftp_upload_bytes(sftp: paramiko.SFTPClient, raw: bytes, remote_dir: str, na
 
 
 def upload_bundle(
-    client: paramiko.SSHClient, baseline_path: Path, archive: Path, manifest: Path,
+    client: paramiko.SSHClient, baseline_path: Path, archive: Path,
+    delta_manifest: Path, target_manifest: Path,
     baseline: dict[str, Any], frozen_operator: bytes,
 ) -> str:
     remote_dir = remote_bundle_path(baseline["baseline_token"])
@@ -1557,13 +1635,14 @@ def upload_bundle(
         if not stat.S_ISDIR(directory_attr.st_mode) or stat.S_IMODE(directory_attr.st_mode) != 0o700:
             raise HelperError("remote bundle directory mode is not exact 0700")
         sftp_upload_file(sftp, baseline_path, remote_dir, "baseline.json")
-        sftp_upload_file(sftp, archive, remote_dir, "candidate.tar.gz")
-        sftp_upload_file(sftp, manifest, remote_dir, "candidate-manifest.json")
+        sftp_upload_file(sftp, archive, remote_dir, "delta.tar.gz")
+        sftp_upload_file(sftp, delta_manifest, remote_dir, "delta-manifest.json")
+        sftp_upload_file(sftp, target_manifest, remote_dir, "target-manifest.json")
         if baseline.get("operator_sha256") != sha256_bytes(frozen_operator):
             raise HelperError("frozen operator differs from baseline")
         sftp_upload_bytes(sftp, frozen_operator, remote_dir, "operator.sh")
         observed = sorted(sftp.listdir(remote_dir))
-        expected = sorted(("baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh"))
+        expected = sorted(("baseline.json", "delta.tar.gz", "delta-manifest.json", "target-manifest.json", "operator.sh"))
         if observed != expected:
             raise HelperError("remote bundle file set mismatch")
         return remote_dir
@@ -1605,8 +1684,16 @@ def cleanup_bundle_sftp(sftp: paramiko.SFTPClient, remote_dir: str, *, preserve_
         names = sorted(sftp.listdir(remote_dir))
     except OSError:
         return preserve_or_raise("remote bundle directory could not be listed")
-    final_names = {"baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh", "apply-receipt.json"}
-    partial_names = {f"{name}.part" for name in ("baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh")}
+    final_names = {
+        "baseline.json", "delta.tar.gz", "delta-manifest.json",
+        "target-manifest.json", "operator.sh", "apply-receipt.json",
+    }
+    partial_names = {
+        f"{name}.part" for name in (
+            "baseline.json", "delta.tar.gz", "delta-manifest.json",
+            "target-manifest.json", "operator.sh",
+        )
+    }
     if not set(names).issubset(final_names | partial_names):
         return preserve_or_raise("remote bundle has unexpected files")
     for name in names:
@@ -1681,7 +1768,56 @@ def validate_apply_receipt(receipt: dict[str, Any], baseline: dict[str, Any], op
         raise HelperError("apply receipt new_release is not the exact labelled release")
     if receipt.get("candidate_tree_digest") != baseline["candidate"]["tree_digest"]:
         raise HelperError("apply receipt candidate digest mismatch")
-    if operator_result is not None and operator_result.get("new_release") != new_release:
+    evidence = receipt.get("delta_reconstruction")
+    base = baseline["staging_dist"]
+    expected_base = {
+        "digest": base["digest"], "file_count": base["file_count"],
+        "directory_count": base["directory_count"], "files_digest": manifest_files_digest(base),
+    }
+    if (
+        not isinstance(evidence, dict) or evidence.get("exact_match") is not True
+        or evidence.get("base", {}).get("expected") != expected_base
+        or evidence.get("base", {}).get("observed_before") != expected_base
+        or evidence.get("base", {}).get("observed_after") != expected_base
+        or evidence.get("base", {}).get("exact_match") is not True
+    ):
+        raise HelperError("apply receipt delta base evidence mismatch")
+    target_expected = evidence.get("target", {}).get("expected")
+    delta_evidence = evidence.get("delta", {})
+    valid_delta_counts = bool(
+        isinstance(delta_evidence, dict)
+        and set(delta_evidence) == {"added", "modified", "changed", "deleted"}
+        and all(
+            isinstance(delta_evidence[key], int) and not isinstance(delta_evidence[key], bool)
+            and delta_evidence[key] >= 0
+            for key in delta_evidence
+        )
+        and delta_evidence["added"] + delta_evidence["modified"] == delta_evidence["changed"]
+        and delta_evidence["added"] == baseline["candidate"]["delta"]["added_count"]
+        and delta_evidence["modified"] == baseline["candidate"]["delta"]["modified_count"]
+        and delta_evidence["changed"] == baseline["candidate"]["delta"]["changed_count"]
+        and delta_evidence["deleted"] == baseline["candidate"]["delta"]["deleted_count"]
+    )
+    if (
+        not isinstance(target_expected, dict)
+        or evidence.get("target", {}).get("observed") != target_expected
+        or evidence.get("target", {}).get("exact_match") is not True
+        or target_expected.get("digest") != baseline["candidate"]["tree_digest"]
+        or target_expected.get("files_digest") != baseline["candidate"]["tree_digest"]
+        or target_expected.get("file_count") != baseline["candidate"]["file_count"]
+        or target_expected.get("directory_count") != baseline["candidate"]["directory_count"]
+        or not valid_delta_counts
+    ):
+        raise HelperError("apply receipt delta target/count evidence mismatch")
+    article = evidence.get("article_parity", {})
+    canonical = baseline["articles"]["canonical"]
+    if article != {
+        "expected_sha256": canonical["sha256"], "observed_sha256": canonical["sha256"],
+        "expected_slug_digest": canonical["slug_digest"], "observed_slug_digest": canonical["slug_digest"],
+        "exact_match": True,
+    }:
+        raise HelperError("apply receipt reconstructed article parity mismatch")
+    if operator_result is not None and canonical_json(operator_result) != canonical_json(receipt):
         raise HelperError("operator result and apply receipt disagree")
 
 
@@ -1904,7 +2040,9 @@ def recover_ambiguous_apply(
 def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
     prove_target_commit(commit)
     frozen_operator = operator_bytes()
-    baseline, resolved_baseline, archive, manifest = load_baseline_with_operator(baseline_path, frozen_operator)
+    baseline, resolved_baseline, archive, delta_manifest, target_manifest = load_baseline_with_operator(
+        baseline_path, frozen_operator,
+    )
     client, identity = connect(APPLY_LOGIN)
     remote_dir: str | None = None
     apply_invoked = False
@@ -1914,7 +2052,10 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
             raise HelperError("server baseline changed after capture; create a fresh audit receipt")
         preflight = public_verify(baseline, stage="old")
         # Upload is deliberately after the exact no-write root preflight.
-        remote_dir = upload_bundle(client, resolved_baseline, archive, manifest, baseline, frozen_operator)
+        remote_dir = upload_bundle(
+            client, resolved_baseline, archive, delta_manifest, target_manifest,
+            baseline, frozen_operator,
+        )
         apply_invoked = True
         try:
             operator_result = invoke_operator(client, "apply", remote_dir, frozen_operator)
@@ -1989,7 +2130,9 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
 def recover_from_baseline(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
     prove_target_commit(commit)
     frozen_operator = operator_bytes()
-    baseline, _resolved_baseline, _archive, _manifest = load_baseline_with_operator(baseline_path, frozen_operator)
+    baseline, _resolved_baseline, _archive, _delta_manifest, _target_manifest = load_baseline_with_operator(
+        baseline_path, frozen_operator,
+    )
     remote_dir = remote_bundle_path(baseline["baseline_token"])
     recovered, _success = recover_ambiguous_apply(
         remote_dir,
