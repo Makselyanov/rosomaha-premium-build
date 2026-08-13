@@ -1,8 +1,9 @@
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import dns from "node:dns";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "url";
+import https from "node:https";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -14,28 +15,59 @@ const REPORT_DIR = path.join(ROOT_DIR, "seo-reports");
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GSC_API_BASE = "https://searchconsole.googleapis.com";
-const utf8Decoder = new TextDecoder("utf-8");
+const TRANSPORT_TIMEOUT_MS = 30_000;
 
-function parseArgs(argv) {
+export const SITE_ALIASES = Object.freeze({
+  catalog: "https://xn--80aa8ahaki9a.site/",
+  bitrix: "sc-domain:rosomaha-rus.ru",
+});
+
+export const QUERY_PROBES = Object.freeze([
+  "купить квадроцикл",
+  "купить вездеход",
+  "ремонт квадроциклов",
+  "обслуживание квадроциклов",
+]);
+
+export function parseArgs(argv) {
   const args = {
     days: 28,
     envPath: DEFAULT_ENV_PATH,
+    rowLimit: 1000,
     save: true,
+    site: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--days" && argv[i + 1]) {
+    if (arg === "--days") {
       const value = Number(argv[i + 1]);
-      if (Number.isFinite(value) && value > 0) args.days = Math.floor(value);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error("--days must be a positive integer");
+      }
+      args.days = value;
       i += 1;
-    } else if (arg === "--env" && argv[i + 1]) {
+    } else if (arg === "--env") {
+      if (!argv[i + 1]) throw new Error("--env requires a path");
       args.envPath = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+    } else if (arg === "--site") {
+      if (!argv[i + 1]) throw new Error("--site requires catalog or bitrix");
+      args.site = argv[i + 1];
+      i += 1;
+    } else if (arg === "--row-limit") {
+      const value = Number(argv[i + 1]);
+      if (!Number.isInteger(value) || value < 1 || value > 1000) {
+        throw new Error("--row-limit must be an integer from 1 to 1000");
+      }
+      args.rowLimit = value;
       i += 1;
     } else if (arg === "--no-save") {
       args.save = false;
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
@@ -45,16 +77,21 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`Usage:
   node scripts/gsc-report.mjs
-  node scripts/gsc-report.mjs --days 90
+  node scripts/gsc-report.mjs --days 90 --site catalog
+  node scripts/gsc-report.mjs --site bitrix --row-limit 1000
   node scripts/gsc-report.mjs --env .env.seo.local
+
+Allowed properties:
+  catalog = ${SITE_ALIASES.catalog}
+  bitrix  = ${SITE_ALIASES.bitrix}
 
 Required variables in .env.seo.local:
   GSC_CLIENT_ID
   GSC_REFRESH_TOKEN
-  GSC_SITE_URL=https://xn--80aa8ahaki9a.site/
 
-Optional for web OAuth clients:
+Optional variables:
   GSC_CLIENT_SECRET
+  GSC_SITE_URL (used only without --site and only when it exactly matches an allowed property)
 `);
 }
 
@@ -97,9 +134,29 @@ function getMissingConfigKeys(config) {
   const required = [
     ["GSC_CLIENT_ID", config.clientId],
     ["GSC_REFRESH_TOKEN", config.refreshToken],
-    ["GSC_SITE_URL", config.siteUrl],
   ];
   return required.filter(([, value]) => !value).map(([key]) => key);
+}
+
+export function resolveSiteSelection(requestedAlias, envSiteUrl = "") {
+  if (requestedAlias !== null && requestedAlias !== undefined) {
+    if (!Object.hasOwn(SITE_ALIASES, requestedAlias)) {
+      throw new Error(
+        `Unknown --site alias: ${requestedAlias}. Allowed: ${Object.keys(SITE_ALIASES).join(", ")}`,
+      );
+    }
+    return { alias: requestedAlias, siteUrl: SITE_ALIASES[requestedAlias] };
+  }
+
+  if (envSiteUrl) {
+    const match = Object.entries(SITE_ALIASES).find(([, siteUrl]) => siteUrl === envSiteUrl);
+    if (!match) {
+      throw new Error("GSC_SITE_URL is not an exact allowed property");
+    }
+    return { alias: match[0], siteUrl: match[1] };
+  }
+
+  return { alias: "catalog", siteUrl: SITE_ALIASES.catalog };
 }
 
 function formatDate(date) {
@@ -109,68 +166,135 @@ function formatDate(date) {
   return `${year}-${month}-${day}`;
 }
 
-function getDateRange(days) {
-  const end = new Date();
+function getDateRange(days, now = new Date()) {
+  const end = new Date(now);
   end.setUTCDate(end.getUTCDate() - 3);
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - days + 1);
   return { startDate: formatDate(start), endDate: formatDate(end) };
 }
 
-async function getAccessToken(config) {
+function nativeHttpsTextRequest(url, requestOptions, timeoutMs = TRANSPORT_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback(value);
+    };
+    const rawBody = requestOptions.body;
+    const body =
+      rawBody === undefined || rawBody === null
+        ? null
+        : Buffer.isBuffer(rawBody)
+          ? rawBody
+          : Buffer.from(String(rawBody), "utf8");
+    const headers = { ...(requestOptions.headers || {}) };
+    if (body && !Object.keys(headers).some((name) => name.toLowerCase() === "content-length")) {
+      headers["Content-Length"] = String(body.byteLength);
+    }
+
+    const request = https.request(
+      url,
+      { method: requestOptions.method || "GET", headers },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const status = response.statusCode || 0;
+          finish(resolve, {
+            ok: status >= 200 && status < 300,
+            status,
+            text: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+        response.on("error", (error) => finish(reject, error));
+        response.on("aborted", () => finish(reject, new Error("HTTPS response aborted")));
+      },
+    );
+
+    timeout = setTimeout(() => {
+      request.destroy(new Error(`HTTPS request timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    timeout.unref?.();
+    request.on("error", (error) => finish(reject, error));
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+async function requestTextWithFallback(
+  url,
+  requestOptions,
+  {
+    fetchImpl = globalThis.fetch,
+    nativeRequest = nativeHttpsTextRequest,
+    timeoutMs = TRANSPORT_TIMEOUT_MS,
+  } = {},
+) {
+  try {
+    const response = await fetchImpl(url, {
+      ...requestOptions,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, text };
+  } catch {
+    return nativeRequest(url, requestOptions, timeoutMs);
+  }
+}
+
+function redactSecretValues(value, secrets) {
+  let redacted = String(value);
+  for (const secret of secrets) {
+    if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
+  }
+  return redacted;
+}
+
+export async function getAccessToken(config, transportOptions = {}) {
   const tokenParams = {
     client_id: config.clientId,
     refresh_token: config.refreshToken,
     grant_type: "refresh_token",
   };
   if (config.clientSecret) tokenParams.client_secret = config.clientSecret;
-  const body = new URLSearchParams(tokenParams);
 
+  let response;
   try {
-    const response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    const payload = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(
-        `OAuth token exchange failed: ${payload.error_description || payload.error || response.status}`,
-      );
-    }
-
-    return payload.access_token;
-  } catch (error) {
-    const payload = curlJson([
-      "-sS",
-      "-L",
-      "-X",
-      "POST",
-      "-H",
-      "Content-Type: application/x-www-form-urlencoded",
-      "--data",
-      body.toString(),
+    response = await requestTextWithFallback(
       TOKEN_URL,
-    ]);
-
-    if (payload.error) {
-      throw new Error(
-        `OAuth token exchange failed: ${payload.error_description || payload.error}`,
-      );
-    }
-
-    if (!payload.access_token) {
-      throw new Error(`OAuth token exchange failed: ${error.message || "no access token"}`);
-    }
-
-    return payload.access_token;
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(tokenParams).toString(),
+      },
+      transportOptions,
+    );
+  } catch {
+    throw new Error("OAuth token exchange failed: transport unavailable");
   }
+  const payload = parseJsonText(response.text) || {};
+
+  if (!response.ok || !payload.access_token) {
+    const detail = payload.error_description || payload.error || response.status;
+    throw new Error(
+      `OAuth token exchange failed: ${redactSecretValues(detail, [
+        config.refreshToken,
+        config.clientSecret,
+      ])}`,
+    );
+  }
+
+  return payload.access_token;
 }
 
-async function gscRequest(token, method, pathName, body) {
-  try {
-    const response = await fetch(`${GSC_API_BASE}${pathName}`, {
+export async function gscRequest(token, method, pathName, body, transportOptions = {}) {
+  const response = await requestTextWithFallback(
+    `${GSC_API_BASE}${pathName}`,
+    {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -178,47 +302,19 @@ async function gscRequest(token, method, pathName, body) {
         Accept: "application/json",
       },
       body: body ? JSON.stringify(body) : undefined,
-    });
+    },
+    transportOptions,
+  );
 
-    const text = await response.text();
-    const payload = parseJsonText(text);
+  const payload = parseJsonText(response.text);
 
-    if (!response.ok) {
-      const error = new Error(payload?.error?.message || `GSC HTTP ${response.status}`);
-      error.status = response.status;
-      error.payload = payload;
-      throw error;
-    }
-
-    return payload;
-  } catch (error) {
-    if (error.status) throw error;
-
-    const args = [
-      "-sS",
-      "-L",
-      "-X",
-      method,
-      "-H",
-      `Authorization: Bearer ${token}`,
-      "-H",
-      "Content-Type: application/json",
-      "-H",
-      "Accept: application/json",
-    ];
-    if (body) args.push("--data-binary", JSON.stringify(body));
-    args.push(`${GSC_API_BASE}${pathName}`);
-
-    const payload = curlJson(args);
-    if (payload?.error) {
-      const fallbackError = new Error(payload.error.message || "GSC curl request failed");
-      fallbackError.status = payload.error.code || 0;
-      fallbackError.payload = payload;
-      throw fallbackError;
-    }
-
-    return payload;
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || `GSC HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
+
+  return payload;
 }
 
 function parseJsonText(text) {
@@ -229,37 +325,46 @@ function parseJsonText(text) {
   }
 }
 
-function curlJson(args) {
-  const stdout = execFileSync("curl.exe", args, {
-    encoding: "buffer",
-    timeout: 60000,
-    windowsHide: true,
-  });
-  return parseJsonText(utf8Decoder.decode(stdout));
-}
-
-async function safeGscRequest(token, method, pathName, body) {
+export async function safeGscRequest(token, method, pathName, body, transportOptions = {}) {
   try {
-    return { ok: true, data: await gscRequest(token, method, pathName, body) };
+    return {
+      ok: true,
+      data: await gscRequest(token, method, pathName, body, transportOptions),
+    };
   } catch (error) {
+    const message = redactSecretValues(error.message || "Unknown error", [token]);
     return {
       ok: false,
       error: {
         status: error.status || 0,
-        message: error.message || "Unknown error",
-        payload: error.payload || null,
+        message,
       },
     };
   }
 }
 
-function searchAnalytics(token, siteUrl, query) {
-  return safeGscRequest(
+function searchAnalytics(request, token, siteUrl, query) {
+  return request(
     token,
     "POST",
     `/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
     query,
   );
+}
+
+export function requireSiteOwner(sitesResult, siteUrl) {
+  if (!sitesResult.ok) {
+    throw new Error(`sites.list failed; siteOwner cannot be verified: ${sitesResult.error.message}`);
+  }
+
+  const site = (sitesResult.data?.siteEntry || []).find((entry) => entry.siteUrl === siteUrl);
+  if (!site) throw new Error(`Allowed property is absent from sites.list: ${siteUrl}`);
+  if (site.permissionLevel !== "siteOwner") {
+    throw new Error(
+      `siteOwner permission required for ${siteUrl}; received ${site.permissionLevel || "none"}`,
+    );
+  }
+  return { siteUrl: site.siteUrl, permissionLevel: site.permissionLevel };
 }
 
 function extractTotals(result) {
@@ -274,22 +379,24 @@ function extractTotals(result) {
   };
 }
 
-function inspectionUrlFromSite(siteUrl) {
-  if (!siteUrl) return "";
-  if (siteUrl.startsWith("sc-domain:")) {
-    const domain = siteUrl.slice("sc-domain:".length).trim();
-    return domain ? `https://${domain}/` : "";
+export function normalizeQueryProbe(query, result) {
+  if (!result.ok) {
+    return { query, status: "request_failed", rows: [], error: result.error };
   }
+  const rows = result.data?.rows || [];
+  return {
+    query,
+    status: rows.length ? "returned_by_api" : "not_returned_by_api",
+    rows,
+    error: null,
+  };
+}
 
-  try {
-    const url = new URL(siteUrl);
-    url.search = "";
-    url.hash = "";
-    if (!url.pathname) url.pathname = "/";
-    return url.toString();
-  } catch {
-    return siteUrl;
+function inspectionUrlFromSite(siteUrl) {
+  if (siteUrl.startsWith("sc-domain:")) {
+    return `https://${siteUrl.slice("sc-domain:".length)}/`;
   }
+  return siteUrl;
 }
 
 function markdownTable(rows, columns) {
@@ -311,7 +418,9 @@ function buildMarkdown(report) {
     `# Google Search Console report: ${report.siteUrl}`,
     "",
     `Generated: ${report.generatedAt}`,
+    `Property alias: ${report.property.alias}`,
     `Period: ${report.dateRange.startDate} - ${report.dateRange.endDate}`,
+    `Row limit: ${report.requestSpec.rowLimit}`,
     "",
     "## Totals",
   ];
@@ -327,32 +436,31 @@ function buildMarkdown(report) {
 
   const columns = [
     { title: "#", value: (_row, index) => index + 1 },
-    { title: "Value", value: (row) => row.keys?.[0] || "" },
+    { title: "Value", value: (row) => (row.keys || []).join(" + ") },
     { title: "Clicks", align: "---:", value: (row) => row.clicks || 0 },
     { title: "Impressions", align: "---:", value: (row) => row.impressions || 0 },
     { title: "CTR", align: "---:", value: (row) => `${((row.ctr || 0) * 100).toFixed(2)}%` },
     { title: "Position", align: "---:", value: (row) => (row.position || 0).toFixed(1) },
   ];
 
-  lines.push("", "## Top queries");
-  if (report.byQuery.ok) {
-    lines.push(markdownTable(report.byQuery.data.rows || [], columns));
-  } else {
-    lines.push(`- Request failed: ${report.byQuery.error.message}`);
+  for (const [heading, result] of [
+    ["Top queries", report.byQuery],
+    ["Top pages", report.byPage],
+    ["Query + page", report.byQueryPage],
+    ["Devices", report.byDevice],
+  ]) {
+    lines.push("", `## ${heading}`);
+    lines.push(
+      result.ok
+        ? markdownTable(result.data.rows || [], columns)
+        : `- Request failed: ${result.error.message}`,
+    );
   }
 
-  lines.push("", "## Top pages");
-  if (report.byPage.ok) {
-    lines.push(markdownTable(report.byPage.data.rows || [], columns));
-  } else {
-    lines.push(`- Request failed: ${report.byPage.error.message}`);
-  }
-
-  lines.push("", "## Devices");
-  if (report.byDevice.ok) {
-    lines.push(markdownTable(report.byDevice.data.rows || [], columns.slice(1)));
-  } else {
-    lines.push(`- Request failed: ${report.byDevice.error.message}`);
+  lines.push("", "## Exact query probes");
+  for (const probe of report.queryProbes) {
+    lines.push(`- ${probe.query}: ${probe.status}`);
+    if (probe.status === "request_failed") lines.push(`  - Error: ${probe.error.message}`);
   }
 
   lines.push("", "## Sitemaps");
@@ -385,91 +493,210 @@ function buildMarkdown(report) {
   return `${lines.join("\n")}\n`;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.help) {
-    printHelp();
-    return;
+function collectProviderErrors(results) {
+  return Object.entries(results)
+    .filter(([, result]) => result && result.ok === false)
+    .map(([request, result]) => ({ request, ...result.error }));
+}
+
+export function getOutputPaths(reportDir, propertyAlias, generatedAt) {
+  if (!Object.hasOwn(SITE_ALIASES, propertyAlias)) {
+    throw new Error(`Cannot build output path for unknown property: ${propertyAlias}`);
+  }
+  const timestamp = generatedAt.replace(/[:.]/g, "-");
+  const outputs = {
+    latestJson: path.join(reportDir, `latest-gsc-report-${propertyAlias}.json`),
+    latestMarkdown: path.join(reportDir, `latest-gsc-report-${propertyAlias}.md`),
+    receiptJson: path.join(reportDir, `gsc-report-receipt-${propertyAlias}-${timestamp}.json`),
+  };
+  if (propertyAlias === "catalog") {
+    outputs.legacyLatestJson = path.join(reportDir, "latest-gsc-report.json");
+    outputs.legacyLatestMarkdown = path.join(reportDir, "latest-gsc-report.md");
+  }
+  return outputs;
+}
+
+function writeFileDurably(filePath, content, flag) {
+  const handle = fs.openSync(filePath, flag, 0o600);
+  try {
+    fs.writeFileSync(handle, content, "utf8");
+    fs.fsyncSync(handle);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
+export function writeLatestAtomic(filePath, content) {
+  const tempPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    writeFileDurably(tempPath, content, "wx");
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}
+
+export function saveReportArtifacts(reportDir, report, markdown) {
+  fs.mkdirSync(reportDir, { recursive: true });
+  const outputs = getOutputPaths(reportDir, report.property.alias, report.generatedAt);
+  const json = `${JSON.stringify(report, null, 2)}\n`;
+
+  // The receipt is the immutable run record. Create it before replacing any latest files so
+  // a timestamp collision fails closed without changing an existing baseline.
+  writeFileDurably(outputs.receiptJson, json, "wx");
+  writeLatestAtomic(outputs.latestJson, json);
+  writeLatestAtomic(outputs.latestMarkdown, markdown);
+  if (outputs.legacyLatestJson) {
+    writeLatestAtomic(outputs.legacyLatestJson, json);
+    writeLatestAtomic(outputs.legacyLatestMarkdown, markdown);
   }
 
-  const config = loadConfig(args.envPath);
+  return outputs;
+}
+
+export async function executeReport({
+  args,
+  config,
+  now = new Date(),
+  tokenProvider = getAccessToken,
+  request = safeGscRequest,
+}) {
+  const property = resolveSiteSelection(args.site, config.siteUrl);
   const missing = getMissingConfigKeys(config);
   if (missing.length) {
-    console.error("Google Search Console API config is incomplete.");
-    console.error(`Env file: ${config.envPath}`);
-    console.error(`Missing: ${missing.join(", ")}`);
-    process.exitCode = 1;
-    return;
+    throw new Error(`Google Search Console API config is incomplete: ${missing.join(", ")}`);
   }
 
-  const token = await getAccessToken(config);
-  const dateRange = getDateRange(args.days);
-  const baseQuery = { ...dateRange, rowLimit: 25 };
-  const sitePath = `/webmasters/v3/sites/${encodeURIComponent(config.siteUrl)}`;
+  const token = await tokenProvider(config);
+  const sitesResult = await request(token, "GET", "/webmasters/v3/sites");
+  const siteAccess = requireSiteOwner(sitesResult, property.siteUrl);
+  const dateRange = getDateRange(args.days, now);
+  const baseQuery = { ...dateRange, rowLimit: args.rowLimit };
+  const requestBodies = {
+    totals: { ...dateRange, rowLimit: 1 },
+    byQuery: { ...baseQuery, dimensions: ["query"] },
+    byPage: { ...baseQuery, dimensions: ["page"] },
+    byQueryPage: { ...baseQuery, dimensions: ["query", "page"] },
+    byDevice: { ...baseQuery, dimensions: ["device"] },
+    byCountry: { ...baseQuery, dimensions: ["country"] },
+    queryProbes: QUERY_PROBES.map((query) => ({
+      query,
+      body: {
+        ...baseQuery,
+        dimensions: ["query", "page"],
+        dimensionFilterGroups: [
+          {
+            filters: [{ dimension: "query", operator: "equals", expression: query }],
+          },
+        ],
+      },
+    })),
+  };
+  const sitePath = `/webmasters/v3/sites/${encodeURIComponent(property.siteUrl)}`;
 
-  const [sites, totals, byQuery, byPage, byDevice, byCountry, sitemaps] =
+  const [totals, byQuery, byPage, byQueryPage, byDevice, byCountry, sitemaps, ...probeResults] =
     await Promise.all([
-      safeGscRequest(token, "GET", "/webmasters/v3/sites"),
-      searchAnalytics(token, config.siteUrl, { ...dateRange, rowLimit: 1 }),
-      searchAnalytics(token, config.siteUrl, { ...baseQuery, dimensions: ["query"] }),
-      searchAnalytics(token, config.siteUrl, { ...baseQuery, dimensions: ["page"] }),
-      searchAnalytics(token, config.siteUrl, { ...baseQuery, dimensions: ["device"] }),
-      searchAnalytics(token, config.siteUrl, { ...baseQuery, dimensions: ["country"] }),
-      safeGscRequest(token, "GET", `${sitePath}/sitemaps`),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.totals),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.byQuery),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.byPage),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.byQueryPage),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.byDevice),
+      searchAnalytics(request, token, property.siteUrl, requestBodies.byCountry),
+      request(token, "GET", `${sitePath}/sitemaps`),
+      ...requestBodies.queryProbes.map(({ body }) =>
+        searchAnalytics(request, token, property.siteUrl, body),
+      ),
     ]);
 
-  const inspectionUrl = inspectionUrlFromSite(config.siteUrl);
-  const inspection = inspectionUrl
-    ? await safeGscRequest(token, "POST", "/v1/urlInspection/index:inspect", {
-        inspectionUrl,
-        siteUrl: config.siteUrl,
-      })
-    : {
-        ok: false,
-        error: { status: 0, message: "No inspection URL", payload: null },
-      };
-
-  const report = {
-    generatedAt: new Date().toISOString(),
-    siteUrl: config.siteUrl,
-    dateRange,
-    sites,
+  const inspectionUrl = inspectionUrlFromSite(property.siteUrl);
+  const inspection = await request(token, "POST", "/v1/urlInspection/index:inspect", {
+    inspectionUrl,
+    siteUrl: property.siteUrl,
+  });
+  const queryProbes = QUERY_PROBES.map((query, index) =>
+    normalizeQueryProbe(query, probeResults[index]),
+  );
+  const providerResults = {
     totals,
     byQuery,
     byPage,
+    byQueryPage,
     byDevice,
     byCountry,
     sitemaps,
     inspection,
+    ...Object.fromEntries(
+      queryProbes
+        .filter((probe) => probe.status === "request_failed")
+        .map((probe) => [`queryProbe:${probe.query}`, { ok: false, error: probe.error }]),
+    ),
   };
 
-  const markdown = buildMarkdown(report);
-  const totalsValue = extractTotals(totals);
+  return {
+    receiptVersion: 1,
+    generatedAt: new Date(now).toISOString(),
+    provider: "Google Search Console API",
+    property: { ...property, permissionLevel: siteAccess.permissionLevel },
+    siteUrl: property.siteUrl,
+    dateRange,
+    requestSpec: {
+      rowLimit: args.rowLimit,
+      searchAnalytics: requestBodies,
+      inspection: { inspectionUrl, siteUrl: property.siteUrl },
+    },
+    siteAccess,
+    totals,
+    byQuery,
+    byPage,
+    byQueryPage,
+    byDevice,
+    byCountry,
+    queryProbes,
+    sitemaps,
+    inspection,
+    providerErrors: collectProviderErrors(providerResults),
+  };
+}
 
-  console.log(`Site: ${config.siteUrl}`);
-  console.log(`Period: ${dateRange.startDate} - ${dateRange.endDate}`);
+export async function runCli(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    printHelp();
+    return null;
+  }
+
+  const config = loadConfig(args.envPath);
+  const report = await executeReport({ args, config });
+  const markdown = buildMarkdown(report);
+  const totalsValue = extractTotals(report.totals);
+
+  console.log(`Site: ${report.siteUrl}`);
+  console.log(`Property: ${report.property.alias}`);
+  console.log(`Period: ${report.dateRange.startDate} - ${report.dateRange.endDate}`);
   if (totalsValue) {
     console.log(
       `Totals: clicks=${totalsValue.clicks}, impressions=${totalsValue.impressions}, CTR=${(totalsValue.ctr * 100).toFixed(2)}%, position=${totalsValue.position.toFixed(2)}`,
     );
   } else {
-    console.log(`Totals request failed: ${totals.error.message}`);
+    console.log(`Totals request failed: ${report.totals.error.message}`);
   }
 
   if (args.save) {
-    fs.mkdirSync(REPORT_DIR, { recursive: true });
-    fs.writeFileSync(
-      path.join(REPORT_DIR, "latest-gsc-report.json"),
-      `${JSON.stringify(report, null, 2)}\n`,
-      "utf8",
-    );
-    fs.writeFileSync(path.join(REPORT_DIR, "latest-gsc-report.md"), markdown, "utf8");
-    console.log(`Saved: ${path.join(REPORT_DIR, "latest-gsc-report.md")}`);
+    const outputs = saveReportArtifacts(REPORT_DIR, report, markdown);
+    console.log(`Saved: ${outputs.latestMarkdown}`);
+    console.log(`Receipt: ${outputs.receiptJson}`);
   }
+
+  return report;
 }
 
-main().catch((error) => {
-  console.error("GSC report failed.");
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  runCli().catch((error) => {
+    console.error("GSC report failed.");
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
