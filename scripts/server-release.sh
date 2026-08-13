@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT="${APP_ROOT:-/var/www/rosomaha}"
-RELEASES_DIR="$APP_ROOT/_releases"
-CURRENT_LINK="$APP_ROOT/current"
-CONTENT_SOURCE="${CONTENT_SOURCE:-$APP_ROOT/public/api/articles.json}"
+FIXED_APP_ROOT="/var/www/rosomaha"
+FIXED_CONTENT_SOURCE="/var/www/rosomaha/public/api/articles.json"
+REQUESTED_APP_ROOT="${APP_ROOT:-$FIXED_APP_ROOT}"
+REQUESTED_CONTENT_SOURCE="${CONTENT_SOURCE:-$FIXED_CONTENT_SOURCE}"
+APP_ROOT="$FIXED_APP_ROOT"
+RELEASES_DIR="$FIXED_APP_ROOT/_releases"
+CURRENT_LINK="$FIXED_APP_ROOT/current"
+CONTENT_SOURCE="$FIXED_CONTENT_SOURCE"
 CONTENT_CANDIDATE="$APP_ROOT/dist/api/articles.json"
 
 usage() {
@@ -33,19 +37,247 @@ if [[ "${1:-}" == -* ]]; then
   exit 2
 fi
 
-# Content Zavod writes its canonical export into the server source tree. A
-# manually uploaded SEO build may be based on an older local checkout, so block
-# the release if it would silently remove already exported CRM articles.
-if [[ -f "$CONTENT_SOURCE" ]]; then
-  if [[ ! -f "$CONTENT_CANDIDATE" ]]; then
-    echo "Release blocked: candidate articles export is missing: $CONTENT_CANDIDATE" >&2
+if [[ -n "${1:-}" && ! "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+  echo "Release blocked: invalid release label: $1" >&2
+  exit 2
+fi
+
+if [[ "$REQUESTED_APP_ROOT" != "$FIXED_APP_ROOT" || "$REQUESTED_CONTENT_SOURCE" != "$FIXED_CONTENT_SOURCE" ]]; then
+  echo "Release blocked: APP_ROOT and CONTENT_SOURCE must use the fixed production paths" >&2
+  exit 1
+fi
+
+# Release and rollback share one exact production mutex. Direct invocations
+# safely open-or-create it, acquire LOCK_EX without waiting, and then re-run
+# this script with that exact open-file-description inherited. The fixed price
+# operator already owns the same lock, so its child enters only through the
+# inherited branch and cannot self-deadlock.
+RELEASE_LOCK_PATH="/var/www/rosomaha/.rosomaha-main-price-release.lock"
+RELEASE_LOCK_MARKER="rosomaha-release-lock-inherited/v1"
+
+if [[ -n "${ROSOMAHA_RELEASE_LOCK_FD+x}" || -n "${ROSOMAHA_RELEASE_LOCK_INHERITED+x}" ]]; then
+  if [[ "${ROSOMAHA_RELEASE_LOCK_INHERITED-}" != "$RELEASE_LOCK_MARKER" || ! "${ROSOMAHA_RELEASE_LOCK_FD-}" =~ ^([3-9]|[1-9][0-9]+)$ ]]; then
+    echo "Release blocked: invalid inherited release-lock contract" >&2
     exit 1
   fi
 
-  /usr/bin/python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<'PY'
+  /usr/bin/python3 - "$RELEASE_LOCK_PATH" "$ROSOMAHA_RELEASE_LOCK_FD" <<'PY'
+import errno
+import fcntl
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+LOCK_PATH = Path("/var/www/rosomaha/.rosomaha-main-price-release.lock")
+ALLOWED_GIDS = {0, 33}
+
+
+def same_inode(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def require_safe_lock(fd, path):
+    if path != LOCK_PATH:
+        raise RuntimeError("release lock path is not the fixed production path")
+    opened = os.fstat(fd)
+    linked = os.lstat(path)
+    for info in (opened, linked):
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != 0
+            or info.st_gid not in ALLOWED_GIDS
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise RuntimeError("release lock metadata is unsafe")
+    if not same_inode(opened, linked):
+        raise RuntimeError("release lock descriptor is not bound to the fixed path")
+    return opened
+
+
+def flock_would_block(exc):
+    return isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EAGAIN}
+
+
+def require_inherited_exclusive_lock(fd, path):
+    require_safe_lock(fd, path)
+    probe = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        probe_info = require_safe_lock(probe, path)
+        if not same_inode(probe_info, os.fstat(fd)):
+            raise RuntimeError("release lock probe reached a different inode")
+
+        # An independent shared probe can only be blocked by an exclusive
+        # flock. If it succeeds, the supplied descriptor was not already an
+        # exclusive owner; close the diagnostic probe and fail closed.
+        try:
+            fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if not flock_would_block(exc):
+                raise
+        else:
+            raise RuntimeError("inherited release lock was not already exclusive")
+
+        # Linux flock locks belong to an open-file-description. Repeating the
+        # same exclusive operation succeeds only for the inherited owning OFD;
+        # an unlocked descriptor or a different owner's descriptor is blocked.
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if flock_would_block(exc):
+                raise RuntimeError(
+                    "inherited descriptor does not own the exclusive release lock"
+                ) from exc
+            raise
+
+        require_safe_lock(fd, path)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if not flock_would_block(exc):
+                raise
+        else:
+            raise RuntimeError("inherited release lock lost exclusivity")
+    finally:
+        os.close(probe)
+
+
+try:
+    lock_path = Path(sys.argv[1])
+    fd_text = sys.argv[2]
+    if not fd_text.isascii() or not fd_text.isdecimal() or str(int(fd_text)) != fd_text:
+        raise RuntimeError("inherited release-lock fd is invalid")
+    lock_fd = int(fd_text)
+    if lock_fd < 3 or lock_fd > 1_000_000:
+        raise RuntimeError("inherited release-lock fd is out of range")
+    require_inherited_exclusive_lock(lock_fd, lock_path)
+except Exception as exc:
+    print(f"Release blocked: unsafe inherited release lock: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+else
+  /usr/bin/python3 - "$0" "$@" <<'PY'
+import errno
+import fcntl
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+LOCK_PATH = Path("/var/www/rosomaha/.rosomaha-main-price-release.lock")
+LOCK_MARKER = "rosomaha-release-lock-inherited/v1"
+ALLOWED_GIDS = {0, 33}
+
+
+def same_inode(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def require_safe_lock(fd):
+    opened = os.fstat(fd)
+    linked = os.lstat(LOCK_PATH)
+    for info in (opened, linked):
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != 0
+            or info.st_gid not in ALLOWED_GIDS
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise RuntimeError("release lock metadata is unsafe")
+    if not same_inode(opened, linked):
+        raise RuntimeError("release lock descriptor is not bound to the fixed path")
+
+
+def open_direct_lock():
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise RuntimeError("direct release locking requires exact root identity")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(LOCK_PATH, flags)
+    except FileNotFoundError:
+        try:
+            fd = os.open(LOCK_PATH, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            fd = os.open(LOCK_PATH, flags)
+    try:
+        require_safe_lock(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise RuntimeError("another release or rollback already holds the lock") from exc
+            raise
+        require_safe_lock(fd)
+        probe = os.open(LOCK_PATH, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            require_safe_lock(probe)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+            else:
+                raise RuntimeError("direct release lock is not exclusive")
+        finally:
+            os.close(probe)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+lock_fd = None
+try:
+    lock_fd = open_direct_lock()
+    env = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "ROSOMAHA_RELEASE_LOCK_FD": str(lock_fd),
+        "ROSOMAHA_RELEASE_LOCK_INHERITED": LOCK_MARKER,
+    }
+    completed = subprocess.run(
+        ["/usr/bin/bash", sys.argv[1], *sys.argv[2:]],
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        pass_fds=(lock_fd,),
+        env=env,
+        check=False,
+    )
+    raise SystemExit(completed.returncode)
+except Exception as exc:
+    print(f"Release blocked: could not acquire release lock: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+PY
+  exit $?
+fi
+
+# Content Zavod writes its canonical export into the server source tree. A
+# manually uploaded SEO build may be based on an older local checkout, so block
+# the release if it would silently remove already exported CRM articles.
+if [[ ! -f "$CONTENT_SOURCE" ]]; then
+  echo "Release blocked: canonical articles export is missing: $CONTENT_SOURCE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$CONTENT_CANDIDATE" ]]; then
+  echo "Release blocked: candidate articles export is missing: $CONTENT_CANDIDATE" >&2
+  exit 1
+fi
+
+/usr/bin/python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<'PY'
 import json
 import sys
 from pathlib import Path
+
 
 source_path = Path(sys.argv[1])
 candidate_path = Path(sys.argv[2])
@@ -89,7 +321,6 @@ print(
     f"Content guard passed: source={len(source_slugs)}, candidate={len(candidate_slugs)}"
 )
 PY
-fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 SHA="$(git -C "$APP_ROOT" rev-parse --short HEAD 2>/dev/null || echo manual)"
@@ -119,6 +350,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+FIXED_APP_ROOT = Path("/var/www/rosomaha")
 
 def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
@@ -177,6 +410,8 @@ def guarded_release(
     source_dir: Path,
     run_rsync=subprocess.run,
 ) -> Path:
+    if app_root != FIXED_APP_ROOT:
+        raise RuntimeError("application root must be the fixed production path")
     normalized_app_root = Path(os.path.normpath(str(app_root)))
     if not app_root.is_absolute() or app_root != normalized_app_root:
         raise RuntimeError("application root must be an absolute normalized path")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import posixpath
@@ -8,10 +9,12 @@ import stat
 import types
 import unittest
 from pathlib import Path, PurePosixPath
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "server-release.sh"
+ROLLBACK_SCRIPT = ROOT / "scripts" / "server-rollback.sh"
 APP = PurePosixPath("/var/www/rosomaha")
 RELEASES = APP / "_releases"
 CURRENT = APP / "current"
@@ -21,10 +24,14 @@ OPERATOR_MARKER = '"$APP_ROOT/dist" <<\'PY\'\n'
 CONTENT_GUARD_MARKER = (
     '/usr/bin/python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<\'PY\'\n'
 )
+INHERITED_LOCK_MARKER = (
+    '/usr/bin/python3 - "$RELEASE_LOCK_PATH" "$ROSOMAHA_RELEASE_LOCK_FD" <<\'PY\'\n'
+)
+DIRECT_LOCK_MARKER = '/usr/bin/python3 - "$0" "$@" <<\'PY\'\n'
 
 
-def script_text() -> str:
-    return SCRIPT.read_text(encoding="utf-8")
+def script_text(path: Path = SCRIPT) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def embedded_namespace() -> dict[str, object]:
@@ -39,6 +46,7 @@ def embedded_namespace() -> dict[str, object]:
     namespace: dict[str, object] = {}
     exec(compile(source, str(SCRIPT), "exec"), namespace)
     namespace["Path"] = PurePosixPath
+    namespace["FIXED_APP_ROOT"] = APP
     return namespace
 
 
@@ -49,20 +57,30 @@ def content_guard_source() -> str:
     return text[start:end]
 
 
+def heredoc_source(marker: str, path: Path = SCRIPT) -> str:
+    text = script_text(path)
+    start = text.index(marker) + len(marker)
+    end = text.index("\nPY\n", start)
+    return text[start:end]
+
+
 def inode_stat(
     kind: int,
     mode: int,
     *,
     uid: int = 0,
+    gid: int = 33,
     dev: int = 7,
     ino: int = 11,
+    nlink: int = 1,
 ) -> os.stat_result:
     return types.SimpleNamespace(
         st_mode=kind | mode,
         st_uid=uid,
-        st_gid=33,
+        st_gid=gid,
         st_dev=dev,
         st_ino=ino,
+        st_nlink=nlink,
     )
 
 
@@ -72,6 +90,119 @@ def directory_stat(mode: int, *, uid: int = 0, ino: int = 11) -> os.stat_result:
 
 def symlink_stat(*, uid: int = 0, ino: int = 21) -> os.stat_result:
     return inode_stat(stat.S_IFLNK, 0o777, uid=uid, ino=ino)
+
+
+class FakeFlockKernel:
+    """Execute lock helpers with Linux flock open-file-description semantics."""
+
+    O_RDONLY = getattr(os, "O_RDONLY", 0)
+    O_RDWR = getattr(os, "O_RDWR", 2)
+    O_CREAT = getattr(os, "O_CREAT", 0x40)
+    O_EXCL = getattr(os, "O_EXCL", 0x80)
+    O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0x20000)
+
+    def __init__(self, *, inherited_fd: int = 9, missing: bool = False) -> None:
+        self.path_info = inode_stat(stat.S_IFREG, 0o600, uid=0, ino=501)
+        self.path_exists = not missing
+        self.inherited_fd = inherited_fd
+        self.fd_info = {inherited_fd: self.path_info}
+        self.ofd = {inherited_fd: 901}
+        self.lock_owner: int | None = None
+        self.lock_kind: str | None = None
+        self.next_fd = 40
+        self.events: list[tuple] = []
+
+    def getuid(self) -> int:
+        return 0
+
+    def geteuid(self) -> int:
+        return 0
+
+    def open(self, path, flags: int, mode: int | None = None) -> int:
+        self.events.append(("open", str(path), flags, mode))
+        create = bool(flags & self.O_CREAT)
+        exclusive = bool(flags & self.O_EXCL)
+        if not self.path_exists:
+            if not create:
+                raise FileNotFoundError(str(path))
+            self.path_exists = True
+            self.path_info = inode_stat(
+                stat.S_IFREG, mode if mode is not None else 0o600, uid=0, ino=501,
+            )
+        elif create and exclusive:
+            raise FileExistsError(str(path))
+        fd = self.next_fd
+        self.next_fd += 1
+        self.fd_info[fd] = self.path_info
+        self.ofd[fd] = fd + 1000
+        return fd
+
+    def fstat(self, fd: int):
+        self.events.append(("fstat", fd))
+        if fd not in self.fd_info:
+            raise OSError(errno.EBADF, "bad fd")
+        return self.fd_info[fd]
+
+    def lstat(self, path):
+        self.events.append(("lstat", str(path)))
+        if not self.path_exists:
+            raise FileNotFoundError(str(path))
+        return self.path_info
+
+    def close(self, fd: int) -> None:
+        self.events.append(("close", fd))
+        owner = self.ofd.pop(fd, None)
+        self.fd_info.pop(fd, None)
+        if owner is not None and owner == self.lock_owner:
+            self.lock_owner = None
+            self.lock_kind = None
+
+    def flock(self, fd: int, operation: int, api) -> None:
+        self.events.append(("flock", fd, operation))
+        if fd not in self.ofd:
+            raise OSError(errno.EBADF, "bad fd")
+        requested = "exclusive" if operation & api.LOCK_EX else "shared"
+        owner = self.ofd[fd]
+        if self.lock_owner is None:
+            self.lock_owner = owner
+            self.lock_kind = requested
+            return
+        if self.lock_owner == owner:
+            self.lock_kind = requested
+            return
+        if self.lock_kind == "exclusive" or requested == "exclusive":
+            raise BlockingIOError(errno.EAGAIN, "would block")
+        # The test model needs only one shared owner; compatible shared probes
+        # are represented by the first owner and released when its fd closes.
+
+
+class FakeFcntl(types.ModuleType):
+    LOCK_SH = 1
+    LOCK_EX = 2
+    LOCK_NB = 4
+
+    def __init__(self, kernel: FakeFlockKernel) -> None:
+        super().__init__("fcntl")
+        self.kernel = kernel
+
+    def flock(self, fd: int, operation: int) -> None:
+        self.kernel.flock(fd, operation, self)
+
+
+def lock_namespace(
+    marker: str,
+    stop: str,
+    kernel: FakeFlockKernel,
+    path: Path = SCRIPT,
+) -> dict[str, object]:
+    source = heredoc_source(marker, path).split(stop, maxsplit=1)[0]
+    fake_fcntl = FakeFcntl(kernel)
+    with mock.patch.dict(__import__("sys").modules, {"fcntl": fake_fcntl}):
+        namespace: dict[str, object] = {}
+        exec(compile(source, str(path), "exec"), namespace)
+    namespace["os"] = kernel
+    namespace["fcntl"] = fake_fcntl
+    return namespace
 
 
 class FakeKernel:
@@ -327,6 +458,195 @@ def execute_cli(kernel: FakeKernel) -> tuple[int, str, str]:
     return status, stdout.getvalue(), stderr.getvalue()
 
 
+class SharedReleaseLockTests(unittest.TestCase):
+    def inherited(
+        self,
+        kernel: FakeFlockKernel,
+        path: Path = SCRIPT,
+    ) -> dict[str, object]:
+        return lock_namespace(
+            INHERITED_LOCK_MARKER,
+            "try:\n    lock_path = Path(sys.argv[1])",
+            kernel,
+            path,
+        )
+
+    def direct(
+        self,
+        kernel: FakeFlockKernel,
+        path: Path = SCRIPT,
+    ) -> dict[str, object]:
+        return lock_namespace(
+            DIRECT_LOCK_MARKER, "lock_fd = None\ntry:", kernel, path,
+        )
+
+    def test_help_exits_before_any_lock_path_or_lock_bootstrap(self) -> None:
+        text = script_text()
+        help_exit = text.index('if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]')
+        lock_path = text.index('RELEASE_LOCK_PATH="/var/www/rosomaha/.rosomaha-main-price-release.lock"')
+        self.assertLess(help_exit, lock_path)
+        self.assertIn("usage\n  exit 0", text[help_exit:lock_path])
+
+    def test_direct_lock_contract_is_fixed_private_nonblocking_and_inode_bound(self) -> None:
+        source = heredoc_source(DIRECT_LOCK_MARKER)
+        self.assertIn('LOCK_PATH = Path("/var/www/rosomaha/.rosomaha-main-price-release.lock")', source)
+        self.assertIn("os.O_CREAT | os.O_EXCL", source)
+        self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", source)
+        self.assertIn("info.st_uid != 0", source)
+        self.assertIn("info.st_gid not in ALLOWED_GIDS", source)
+        self.assertIn("info.st_nlink != 1", source)
+        self.assertIn("stat.S_IMODE(info.st_mode) != 0o600", source)
+        self.assertIn("if not same_inode(opened, linked)", source)
+
+    def test_direct_open_create_acquires_exclusive_lock(self) -> None:
+        kernel = FakeFlockKernel(missing=True)
+        namespace = self.direct(kernel)
+        fd = namespace["open_direct_lock"]()
+        self.assertTrue(kernel.path_exists)
+        self.assertEqual(kernel.lock_owner, kernel.ofd[fd])
+        self.assertEqual(kernel.lock_kind, "exclusive")
+        self.assertIn(("open", str(namespace["LOCK_PATH"]), kernel.O_RDWR | kernel.O_NOFOLLOW | kernel.O_CREAT | kernel.O_EXCL, 0o600), kernel.events)
+
+    def test_direct_lock_contention_fails_without_waiting_or_stealing(self) -> None:
+        kernel = FakeFlockKernel()
+        kernel.lock_owner = 777
+        kernel.lock_kind = "exclusive"
+        namespace = self.direct(kernel)
+        with self.assertRaisesRegex(RuntimeError, "already holds the lock"):
+            namespace["open_direct_lock"]()
+        self.assertEqual(kernel.lock_owner, 777)
+        self.assertEqual(kernel.lock_kind, "exclusive")
+
+    def test_direct_release_and_direct_rollback_contend_on_one_lock(self) -> None:
+        kernel = FakeFlockKernel(missing=True)
+        release = self.direct(kernel)
+        release_fd = release["open_direct_lock"]()
+        self.assertEqual(kernel.lock_owner, kernel.ofd[release_fd])
+
+        rollback = lock_namespace(
+            DIRECT_LOCK_MARKER,
+            "lock_fd = None\ntry:",
+            kernel,
+            ROLLBACK_SCRIPT,
+        )
+        with self.assertRaisesRegex(RuntimeError, "already holds the lock"):
+            rollback["open_direct_lock"]()
+        self.assertEqual(kernel.lock_owner, kernel.ofd[release_fd])
+        self.assertEqual(kernel.lock_kind, "exclusive")
+
+    def test_inherited_locked_fd_is_accepted_without_unlock(self) -> None:
+        kernel = FakeFlockKernel()
+        kernel.lock_owner = kernel.ofd[kernel.inherited_fd]
+        kernel.lock_kind = "exclusive"
+        namespace = self.inherited(kernel)
+        namespace["require_inherited_exclusive_lock"](
+            kernel.inherited_fd, namespace["LOCK_PATH"],
+        )
+        self.assertEqual(kernel.lock_owner, kernel.ofd[kernel.inherited_fd])
+        self.assertEqual(kernel.lock_kind, "exclusive")
+        inherited_flocks = [event for event in kernel.events if event[:2] == ("flock", kernel.inherited_fd)]
+        self.assertEqual(len(inherited_flocks), 1)
+        self.assertEqual(inherited_flocks[0][2], FakeFcntl.LOCK_EX | FakeFcntl.LOCK_NB)
+
+    def test_inherited_unlocked_or_foreign_owned_fd_is_rejected(self) -> None:
+        unlocked = FakeFlockKernel()
+        namespace = self.inherited(unlocked)
+        with self.assertRaisesRegex(RuntimeError, "not already exclusive"):
+            namespace["require_inherited_exclusive_lock"](
+                unlocked.inherited_fd, namespace["LOCK_PATH"],
+            )
+        self.assertIsNone(unlocked.lock_owner)
+
+        foreign = FakeFlockKernel()
+        foreign.lock_owner = 777
+        foreign.lock_kind = "exclusive"
+        namespace = self.inherited(foreign)
+        with self.assertRaisesRegex(RuntimeError, "does not own"):
+            namespace["require_inherited_exclusive_lock"](
+                foreign.inherited_fd, namespace["LOCK_PATH"],
+            )
+        self.assertEqual(foreign.lock_owner, 777)
+
+    def test_inherited_bad_fd_path_inode_and_metadata_are_rejected(self) -> None:
+        bad_fd = FakeFlockKernel()
+        namespace = self.inherited(bad_fd)
+        with self.assertRaises(OSError):
+            namespace["require_inherited_exclusive_lock"](
+                999, namespace["LOCK_PATH"],
+            )
+
+        bad_path = FakeFlockKernel()
+        namespace = self.inherited(bad_path)
+        with self.assertRaisesRegex(RuntimeError, "fixed production path"):
+            namespace["require_inherited_exclusive_lock"](
+                bad_path.inherited_fd, Path("/tmp/not-the-release-lock"),
+            )
+
+        bad_inode = FakeFlockKernel()
+        bad_inode.fd_info[bad_inode.inherited_fd] = inode_stat(
+            stat.S_IFREG, 0o600, uid=0, ino=999,
+        )
+        namespace = self.inherited(bad_inode)
+        with self.assertRaisesRegex(RuntimeError, "not bound"):
+            namespace["require_inherited_exclusive_lock"](
+                bad_inode.inherited_fd, namespace["LOCK_PATH"],
+            )
+
+        bad_metadata = FakeFlockKernel()
+        bad_metadata.path_info = inode_stat(
+            stat.S_IFREG, 0o640, uid=0, gid=99, ino=501, nlink=2,
+        )
+        bad_metadata.fd_info[bad_metadata.inherited_fd] = bad_metadata.path_info
+        namespace = self.inherited(bad_metadata)
+        with self.assertRaisesRegex(RuntimeError, "metadata is unsafe"):
+            namespace["require_inherited_exclusive_lock"](
+                bad_metadata.inherited_fd, namespace["LOCK_PATH"],
+            )
+
+    def test_rollback_lock_copy_has_the_same_execution_semantics(self) -> None:
+        direct = FakeFlockKernel(missing=True)
+        direct_namespace = self.direct(direct, ROLLBACK_SCRIPT)
+        direct_fd = direct_namespace["open_direct_lock"]()
+        self.assertEqual(direct.lock_owner, direct.ofd[direct_fd])
+        self.assertEqual(direct.lock_kind, "exclusive")
+
+        inherited = FakeFlockKernel()
+        inherited.lock_owner = inherited.ofd[inherited.inherited_fd]
+        inherited.lock_kind = "exclusive"
+        inherited_namespace = self.inherited(inherited, ROLLBACK_SCRIPT)
+        inherited_namespace["require_inherited_exclusive_lock"](
+            inherited.inherited_fd, inherited_namespace["LOCK_PATH"],
+        )
+        self.assertEqual(inherited.lock_owner, inherited.ofd[inherited.inherited_fd])
+        self.assertEqual(inherited.lock_kind, "exclusive")
+
+        unlocked = FakeFlockKernel()
+        unlocked_namespace = self.inherited(unlocked, ROLLBACK_SCRIPT)
+        with self.assertRaisesRegex(RuntimeError, "not already exclusive"):
+            unlocked_namespace["require_inherited_exclusive_lock"](
+                unlocked.inherited_fd, unlocked_namespace["LOCK_PATH"],
+            )
+
+        foreign = FakeFlockKernel()
+        foreign.lock_owner = 777
+        foreign.lock_kind = "exclusive"
+        foreign_namespace = self.inherited(foreign, ROLLBACK_SCRIPT)
+        with self.assertRaisesRegex(RuntimeError, "does not own"):
+            foreign_namespace["require_inherited_exclusive_lock"](
+                foreign.inherited_fd, foreign_namespace["LOCK_PATH"],
+            )
+
+        bad_inode = FakeFlockKernel()
+        bad_inode.fd_info[bad_inode.inherited_fd] = inode_stat(
+            stat.S_IFREG, 0o600, uid=0, ino=999,
+        )
+        bad_inode_namespace = self.inherited(bad_inode, ROLLBACK_SCRIPT)
+        with self.assertRaisesRegex(RuntimeError, "not bound"):
+            bad_inode_namespace["require_inherited_exclusive_lock"](
+                bad_inode.inherited_fd, bad_inode_namespace["LOCK_PATH"],
+            )
+
+
 class ReleaseRootOperatorTests(unittest.TestCase):
     def test_shell_has_no_pre_operator_release_write_or_path_based_rsync(self) -> None:
         text = script_text()
@@ -351,6 +671,34 @@ class ReleaseRootOperatorTests(unittest.TestCase):
         self.assertNotIn("set[", source)
         self.assertNotIn("list[", source)
         compile(source, str(SCRIPT), "exec")
+        self.assertIn(
+            'if [[ ! -f "$CONTENT_SOURCE" ]]; then',
+            text,
+        )
+
+    def test_release_paths_are_exact_and_environment_overrides_fail_closed(self) -> None:
+        text = script_text()
+        self.assertIn('FIXED_APP_ROOT="/var/www/rosomaha"', text)
+        self.assertIn(
+            'FIXED_CONTENT_SOURCE="/var/www/rosomaha/public/api/articles.json"',
+            text,
+        )
+        self.assertIn(
+            'if [[ "$REQUESTED_APP_ROOT" != "$FIXED_APP_ROOT" || '
+            '"$REQUESTED_CONTENT_SOURCE" != "$FIXED_CONTENT_SOURCE" ]]; then',
+            text,
+        )
+        direct_source = heredoc_source(DIRECT_LOCK_MARKER)
+        self.assertNotIn('env[name] = os.environ[name]', direct_source)
+        namespace = embedded_namespace()
+        with self.assertRaisesRegex(RuntimeError, "fixed production path"):
+            namespace["guarded_release"](
+                PurePosixPath("/var/www/another-app"),
+                PurePosixPath("/var/www/another-app/_releases"),
+                PurePosixPath("/var/www/another-app/current"),
+                RELEASE_NAME,
+                PurePosixPath("/var/www/another-app/dist"),
+            )
 
     def test_label_is_bounded_before_release_name_is_built(self) -> None:
         text = script_text()

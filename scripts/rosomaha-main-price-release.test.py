@@ -203,6 +203,14 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertEqual(helper.TARGET_COMMIT, "64ba304c6c3128493a30e7408273652a326752d3")
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
+        self.assertIn(
+            'RELEASE_SCRIPT_SHA256 = "9caad8bde40e0f269ad0887c8b16c97cfc18c0495ad72068f2c812d2859c1fa2"',
+            operator_source(),
+        )
+        self.assertIn(
+            'ROLLBACK_SCRIPT_SHA256 = "8f2390ec2d6b3248b49ef8b690de5413bdcc7930180e584524de72094d676388"',
+            operator_source(),
+        )
         self.assertEqual(len(helper.ARTICLES_CZ_ALLOWLIST), 33)
         self.assertIn("avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts", helper.ARTICLES_CZ_ALLOWLIST)
         self.assertIn("rosomaha-zastryala-v-bolote-spokoynyy-poryadok-deystviy-bez-lishney-suety.ts", helper.ARTICLES_CZ_ALLOWLIST)
@@ -526,6 +534,86 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertIn('trusted_scripts["server-release.sh"]', apply_body)
         self.assertIn('trusted_scripts["server-rollback.sh"]', apply_body)
         self.assertIn('trusted_scripts["server-rollback.sh"]', rollback_body)
+
+    def test_fixed_scripts_inherit_only_the_exact_held_release_lock_fd(self) -> None:
+        namespace = operator_namespace()
+        runner = operator_source()[
+            operator_source().index("def run_fixed") :
+            operator_source().index("def restore_staging")
+        ]
+        self.assertIn("def run_fixed(script_path, argument, timeout, release_lock_fd):", runner)
+        self.assertIn('"ROSOMAHA_RELEASE_LOCK_FD": str(release_lock_fd)', runner)
+        self.assertIn(
+            '"ROSOMAHA_RELEASE_LOCK_INHERITED": "rosomaha-release-lock-inherited/v1"',
+            runner,
+        )
+        self.assertIn("pass_fds=(release_lock_fd,)", runner)
+        self.assertNotIn("os.environ", runner)
+
+        regular = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o700, st_nlink=1, st_uid=0,
+        )
+        directory = types.SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700, st_nlink=1, st_uid=0,
+        )
+        completed = types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        script = Path("/tmp/trusted-scripts-apply/server-release.sh")
+        with mock.patch.object(
+            namespace["os"], "lstat", side_effect=[regular, directory],
+        ), mock.patch.dict(
+            namespace, {"sha256_file": mock.Mock(return_value=namespace["RELEASE_SCRIPT_SHA256"])}
+        ), mock.patch.object(
+            namespace["subprocess"], "run", return_value=completed,
+        ) as run, mock.patch.object(
+            namespace["os"], "umask", side_effect=[0o077, 0o022],
+        ):
+            receipt = namespace["run_fixed"](script, "safe-label", 180, 77)
+        self.assertEqual(receipt["exit_code"], 0)
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs["close_fds"], True)
+        self.assertEqual(kwargs["pass_fds"], (77,))
+        self.assertEqual(
+            kwargs["env"]["ROSOMAHA_RELEASE_LOCK_FD"], "77",
+        )
+        self.assertEqual(
+            kwargs["env"]["ROSOMAHA_RELEASE_LOCK_INHERITED"],
+            "rosomaha-release-lock-inherited/v1",
+        )
+        self.assertEqual(
+            set(kwargs["env"]),
+            {
+                "APP_ROOT", "PATH", "LANG", "LC_ALL",
+                "ROSOMAHA_RELEASE_LOCK_FD",
+                "ROSOMAHA_RELEASE_LOCK_INHERITED",
+            },
+        )
+
+    def test_all_fixed_release_and_rollback_callers_pass_the_held_lock_fd(self) -> None:
+        source = operator_source()
+        apply_body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        rollback_body = source[source.index("def rollback_release") : source.index("def main")]
+        self.assertEqual(apply_body.count("run_fixed("), 2)
+        self.assertIn(
+            'release_receipt = run_fixed(trusted_scripts["server-release.sh"], '
+            'RELEASE_LABEL, 180, lock.fileno())',
+            apply_body,
+        )
+        self.assertIn(
+            'automatic_rollback = run_fixed(\n'
+            '                        trusted_scripts["server-rollback.sh"],\n'
+            '                        Path(baseline["current_release"]).name,\n'
+            '                        180,\n'
+            '                        lock.fileno(),',
+            apply_body,
+        )
+        self.assertEqual(rollback_body.count("run_fixed("), 1)
+        self.assertIn(
+            'rollback_receipt = run_fixed(\n'
+            '                trusted_scripts["server-rollback.sh"], '
+            'Path(baseline["current_release"]).name, 180,\n'
+            '                lock.fileno(),',
+            rollback_body,
+        )
 
     def test_fixed_script_runs_with_closed_umask_and_restores_process_state(self) -> None:
         source = operator_source()
@@ -1329,6 +1417,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         body = text[text.index("def open_lock"):text.index("def validate_bundle")]
         self.assertIn('getattr(os, "O_NOFOLLOW", 0)', body)
         self.assertIn("os.O_CREAT | os.O_EXCL", body)
+        self.assertIn("opened.st_gid not in {0, 33}", body)
         self.assertIn("(opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)", body)
 
     def test_operator_rollback_rechecks_exact_baseline_tree_and_topology(self) -> None:

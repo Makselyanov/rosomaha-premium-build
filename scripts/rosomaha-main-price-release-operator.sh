@@ -68,8 +68,8 @@ RELEASE_SCRIPT = APP_ROOT / "scripts/server-release.sh"
 ROLLBACK_SCRIPT = APP_ROOT / "scripts/server-rollback.sh"
 LOCK_PATH = APP_ROOT / ".rosomaha-main-price-release.lock"
 PUBLIC_ARTICLES_URL = "https://xn--80aa8ahaki9a.site/api/articles.json"
-RELEASE_SCRIPT_SHA256 = "c25fc273a4cf88a27879207aaebf18be62f4487867a7de7674c611b400919edd"
-ROLLBACK_SCRIPT_SHA256 = "aeee52f314036112501a7acc0af5fa09ee7c081327fb867b91c64b983bd41acc"
+RELEASE_SCRIPT_SHA256 = "9caad8bde40e0f269ad0887c8b16c97cfc18c0495ad72068f2c812d2859c1fa2"
+ROLLBACK_SCRIPT_SHA256 = "8f2390ec2d6b3248b49ef8b690de5413bdcc7930180e584524de72094d676388"
 DIAGNOSTIC_BASELINE_OPERATOR_SHA256 = "57e364d6f9439244f87b4d0b44ccdc092ff508aca20d8e90092a5d1926094e6c"
 FIXED_COMMANDS = ("python3", "rsync", "bash", "date", "git", "mkdir", "ln", "readlink", "find", "sort")
 ARTICLES_CZ_ALLOWLIST = (
@@ -658,7 +658,7 @@ def lock_readiness():
         return {"path": str(LOCK_PATH), "exists": False, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
     valid = bool(
         stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode)
-        and details.st_nlink == 1 and details.st_uid == 0
+        and details.st_nlink == 1 and details.st_uid == 0 and details.st_gid in {0, 33}
         and stat.S_IMODE(details.st_mode) == 0o600 and within(APP_ROOT, LOCK_PATH)
     )
     available = False
@@ -777,7 +777,8 @@ def root_apply_readiness(
     if lock_already_held:
         lock = safe_file(LOCK_PATH, root=APP_ROOT)
         lock["valid"] = bool(
-            lock.get("valid") and lock.get("uid") == 0 and lock.get("mode") == oct(0o600)
+            lock.get("valid") and lock.get("uid") == 0 and lock.get("gid") in {0, 33}
+            and lock.get("mode") == oct(0o600)
         )
         lock["available"] = lock["valid"]
         lock["held_by_operator"] = True
@@ -929,6 +930,7 @@ def open_lock(*, create):
         linked = os.lstat(LOCK_PATH)
         if (
             not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_uid != os.getuid()
+            or opened.st_gid not in {0, 33}
             or stat.S_IMODE(opened.st_mode) != 0o600 or stat.S_ISLNK(linked.st_mode)
             or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
             or not within(APP_ROOT, LOCK_PATH)
@@ -1779,7 +1781,7 @@ def reconstruct_candidate(bundle, baseline):
         raise
 
 
-def run_fixed(script_path, argument, timeout):
+def run_fixed(script_path, argument, timeout, release_lock_fd):
     if not re.fullmatch(r"trusted-scripts-(apply|rollback)", script_path.parent.name) or script_path.name not in {"server-release.sh", "server-rollback.sh"}:
         raise ReleaseError("refusing non-private fixed script execution")
     expected_sha = RELEASE_SCRIPT_SHA256 if script_path.name == "server-release.sh" else ROLLBACK_SCRIPT_SHA256
@@ -1801,6 +1803,8 @@ def run_fixed(script_path, argument, timeout):
     env = {
         "APP_ROOT": str(APP_ROOT), "PATH": FIXED_PATH,
         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "ROSOMAHA_RELEASE_LOCK_FD": str(release_lock_fd),
+        "ROSOMAHA_RELEASE_LOCK_INHERITED": "rosomaha-release-lock-inherited/v1",
     }
     previous_umask = os.umask(0o022)
     try:
@@ -1808,6 +1812,7 @@ def run_fixed(script_path, argument, timeout):
             command, cwd=script_path.parent, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace", timeout=timeout, check=False, env=env,
+            close_fds=True, pass_fds=(release_lock_fd,),
         )
     finally:
         os.umask(previous_umask)
@@ -1928,7 +1933,7 @@ def apply_release(bundle):
                 bundle, baseline["baseline_token"], "fixed_release_started",
                 progress_started_at, progress_started_monotonic, release_switched=False,
             )
-            release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180)
+            release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180, lock.fileno())
             new_release = resolved(CURRENT_LINK)
             release_switched = new_release != baseline["current_release"]
             write_apply_progress(
@@ -2003,6 +2008,7 @@ def apply_release(bundle):
                         trusted_scripts["server-rollback.sh"],
                         Path(baseline["current_release"]).name,
                         180,
+                        lock.fileno(),
                     )
                     verify_exact_baseline_state(baseline, require_staging=False)
                     rollback_topology = root_mutation_topology(
@@ -2565,6 +2571,7 @@ def rollback_release(bundle):
         try:
             rollback_receipt = run_fixed(
                 trusted_scripts["server-rollback.sh"], Path(baseline["current_release"]).name, 180,
+                lock.fileno(),
             )
             verification = verify_exact_baseline_state(baseline, require_staging=True)
             mutation_after_rollback = root_mutation_topology(baseline["current_release"], exact_new)
