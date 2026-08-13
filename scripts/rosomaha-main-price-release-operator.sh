@@ -48,6 +48,7 @@ BUNDLE_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
 
 SCHEMA = "rosomaha-main-price-release/v4"
 DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
+PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
 HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
@@ -109,6 +110,20 @@ BUNDLE_FILES = (
     "target-manifest.json",
     "operator.sh",
 )
+OPTIONAL_BUNDLE_FILES = ("apply-progress.json", "apply-receipt.json")
+PROGRESS_PHASES = {
+    "bundle_validated", "baseline_refreshed", "candidate_reconstructed",
+    "final_preflight_ok", "dist_swapped", "fixed_release_started",
+    "fixed_release_finished", "release_verified", "staging_restored",
+    "failed_before_switch", "failed_after_switch_rolled_back",
+    "failed_after_switch_unproved",
+}
+PROGRESS_FAILURE_PHASES = {
+    "failed_before_switch", "failed_after_switch_rolled_back",
+    "failed_after_switch_unproved",
+}
+MAX_PROGRESS_BYTES = 4 * 1024
+MAX_PROGRESS_ELAPSED_SECONDS = 24 * 60 * 60
 MAX_DELTA_ARCHIVE_BYTES = 16 * 1024 * 1024
 MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_DELTA_FILES = 1_000
@@ -970,6 +985,105 @@ def validate_delta_manifest(delta, baseline, target, archive):
     return changed, deleted
 
 
+def sanitize_progress_summary(value, limit=500):
+    text = str(value or "")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(
+        r"-----BEGIN [^-]*(?:PRIVATE|OPENSSH) KEY-----.*?-----END [^-]*(?:PRIVATE|OPENSSH) KEY-----",
+        "[REDACTED-PRIVATE-KEY]", text, flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|token|secret|password|passwd|api[_ -]?key|private[_ -]?key)\b"
+        r"(\s*[:=]\s*|\s+)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"(?i)([?&](?:access_token|token|secret|password|api[_-]?key)=)[^&\s]+",
+        r"\1[REDACTED]", text,
+    )
+    text = re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9_~+/=-]{48,}(?![A-Za-z0-9])", "[REDACTED-OPAQUE]", text)
+    text = " ".join("".join(character if ord(character) >= 32 else " " for character in text).split())
+    return text[-limit:] or "unspecified error"
+
+
+def valid_progress_timestamp(value):
+    if not isinstance(value, str) or len(value) > 40:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.tzinfo is not None
+    except ValueError:
+        return False
+
+
+def validate_progress_payload(payload, baseline_token):
+    base_keys = {
+        "schema", "phase", "started_at", "updated_at", "elapsed_seconds",
+        "baseline_token", "release_switched",
+    }
+    failure_keys = base_keys | {"error_type", "error_summary"}
+    if not isinstance(payload, dict) or set(payload) not in (base_keys, failure_keys):
+        raise ReleaseError("apply progress fields are unsafe")
+    phase = payload.get("phase")
+    if payload.get("schema") != PROGRESS_SCHEMA or phase not in PROGRESS_PHASES:
+        raise ReleaseError("apply progress schema/phase mismatch")
+    if payload.get("baseline_token") != baseline_token or not re.fullmatch(r"[0-9a-f]{64}", baseline_token):
+        raise ReleaseError("apply progress baseline token mismatch")
+    if not isinstance(payload.get("release_switched"), bool):
+        raise ReleaseError("apply progress release flag is invalid")
+    elapsed = payload.get("elapsed_seconds")
+    if isinstance(elapsed, bool) or not isinstance(elapsed, int) or not 0 <= elapsed <= MAX_PROGRESS_ELAPSED_SECONDS:
+        raise ReleaseError("apply progress elapsed value is invalid")
+    if not valid_progress_timestamp(payload.get("started_at")) or not valid_progress_timestamp(payload.get("updated_at")):
+        raise ReleaseError("apply progress timestamp is invalid")
+    started = datetime.fromisoformat(payload["started_at"])
+    updated = datetime.fromisoformat(payload["updated_at"])
+    if updated < started:
+        raise ReleaseError("apply progress timestamps are reversed")
+    if phase in PROGRESS_FAILURE_PHASES:
+        error_type = payload.get("error_type")
+        error_summary = payload.get("error_summary")
+        if (
+            set(payload) != failure_keys
+            or not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,99}", error_type)
+            or not isinstance(error_summary, str) or not 1 <= len(error_summary) <= 500
+            or error_summary != sanitize_progress_summary(error_summary)
+        ):
+            raise ReleaseError("apply progress error evidence is unsafe")
+    elif set(payload) != base_keys:
+        raise ReleaseError("non-failure apply progress contains error fields")
+    switched_phases = {
+        "release_verified", "staging_restored",
+        "failed_after_switch_rolled_back", "failed_after_switch_unproved",
+    }
+    if phase != "fixed_release_finished" and payload["release_switched"] != (phase in switched_phases):
+        raise ReleaseError("apply progress phase/release flag mismatch")
+    return payload
+
+
+def parse_progress_raw(raw, baseline_token):
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_PROGRESS_BYTES:
+        raise ReleaseError("apply progress size is invalid")
+
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReleaseError("apply progress contains duplicate fields")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("apply progress is invalid JSON") from exc
+    validate_progress_payload(payload, baseline_token)
+    if raw != canonical_json(payload) + b"\n":
+        raise ReleaseError("apply progress is not canonical JSON")
+    return payload
+
+
 def validate_bundle(bundle):
     match = re.fullmatch(r"/tmp/rosomaha-main-price-release-64ba304-([0-9a-f]{16})", str(bundle))
     if not match:
@@ -978,8 +1092,8 @@ def validate_bundle(bundle):
     if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode) or str(bundle.resolve(strict=True)) != str(bundle) or details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o700:
         raise ReleaseError("unsafe bundle directory")
     observed_names = sorted(item.name for item in bundle.iterdir())
-    expected_names = sorted(BUNDLE_FILES)
-    if observed_names not in (expected_names, sorted((*BUNDLE_FILES, "apply-receipt.json"))):
+    required_names = set(BUNDLE_FILES)
+    if not required_names.issubset(observed_names) or not set(observed_names).issubset(required_names | set(OPTIONAL_BUNDLE_FILES)):
         raise ReleaseError("bundle file set mismatch")
     for name in BUNDLE_FILES:
         path = bundle / name
@@ -1002,6 +1116,22 @@ def validate_bundle(bundle):
         raise ReleaseError("bundle path/token mismatch")
     if not re.fullmatch(r"[0-9a-f]{64}", baseline.get("baseline_token", "")) or baseline["baseline_token"] != full_baseline_token(baseline):
         raise ReleaseError("full bundle baseline token mismatch")
+    for optional_name in OPTIONAL_BUNDLE_FILES:
+        optional_path = bundle / optional_name
+        if not (optional_path.exists() or optional_path.is_symlink()):
+            continue
+        optional_info = os.lstat(optional_path)
+        maximum = MAX_PROGRESS_BYTES if optional_name == "apply-progress.json" else 1024 * 1024
+        if (
+            not stat.S_ISREG(optional_info.st_mode) or stat.S_ISLNK(optional_info.st_mode)
+            or optional_info.st_nlink != 1 or optional_info.st_uid != 0
+            or stat.S_IMODE(optional_info.st_mode) != 0o600
+            or optional_info.st_size <= 0 or optional_info.st_size > maximum
+            or optional_path.resolve(strict=True).parent != bundle
+        ):
+            raise ReleaseError(f"unsafe optional bundle topology: {optional_name}")
+        if optional_name == "apply-progress.json":
+            parse_progress_raw(optional_path.read_bytes(), baseline["baseline_token"])
     if sha256_file(bundle / "operator.sh") != baseline.get("operator_sha256"):
         raise ReleaseError("bundle operator mismatch")
     candidate = baseline.get("candidate", {})
@@ -1115,6 +1245,65 @@ def write_new_regular(path, raw, mode):
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def write_apply_progress(
+    bundle, baseline_token, phase, started_at, started_monotonic,
+    *, release_switched, error=None,
+):
+    if phase not in PROGRESS_PHASES or not isinstance(release_switched, bool):
+        raise ReleaseError("refusing invalid apply progress phase")
+    payload = {
+        "schema": PROGRESS_SCHEMA, "phase": phase,
+        "started_at": started_at, "updated_at": utc_now(),
+        "elapsed_seconds": min(
+            int(max(0.0, time.monotonic() - started_monotonic)),
+            MAX_PROGRESS_ELAPSED_SECONDS,
+        ),
+        "baseline_token": baseline_token, "release_switched": release_switched,
+    }
+    if phase in PROGRESS_FAILURE_PHASES:
+        if error is None:
+            raise ReleaseError("failure progress requires safe error evidence")
+        payload.update({
+            "error_type": type(error).__name__[:100],
+            "error_summary": sanitize_progress_summary(error),
+        })
+    elif error is not None:
+        raise ReleaseError("non-failure progress cannot include error evidence")
+    validate_progress_payload(payload, baseline_token)
+    raw = canonical_json(payload) + b"\n"
+    if len(raw) > MAX_PROGRESS_BYTES:
+        raise ReleaseError("apply progress exceeds fixed size limit")
+    final = bundle / "apply-progress.json"
+    temporary = bundle / "apply-progress.json.part"
+    if temporary.exists() or temporary.is_symlink():
+        raise ReleaseError("apply progress temporary path already exists")
+    if final.exists() or final.is_symlink():
+        existing = os.lstat(final)
+        if (
+            not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)
+            or existing.st_nlink != 1 or existing.st_uid != 0
+            or stat.S_IMODE(existing.st_mode) != 0o600
+            or final.resolve(strict=True).parent != bundle
+        ):
+            raise ReleaseError("existing apply progress topology is unsafe")
+    write_new_regular(temporary, raw, 0o600)
+    temporary_info = os.lstat(temporary)
+    if stat.S_IMODE(temporary_info.st_mode) != 0o600 or temporary_info.st_uid != 0:
+        raise ReleaseError("apply progress temporary file mode/owner mismatch")
+    os.replace(temporary, final)
+    fsync_directory(bundle)
+    final_info = os.lstat(final)
+    if (
+        not stat.S_ISREG(final_info.st_mode) or stat.S_ISLNK(final_info.st_mode)
+        or final_info.st_nlink != 1 or final_info.st_uid != 0
+        or stat.S_IMODE(final_info.st_mode) != 0o600
+        or final_info.st_size != len(raw)
+        or sha256_file(final) != sha256_bytes(raw)
+    ):
+        raise ReleaseError("atomic apply progress verification failed")
+    return payload
 
 
 def fsync_directory(path):
@@ -1464,12 +1653,34 @@ def restore_staging(candidate_at_dist, staging_backup, candidate_used):
 def apply_release(bundle):
     if not identity_for_mode("apply")["valid"]:
         raise ReleaseError("apply requires exact root identity")
-    validate_bundle(bundle)
+    progress_started_monotonic = time.monotonic()
+    progress_started_at = utc_now()
+    baseline = validate_bundle(bundle)
+    write_apply_progress(
+        bundle, baseline["baseline_token"], "bundle_validated",
+        progress_started_at, progress_started_monotonic, release_switched=False,
+    )
     with open_lock(create=True) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         baseline = validate_bundle(bundle)
-        fresh = verify_fresh_baseline(baseline)
-        candidate, delta_reconstruction = reconstruct_candidate(bundle, baseline)
+        try:
+            fresh = verify_fresh_baseline(baseline)
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "baseline_refreshed",
+                progress_started_at, progress_started_monotonic, release_switched=False,
+            )
+            candidate, delta_reconstruction = reconstruct_candidate(bundle, baseline)
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "candidate_reconstructed",
+                progress_started_at, progress_started_monotonic, release_switched=False,
+            )
+        except Exception as exc:
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "failed_before_switch",
+                progress_started_at, progress_started_monotonic,
+                release_switched=False, error=exc,
+            )
+            raise
         token = baseline["baseline_token"][:16]
         trusted_root = None
         trusted_scripts = None
@@ -1477,7 +1688,13 @@ def apply_release(bundle):
         candidate_used = APP_ROOT / f".price-candidate-used-{token}"
         if staging_backup.exists() or staging_backup.is_symlink() or candidate_used.exists() or candidate_used.is_symlink():
             shutil.rmtree(candidate, ignore_errors=True)
-            raise ReleaseError("staging backup path already exists")
+            path_error = ReleaseError("staging backup path already exists")
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "failed_before_switch",
+                progress_started_at, progress_started_monotonic,
+                release_switched=False, error=path_error,
+            )
+            raise path_error
         candidate_at_dist = False
         release_switched = False
         new_release = None
@@ -1498,6 +1715,10 @@ def apply_release(bundle):
                 raise ReleaseError("staging dist changed under lock")
             if exact_label_releases() != []:
                 raise ReleaseError("exact release target label appeared before apply")
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "final_preflight_ok",
+                progress_started_at, progress_started_monotonic, release_switched=False,
+            )
             os.replace(DIST_DIR, staging_backup)
             os.replace(candidate, DIST_DIR)
             candidate_at_dist = True
@@ -1515,9 +1736,22 @@ def apply_release(bundle):
             )
             if not mutation_before_run.get("valid") or exact_label_releases() != []:
                 raise ReleaseError("root mutation topology changed before fixed release")
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "dist_swapped",
+                progress_started_at, progress_started_monotonic, release_switched=False,
+            )
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "fixed_release_started",
+                progress_started_at, progress_started_monotonic, release_switched=False,
+            )
             release_receipt = run_fixed(trusted_scripts["server-release.sh"], RELEASE_LABEL, 180)
             new_release = resolved(CURRENT_LINK)
             release_switched = new_release != baseline["current_release"]
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "fixed_release_finished",
+                progress_started_at, progress_started_monotonic,
+                release_switched=release_switched,
+            )
             if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-64ba304", Path(new_release).name):
                 raise ReleaseError("guarded release did not switch to the expected labelled release")
             if exact_label_releases() != [new_release]:
@@ -1555,6 +1789,10 @@ def apply_release(bundle):
                 raise ReleaseError("trusted script copies changed during release")
             read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
             read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
+            write_apply_progress(
+                bundle, baseline["baseline_token"], "release_verified",
+                progress_started_at, progress_started_monotonic, release_switched=True,
+            )
             apply_receipt = {
                 "schema": SCHEMA, "status": "released", "mode": "apply", "completed_at": utc_now(),
                 "account": APPLY_LOGIN, "role": "root-release-operator", "roles": ROLES,
@@ -1571,6 +1809,10 @@ def apply_release(bundle):
             )
         except Exception as exc:
             failure = exc
+            observed_current = resolved(CURRENT_LINK)
+            release_switched = observed_current != baseline["current_release"]
+            if release_switched:
+                new_release = observed_current
             if release_switched:
                 try:
                     automatic_rollback = run_fixed(
@@ -1586,6 +1828,23 @@ def apply_release(bundle):
                         raise ReleaseError("automatic rollback root topology is unsafe")
                 except Exception as rollback_exc:
                     failure = ReleaseError(f"apply failed and automatic rollback was not proved: {type(rollback_exc).__name__}: {rollback_exc}")
+                    write_apply_progress(
+                        bundle, baseline["baseline_token"], "failed_after_switch_unproved",
+                        progress_started_at, progress_started_monotonic,
+                        release_switched=True, error=failure,
+                    )
+                else:
+                    write_apply_progress(
+                        bundle, baseline["baseline_token"], "failed_after_switch_rolled_back",
+                        progress_started_at, progress_started_monotonic,
+                        release_switched=True, error=failure,
+                    )
+            else:
+                write_apply_progress(
+                    bundle, baseline["baseline_token"], "failed_before_switch",
+                    progress_started_at, progress_started_monotonic,
+                    release_switched=False, error=failure,
+                )
         finally:
             restore_staging(candidate_at_dist, staging_backup, candidate_used)
             if candidate.exists():
@@ -1610,6 +1869,10 @@ def apply_release(bundle):
             raise ReleaseError("apply completed without a receipt")
         if tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
             raise ReleaseError("staging dist was not restored after successful release")
+        write_apply_progress(
+            bundle, baseline["baseline_token"], "staging_restored",
+            progress_started_at, progress_started_monotonic, release_switched=True,
+        )
         return apply_receipt
 
 

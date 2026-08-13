@@ -42,6 +42,23 @@ def operator_namespace() -> dict:
     return namespace
 
 
+def progress_payload(token: str, phase: str = "failed_before_switch") -> dict:
+    failure = phase.startswith("failed_")
+    payload = {
+        "schema": helper.PROGRESS_SCHEMA, "phase": phase,
+        "started_at": "2026-08-13T10:00:00+00:00",
+        "updated_at": "2026-08-13T10:00:07+00:00",
+        "elapsed_seconds": 7, "baseline_token": token,
+        "release_switched": phase in {
+            "fixed_release_finished", "release_verified", "staging_restored",
+            "failed_after_switch_rolled_back", "failed_after_switch_unproved",
+        },
+    }
+    if failure:
+        payload.update({"error_type": "TimeoutError", "error_summary": "fixed timeout"})
+    return payload
+
+
 def page_html(path: str, price: int | str | float | None = None, *, title: str = "Модель Росомаха", description: str = "Описание") -> bytes:
     url = helper.BASE_URL + ("/" if path == "/" else path)
     visible = ""
@@ -448,7 +465,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
             def lstat(self, path: str):  # noqa: ANN001
                 if path == remote_dir:
                     return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
-                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_size=300)
 
             def remove(self, path: str):  # noqa: ANN001
                 self.removed.append(path)
@@ -526,7 +543,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
             def lstat(self, path: str):
                 if path == remote_dir:
                     return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
-                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_size=300)
 
             def listdir(self, _remote_dir: str):
                 return ["apply-receipt.json.part"]
@@ -549,6 +566,195 @@ class MainPriceReleaseV4Test(unittest.TestCase):
                 raise FileNotFoundError(remote_dir)
 
         self.assertTrue(helper.cleanup_bundle_sftp(FakeSFTP(), remote_dir))
+
+    def test_cleanup_bundle_sftp_accepts_exact_progress_and_removes_it(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-abababababababab"
+
+        class FakeSFTP:
+            def __init__(self) -> None:
+                self.removed = []
+
+            def lstat(self, path: str):
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_size=300,
+                )
+
+            def listdir(self, _remote_dir: str):
+                return ["apply-progress.json"]
+
+            def remove(self, path: str):
+                self.removed.append(path)
+
+            def rmdir(self, _path: str):
+                return None
+
+        sftp = FakeSFTP()
+        self.assertTrue(helper.cleanup_bundle_sftp(sftp, remote_dir))
+        self.assertEqual(sftp.removed, [f"{remote_dir}/apply-progress.json"])
+
+    def test_cleanup_bundle_sftp_preserves_unsafe_progress_topology_or_size(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-acacacacacacacac"
+
+        class FakeSFTP:
+            def __init__(self, *, mode=0o600, uid=0, size=300) -> None:
+                self.mode, self.uid, self.size = mode, uid, size
+                self.remove_called = False
+
+            def lstat(self, path: str):
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(
+                    st_mode=stat.S_IFREG | self.mode, st_uid=self.uid,
+                    st_nlink=1, st_size=self.size,
+                )
+
+            def listdir(self, _remote_dir: str):
+                return ["apply-progress.json"]
+
+            def remove(self, _path: str):
+                self.remove_called = True
+
+            def rmdir(self, _path: str):
+                raise AssertionError("unsafe progress bundle must be preserved")
+
+        for sftp in (
+            FakeSFTP(mode=0o644), FakeSFTP(uid=1000),
+            FakeSFTP(size=helper.MAX_PROGRESS_BYTES + 1),
+        ):
+            self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir))
+            self.assertFalse(sftp.remove_called)
+
+    def test_apply_progress_validation_rejects_schema_token_size_duplicate_and_unsafe_fields(self) -> None:
+        token = "a" * 64
+        valid = progress_payload(token)
+        self.assertEqual(helper.validate_apply_progress(valid, token), valid)
+        for field, value in (("schema", "wrong"), ("baseline_token", "b" * 64)):
+            invalid = dict(valid, **{field: value})
+            with self.assertRaises(helper.HelperError):
+                helper.validate_apply_progress(invalid, token)
+        unsafe = dict(valid, raw_env={"TOKEN": "secret"})
+        with self.assertRaises(helper.HelperError):
+            helper.validate_apply_progress(unsafe, token)
+        with self.assertRaises(helper.HelperError):
+            helper.parse_apply_progress_raw(b"x" * (helper.MAX_PROGRESS_BYTES + 1), token)
+        duplicate = (
+            '{"schema":"rosomaha-main-price-apply-progress/v1",'
+            '"schema":"rosomaha-main-price-apply-progress/v1"}\n'
+        ).encode()
+        with self.assertRaises(helper.HelperError):
+            helper.parse_apply_progress_raw(duplicate, token)
+
+    def test_download_apply_progress_requires_root_owned_exact_0600_regular_file(self) -> None:
+        token = "a" * 64
+        remote_dir = helper.remote_bundle_path(token)
+        raw = helper.canonical_json(progress_payload(token)) + b"\n"
+
+        class RemoteFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int):
+                return raw
+
+        class FakeSFTP:
+            def __init__(self, mode=stat.S_IFREG | 0o600, uid=0, nlink=1):
+                self.mode, self.uid, self.nlink = mode, uid, nlink
+
+            def lstat(self, _path: str):
+                return types.SimpleNamespace(
+                    st_mode=self.mode, st_uid=self.uid, st_nlink=self.nlink,
+                    st_size=len(raw),
+                )
+
+            def open(self, _path: str, _mode: str):
+                return RemoteFile()
+
+            def close(self):
+                return None
+
+        for sftp in (
+            FakeSFTP(mode=stat.S_IFLNK | 0o777), FakeSFTP(mode=stat.S_IFREG | 0o644),
+            FakeSFTP(uid=1000), FakeSFTP(nlink=2),
+        ):
+            with self.assertRaises(helper.HelperError):
+                helper.download_apply_progress(types.SimpleNamespace(open_sftp=lambda: sftp), remote_dir, token)
+        good = FakeSFTP()
+        self.assertEqual(
+            helper.download_apply_progress(types.SimpleNamespace(open_sftp=lambda: good), remote_dir, token),
+            progress_payload(token),
+        )
+
+    def test_operator_progress_writer_is_atomic_root_0600_and_sanitized(self) -> None:
+        source = operator_source()
+        writer = source[source.index("def write_apply_progress") : source.index("def fsync_directory")]
+        self.assertIn('temporary = bundle / "apply-progress.json.part"', writer)
+        self.assertIn("write_new_regular(temporary, raw, 0o600)", writer)
+        self.assertIn("os.replace(temporary, final)", writer)
+        self.assertIn("fsync_directory(bundle)", writer)
+        self.assertIn("final_info.st_uid != 0", writer)
+        self.assertIn("stat.S_IMODE(final_info.st_mode) != 0o600", writer)
+        sanitizer = source[source.index("def sanitize_progress_summary") : source.index("def valid_progress_timestamp")]
+        self.assertIn("[REDACTED-PRIVATE-KEY]", sanitizer)
+        self.assertIn("Bearer [REDACTED]", sanitizer)
+
+    def test_operator_progress_validation_and_atomic_write_execute(self) -> None:
+        namespace = operator_namespace()
+        token = "a" * 64
+        valid = progress_payload(token)
+        self.assertEqual(namespace["validate_progress_payload"](valid, token), valid)
+        raw = namespace["canonical_json"](valid) + b"\n"
+        self.assertEqual(namespace["parse_progress_raw"](raw, token), valid)
+        for invalid in (
+            dict(valid, schema="wrong"), dict(valid, baseline_token="b" * 64),
+            dict(valid, raw_env={"SECRET": "no"}),
+        ):
+            with self.assertRaises(namespace["ReleaseError"]):
+                namespace["validate_progress_payload"](invalid, token)
+        with self.assertRaises(namespace["ReleaseError"]):
+            namespace["parse_progress_raw"](b"x" * (namespace["MAX_PROGRESS_BYTES"] + 1), token)
+
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
+            bundle = Path(raw_root)
+            def portable_write(path, raw, mode):
+                path.write_bytes(raw)
+                os.chmod(path, mode)
+
+            real_lstat = os.lstat
+
+            def root_private_lstat(path):
+                observed = real_lstat(path)
+                return types.SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+                    st_size=observed.st_size,
+                )
+
+            with mock.patch.dict(namespace, {
+                "fsync_directory": mock.Mock(), "write_new_regular": portable_write,
+            }), mock.patch.object(namespace["os"], "lstat", side_effect=root_private_lstat):
+                result = namespace["write_apply_progress"](
+                    bundle, token, "bundle_validated",
+                    "2026-08-13T10:00:00+00:00", 0.0, release_switched=False,
+                )
+            final = bundle / "apply-progress.json"
+            self.assertTrue(final.is_file())
+            self.assertFalse((bundle / "apply-progress.json.part").exists())
+            self.assertEqual(namespace["parse_progress_raw"](final.read_bytes(), token), result)
+
+    def test_operator_apply_emits_all_required_progress_phases(self) -> None:
+        source = operator_source()
+        body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        for phase in (
+            "bundle_validated", "baseline_refreshed", "candidate_reconstructed",
+            "final_preflight_ok", "dist_swapped", "fixed_release_started",
+            "fixed_release_finished", "release_verified", "staging_restored",
+            "failed_before_switch", "failed_after_switch_rolled_back",
+        ):
+            self.assertIn(f'"{phase}"', body)
 
     def test_parse_operator_json_accepts_banner_and_exact_json_line(self) -> None:
         payload = helper.parse_operator_json({
@@ -1460,6 +1666,8 @@ Allow: /
                 return None
 
         with mock.patch.object(helper, "bounded_reconnect", return_value=(FakeClient(), {"login": helper.APPLY_LOGIN}, [])), mock.patch.object(
+            helper, "download_apply_progress", return_value=progress_payload(baseline["baseline_token"]),
+        ), mock.patch.object(
             helper, "raw_remote_audit", return_value=audit_payload,
         ), mock.patch.object(helper, "download_apply_receipt", return_value=None), mock.patch.object(
             helper, "public_verify", return_value={"stage": "old", "valid": True},
@@ -1473,6 +1681,51 @@ Allow: /
         self.assertFalse(success)
         self.assertEqual(payload["status"], "apply_not_switched_cleanup_required")
         self.assertTrue(payload["bundle_preserved"])
+        self.assertEqual(payload["apply_progress"]["phase"], "failed_before_switch")
+        self.assertEqual(payload["original_error_type"], "RuntimeError")
+        self.assertEqual(payload["original_error_summary"], "boom")
+
+    def test_recovery_downloads_progress_before_audit_and_cleanup_and_sanitizes_original_error(self) -> None:
+        baseline = {
+            "baseline_token": "a" * 64,
+            "current_release": "/var/www/rosomaha/_releases/original",
+            "current_tree": {"digest": "old-tree"}, "candidate": {"tree_digest": "new-tree"},
+            "staging_dist": {"digest": "staging"},
+            "articles_cz": {"digest": "cz", "files": []},
+            "release_scripts": {}, "articles": {"canonical": {"sha256": "article"}},
+        }
+        audit = {
+            "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
+            "mode": "root-audit", "roles": helper.ROLES, "root_readiness": {"valid": True},
+            "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
+            "current_release": baseline["current_release"],
+            "current_tree": {"valid": True, "digest": "old-tree"},
+            "staging_dist": {"valid": True, "digest": "staging"},
+            "articles_cz": {"valid": True, "digest": "cz", "files": []},
+            "release_scripts": {}, "existing_label_releases": [],
+            "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
+        }
+        events = []
+        client = types.SimpleNamespace(close=mock.Mock())
+        with mock.patch.object(helper, "bounded_reconnect", return_value=(client, {}, [])), mock.patch.object(
+            helper, "download_apply_progress",
+            side_effect=lambda *_args: (events.append("progress") or progress_payload(baseline["baseline_token"])),
+        ), mock.patch.object(
+            helper, "raw_remote_audit", side_effect=lambda *_args: (events.append("audit") or audit),
+        ), mock.patch.object(helper, "download_apply_receipt", return_value=None), mock.patch.object(
+            helper, "public_verify", return_value={"stage": "old", "valid": True},
+        ), mock.patch.object(
+            helper, "cleanup_bundle", side_effect=lambda *_args: (events.append("cleanup") or True),
+        ):
+            payload, success = helper.recover_ambiguous_apply(
+                helper.remote_bundle_path(baseline["baseline_token"]), baseline,
+                RuntimeError("token=supersecret password=hunter2"), b"frozen",
+            )
+        self.assertFalse(success)
+        self.assertEqual(events, ["progress", "audit", "cleanup"])
+        self.assertNotIn("supersecret", payload["original_error_summary"])
+        self.assertNotIn("hunter2", payload["original_error_summary"])
+        self.assertIn("[REDACTED]", payload["original_error_summary"])
 
     def test_direct_apply_does_not_claim_success_when_cleanup_fails(self) -> None:
         baseline = {"baseline_token": "f" * 64, "server_baseline_token": "server-token"}
@@ -1494,12 +1747,16 @@ Allow: /
             ),
             mock.patch.object(helper, "upload_bundle", return_value=remote_dir),
             mock.patch.object(helper, "invoke_operator", return_value={"new_release": receipt["new_release"]}),
+            mock.patch.object(
+                helper, "download_apply_progress",
+                return_value=progress_payload(baseline["baseline_token"], "staging_restored"),
+            ),
             mock.patch.object(helper, "download_apply_receipt", return_value=receipt),
             mock.patch.object(helper, "validate_apply_receipt"),
             mock.patch.object(helper, "cleanup_bundle", return_value=False),
             mock.patch.object(helper, "atomic_json_receipt", return_value=Path("result.json")),
         )
-        with shared[0], shared[1], shared[2], shared[3], shared[4], shared[5], shared[6], shared[7], shared[8], shared[9], shared[10], mock.patch.object(
+        with shared[0], shared[1], shared[2], shared[3], shared[4], shared[5], shared[6], shared[7], shared[8], shared[9], shared[10], shared[11], mock.patch.object(
             helper, "public_verify", side_effect=({"stage": "old"}, {"stage": "new"}),
         ):
             payload, _report = helper.apply(helper.TARGET_COMMIT, Path("baseline.json"))
@@ -1522,6 +1779,9 @@ Allow: /
                           "mode": "root-audit", "root_readiness": {"valid": True}},
         ), mock.patch.object(helper, "upload_bundle", return_value=remote_dir), mock.patch.object(
             helper, "invoke_operator", return_value={"new_release": receipt["new_release"]},
+        ), mock.patch.object(
+            helper, "download_apply_progress",
+            return_value=progress_payload(baseline["baseline_token"], "staging_restored"),
         ), mock.patch.object(helper, "download_apply_receipt", return_value=receipt), mock.patch.object(
             helper, "validate_apply_receipt",
         ), mock.patch.object(

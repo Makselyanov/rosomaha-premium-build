@@ -70,6 +70,20 @@ MAX_DELTA_FILES = 1_000
 MAX_CANDIDATE_FILES = 20_000
 MAX_OPERATOR_BYTES = 512 * 1024
 APPLY_TIMEOUT_SECONDS = 1_200
+PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
+MAX_PROGRESS_BYTES = 4 * 1024
+MAX_PROGRESS_ELAPSED_SECONDS = 24 * 60 * 60
+PROGRESS_PHASES = {
+    "bundle_validated", "baseline_refreshed", "candidate_reconstructed",
+    "final_preflight_ok", "dist_swapped", "fixed_release_started",
+    "fixed_release_finished", "release_verified", "staging_restored",
+    "failed_before_switch", "failed_after_switch_rolled_back",
+    "failed_after_switch_unproved",
+}
+PROGRESS_FAILURE_PHASES = {
+    "failed_before_switch", "failed_after_switch_rolled_back",
+    "failed_after_switch_unproved",
+}
 
 ARTICLES_CZ_ALLOWLIST = (
     "avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts",
@@ -524,6 +538,63 @@ def sanitized_diagnostic_tail(value: Any, limit: int = 500) -> str:
     text = re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9_~+/=-]{48,}(?![A-Za-z0-9])", "[REDACTED-OPAQUE]", text)
     text = "".join(character if character in "\r\n\t" or ord(character) >= 32 else "?" for character in text)
     return text[-limit:]
+
+
+def sanitized_progress_summary(value: Any) -> str:
+    return " ".join(sanitized_diagnostic_tail(value, 500).split()) or "unspecified error"
+
+
+def validate_apply_progress(payload: dict[str, Any], baseline_token: str) -> dict[str, Any]:
+    base_keys = {
+        "schema", "phase", "started_at", "updated_at", "elapsed_seconds",
+        "baseline_token", "release_switched",
+    }
+    failure_keys = base_keys | {"error_type", "error_summary"}
+    if not isinstance(payload, dict) or set(payload) not in (base_keys, failure_keys):
+        raise HelperError("apply progress fields are unsafe")
+    phase = payload.get("phase")
+    if payload.get("schema") != PROGRESS_SCHEMA or phase not in PROGRESS_PHASES:
+        raise HelperError("apply progress schema/phase mismatch")
+    if payload.get("baseline_token") != baseline_token or not re.fullmatch(r"[0-9a-f]{64}", baseline_token):
+        raise HelperError("apply progress baseline token mismatch")
+    if not isinstance(payload.get("release_switched"), bool):
+        raise HelperError("apply progress release flag is invalid")
+    elapsed = payload.get("elapsed_seconds")
+    if isinstance(elapsed, bool) or not isinstance(elapsed, int) or not 0 <= elapsed <= MAX_PROGRESS_ELAPSED_SECONDS:
+        raise HelperError("apply progress elapsed value is invalid")
+    timestamps = []
+    for key in ("started_at", "updated_at"):
+        value = payload.get(key)
+        if not isinstance(value, str) or len(value) > 40:
+            raise HelperError("apply progress timestamp is invalid")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise HelperError("apply progress timestamp is invalid") from exc
+        if parsed.tzinfo is None:
+            raise HelperError("apply progress timestamp lacks timezone")
+        timestamps.append(parsed)
+    if timestamps[1] < timestamps[0]:
+        raise HelperError("apply progress timestamps are reversed")
+    if phase in PROGRESS_FAILURE_PHASES:
+        error_type = payload.get("error_type")
+        error_summary = payload.get("error_summary")
+        if (
+            set(payload) != failure_keys
+            or not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,99}", error_type)
+            or not isinstance(error_summary, str) or not 1 <= len(error_summary) <= 500
+            or error_summary != sanitized_progress_summary(error_summary)
+        ):
+            raise HelperError("apply progress error evidence is unsafe")
+    elif set(payload) != base_keys:
+        raise HelperError("non-failure apply progress contains error fields")
+    switched_phases = {
+        "release_verified", "staging_restored",
+        "failed_after_switch_rolled_back", "failed_after_switch_unproved",
+    }
+    if phase != "fixed_release_finished" and payload["release_switched"] != (phase in switched_phases):
+        raise HelperError("apply progress phase/release flag mismatch")
+    return payload
 
 
 def operator_diagnostics(result: dict[str, Any]) -> str:
@@ -1688,6 +1759,7 @@ def cleanup_bundle_sftp(sftp: paramiko.SFTPClient, remote_dir: str, *, preserve_
     final_names = {
         "baseline.json", "delta.tar.gz", "delta-manifest.json",
         "target-manifest.json", "operator.sh", "apply-receipt.json",
+        "apply-progress.json",
     }
     partial_names = {
         f"{name}.part" for name in (
@@ -1710,6 +1782,14 @@ def cleanup_bundle_sftp(sftp: paramiko.SFTPClient, remote_dir: str, *, preserve_
             or (getattr(attr, "st_uid", None) is not None and attr.st_uid != 0)
             or (getattr(attr, "st_nlink", None) is not None and attr.st_nlink != 1)
             or stat.S_IMODE(attr.st_mode) & 0o022
+            or (
+                name == "apply-progress.json"
+                and (
+                    stat.S_IMODE(attr.st_mode) != 0o600
+                    or getattr(attr, "st_uid", None) != 0
+                    or not 0 < getattr(attr, "st_size", -1) <= MAX_PROGRESS_BYTES
+                )
+            )
         ):
             return preserve_or_raise("remote bundle contains unsafe topology")
     try:
@@ -1752,6 +1832,55 @@ def download_apply_receipt(client: paramiko.SSHClient, remote_dir: str) -> dict[
             raise HelperError("unsafe remote apply receipt")
         with sftp.open(path, "rb") as handle:
             return json.loads(handle.read().decode("utf-8"))
+    finally:
+        sftp.close()
+
+
+def parse_apply_progress_raw(raw: bytes, baseline_token: str) -> dict[str, Any]:
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_PROGRESS_BYTES:
+        raise HelperError("apply progress size is invalid")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise HelperError("apply progress contains duplicate fields")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HelperError("apply progress is invalid JSON") from exc
+    validate_apply_progress(payload, baseline_token)
+    if raw != canonical_json(payload) + b"\n":
+        raise HelperError("apply progress is not canonical JSON")
+    return payload
+
+
+def download_apply_progress(
+    client: paramiko.SSHClient, remote_dir: str, baseline_token: str,
+) -> dict[str, Any] | None:
+    if not re.fullmatch(rf"/tmp/rosomaha-main-price-release-{TARGET_COMMIT[:7]}-[0-9a-f]{{16}}", remote_dir):
+        raise HelperError("invalid progress bundle path")
+    sftp = client.open_sftp()
+    try:
+        path = f"{remote_dir}/apply-progress.json"
+        try:
+            attr = sftp.lstat(path)
+        except FileNotFoundError:
+            return None
+        if (
+            not sftp_regular(attr) or stat.S_ISLNK(attr.st_mode)
+            or stat.S_IMODE(attr.st_mode) != 0o600
+            or getattr(attr, "st_uid", None) != 0
+            or (getattr(attr, "st_nlink", None) is not None and attr.st_nlink != 1)
+            or not 0 < attr.st_size <= MAX_PROGRESS_BYTES
+        ):
+            raise HelperError("unsafe remote apply progress topology")
+        with sftp.open(path, "rb") as handle:
+            raw = handle.read(MAX_PROGRESS_BYTES + 1)
+        return parse_apply_progress_raw(raw, baseline_token)
     finally:
         sftp.close()
 
@@ -1961,6 +2090,11 @@ def recover_ambiguous_apply(
     remote_dir: str, baseline: dict[str, Any], original_error: Exception, frozen_operator: bytes,
 ) -> tuple[dict[str, Any], bool]:
     recovery_attempts: list[dict[str, Any]] = []
+    apply_progress: dict[str, Any] | None = None
+    original_error_evidence = {
+        "original_error_type": type(original_error).__name__,
+        "original_error_summary": sanitized_progress_summary(original_error),
+    }
     try:
         client, _identity, connection_attempts = bounded_reconnect()
         recovery_attempts.extend(connection_attempts)
@@ -1968,11 +2102,17 @@ def recover_ambiguous_apply(
         payload = {
             "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
-            "original_error_type": type(original_error).__name__, "recovery_error_type": type(exc).__name__,
+            **original_error_evidence,
+            "apply_progress": apply_progress,
+            "recovery_error_type": type(exc).__name__,
+            "recovery_error_summary": sanitized_progress_summary(exc),
             "bundle_preserved": True, "attempts": recovery_attempts,
         }
         return payload, False
     try:
+        apply_progress = download_apply_progress(
+            client, remote_dir, baseline["baseline_token"],
+        )
         audit_payload = raw_remote_audit(client, frozen_operator)
         receipt = download_apply_receipt(client, remote_dir)
         current = audit_payload.get("current_release")
@@ -1990,6 +2130,7 @@ def recover_ambiguous_apply(
                 payload = {
                     "schema": SCHEMA, "status": "recovered_rolled_back", "mode": "apply-recovery", "roles": ROLES,
                     "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
+                    **original_error_evidence, "apply_progress": apply_progress,
                     "verification_error_type": type(verify_error).__name__, "rollback": rolled_back,
                     "attempts": recovery_attempts,
                 }
@@ -2001,6 +2142,7 @@ def recover_ambiguous_apply(
             payload = {
                 "schema": SCHEMA, "status": "recovered_verified_success", "mode": "apply-recovery", "roles": ROLES,
                 "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
+                **original_error_evidence, "apply_progress": apply_progress,
                 "public_verify": verified, "attempts": recovery_attempts,
             }
             cleanup_succeeded = cleanup_bundle(client, remote_dir)
@@ -2018,12 +2160,14 @@ def recover_ambiguous_apply(
                 "status": "apply_not_switched" if cleanup_succeeded else "apply_not_switched_cleanup_required",
                 "mode": "apply-recovery", "roles": ROLES,
                 "baseline_token": baseline["baseline_token"], "bundle_preserved": not cleanup_succeeded,
+                **original_error_evidence, "apply_progress": apply_progress,
                 "attempts": recovery_attempts, "public_verify": original_public,
             }, False
         return {
             "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
             "observed_current_release": current, "bundle_preserved": True,
+            **original_error_evidence, "apply_progress": apply_progress,
             "reason": "current changed but exact apply receipt is unavailable; apply was not retried",
             "attempts": recovery_attempts,
         }, False
@@ -2031,7 +2175,9 @@ def recover_ambiguous_apply(
         return {
             "schema": SCHEMA, "status": "ambiguous_apply_requires_recovery", "mode": "apply-recovery", "roles": ROLES,
             "baseline_token": baseline["baseline_token"], "remote_bundle": remote_dir,
+            **original_error_evidence, "apply_progress": apply_progress,
             "bundle_preserved": True, "recovery_error_type": type(exc).__name__,
+            "recovery_error_summary": sanitized_progress_summary(exc),
             "reason": "recovery could not prove a safe terminal state; apply was not retried",
             "attempts": recovery_attempts,
         }, False
@@ -2061,6 +2207,9 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
         apply_invoked = True
         try:
             operator_result = invoke_operator(client, "apply", remote_dir, frozen_operator)
+            apply_progress = download_apply_progress(
+                client, remote_dir, baseline["baseline_token"],
+            )
             receipt = download_apply_receipt(client, remote_dir)
             if receipt is None:
                 raise HelperError("operator returned without the exact remote apply receipt")
@@ -2079,6 +2228,7 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                         "root_readiness": root_preflight["root_readiness"],
                     },
                     "preflight": preflight, "apply_receipt": receipt,
+                    "apply_progress": apply_progress,
                     "verification_error_type": type(verify_error).__name__, "rollback": rollback,
                 }
                 cleanup_succeeded = cleanup_bundle(client, remote_dir)
@@ -2097,6 +2247,7 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                     "root_readiness": root_preflight["root_readiness"],
                 },
                 "preflight": preflight, "apply_receipt": receipt, "operator": operator_result,
+                "apply_progress": apply_progress,
                 "public_verify": postflight,
             }
             cleanup_succeeded = cleanup_bundle(client, remote_dir)
