@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 export const EXACT_LOGIN = "rosomaha-rus999";
 export const V5_CLIENTS_URL = "https://api.direct.yandex.com/json/v5/clients";
 export const LIVE4_ACCOUNT_URL = "https://api.direct.yandex.ru/live/v4/json/";
+export const ROUTE_ACCOUNT_SLUG = "rosomaha-yandex";
+export const ROUTE_SERVICE = "yandex-suite";
+export const ROUTE_REQUIRED_SERVICE = "direct";
+export const ROUTE_PROJECT = "rosomaha";
 export const V5_CLIENT_FIELDS = Object.freeze([
   "Login",
   "Type",
@@ -19,25 +23,390 @@ export const V5_CLIENT_FIELDS = Object.freeze([
 export const OWN_FUNDS_CLI_MESSAGE =
   "Собственный остаток недоступен: API показал общий баланс кабинета, но не разделил его на внесённые владельцем деньги и отсрочку/кредит; это не ноль, но без подтверждённой суммы нельзя безопасно продолжать или увеличивать расход. Овердрафт не учитывается.";
 
-const ROOT_DIR = process.cwd();
-const ENV_PATH = path.join(ROOT_DIR, ".env.seo.local");
-const REPORT_DIR = path.join(ROOT_DIR, "marketing-audits", "yandex-direct-balance");
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
+export const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
+export const ENV_PATH = path.join(PROJECT_ROOT, ".env.seo.local");
+export const REPORT_DIR = path.join(PROJECT_ROOT, "marketing-audits", "yandex-direct-balance");
+export const REGISTRY_PATH = path.resolve(PROJECT_ROOT, "..", "accounts", "yandex-accounts.yaml");
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 const OWN_FUNDS_REASON =
   "API Яндекс Директа показывает общий баланс счёта, сумму для перевода, овердрафт и ожидающие бонусы отдельными полями, но не показывает, какая часть общего баланса является собственными деньгами владельца. Поэтому собственный остаток по этим методам доказать нельзя; овердрафт и бонусы к нему не прибавляются.";
 
+function yamlRegistrySyntaxError(message) {
+  throw new Error(`Некорректный YAML registry: ${message}`);
+}
+
+function decodeDoubleQuotedEscape(source, slashIndex) {
+  const escapeCode = source[slashIndex + 1];
+  if (!escapeCode) yamlRegistrySyntaxError("незавершённая escape-последовательность в двойных кавычках.");
+
+  const simpleEscapes = {
+    "0": "\0",
+    a: "\x07",
+    b: "\b",
+    t: "\t",
+    n: "\n",
+    v: "\v",
+    f: "\f",
+    r: "\r",
+    e: "\x1b",
+    " ": " ",
+    "\"": "\"",
+    "/": "/",
+    "\\": "\\",
+    N: "\u0085",
+    _: "\u00a0",
+    L: "\u2028",
+    P: "\u2029",
+  };
+  if (Object.hasOwn(simpleEscapes, escapeCode)) {
+    return { value: simpleEscapes[escapeCode], nextIndex: slashIndex + 2 };
+  }
+
+  const hexLengths = { x: 2, u: 4, U: 8 };
+  const hexLength = hexLengths[escapeCode];
+  if (!hexLength) {
+    yamlRegistrySyntaxError(`недопустимая escape-последовательность \\${escapeCode}.`);
+  }
+  const digits = source.slice(slashIndex + 2, slashIndex + 2 + hexLength);
+  if (digits.length !== hexLength || !/^[0-9A-Fa-f]+$/u.test(digits)) {
+    yamlRegistrySyntaxError(`escape-последовательность \\${escapeCode} должна содержать ${hexLength} hex-цифр.`);
+  }
+  const codePoint = Number.parseInt(digits, 16);
+  if (codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+    yamlRegistrySyntaxError(`escape-последовательность \\${escapeCode}${digits} задаёт недопустимый Unicode-код.`);
+  }
+  return {
+    value: String.fromCodePoint(codePoint),
+    nextIndex: slashIndex + 2 + hexLength,
+  };
+}
+
+function parseQuotedYamlToken(source, startIndex = 0) {
+  const quote = source[startIndex];
+  if (quote !== "'" && quote !== "\"") {
+    yamlRegistrySyntaxError("ожидалась строка в кавычках.");
+  }
+
+  let result = "";
+  for (let index = startIndex + 1; index < source.length;) {
+    const character = source[index];
+    if (quote === "'" && character === "'") {
+      if (source[index + 1] === "'") {
+        result += "'";
+        index += 2;
+        continue;
+      }
+      return { value: result, nextIndex: index + 1 };
+    }
+    if (quote === "\"" && character === "\\") {
+      const decoded = decodeDoubleQuotedEscape(source, index);
+      result += decoded.value;
+      index = decoded.nextIndex;
+      continue;
+    }
+    if (quote === "\"" && character === "\"") {
+      return { value: result, nextIndex: index + 1 };
+    }
+    result += character;
+    index += 1;
+  }
+
+  yamlRegistrySyntaxError(`незакрытая ${quote === "'" ? "одинарная" : "двойная"} кавычка.`);
+}
+
+function assertOnlyYamlCommentAfter(source, startIndex) {
+  if (startIndex === source.length) return;
+  const suffix = source.slice(startIndex);
+  if (!/^\s/u.test(suffix)) {
+    yamlRegistrySyntaxError("после значения обнаружены символы без разделителя.");
+  }
+  const trimmed = suffix.trimStart();
+  if (trimmed && !trimmed.startsWith("#")) {
+    yamlRegistrySyntaxError("после значения разрешён только YAML-комментарий.");
+  }
+}
+
+function stripPlainYamlComment(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "#" && (index === 0 || /\s/u.test(value[index - 1]))) {
+      return value.slice(0, index).trimEnd();
+    }
+  }
+  return value.trimEnd();
+}
+
+function parseYamlInlineArray(value) {
+  const source = value.trimStart();
+  const items = [];
+  let index = 1;
+  let expectingItem = true;
+
+  while (index < source.length) {
+    while (/\s/u.test(source[index] ?? "")) index += 1;
+    const character = source[index];
+    if (!character) yamlRegistrySyntaxError("незакрытый inline-массив.");
+    if (character === "]") {
+      if (expectingItem && items.length > 0) {
+        yamlRegistrySyntaxError("inline-массив содержит пустой последний элемент.");
+      }
+      assertOnlyYamlCommentAfter(source, index + 1);
+      return items;
+    }
+    if (!expectingItem || character === ",") {
+      yamlRegistrySyntaxError("inline-массив содержит пустой элемент или пропущенную запятую.");
+    }
+
+    let parsedItem;
+    if (character === "'" || character === "\"") {
+      parsedItem = parseQuotedYamlToken(source, index);
+      index = parsedItem.nextIndex;
+    } else {
+      const itemStart = index;
+      while (index < source.length && source[index] !== "," && source[index] !== "]") {
+        if (source[index] === "[" || source[index] === "{" || source[index] === "}") {
+          yamlRegistrySyntaxError("вложенные структуры в inline-массиве запрещены.");
+        }
+        index += 1;
+      }
+      const plainItem = source.slice(itemStart, index).trim();
+      if (!plainItem) yamlRegistrySyntaxError("inline-массив содержит пустой элемент.");
+      if (/\s/u.test(plainItem)) {
+        yamlRegistrySyntaxError("элементы inline-массива с пробелами должны быть заключены в кавычки.");
+      }
+      if (/["'#:]/u.test(plainItem)) {
+        yamlRegistrySyntaxError("небезопасный некавыченный элемент inline-массива.");
+      }
+      parsedItem = { value: plainItem };
+    }
+
+    while (/\s/u.test(source[index] ?? "")) index += 1;
+    if (source[index] !== "," && source[index] !== "]") {
+      yamlRegistrySyntaxError("между элементами inline-массива пропущена запятая.");
+    }
+    items.push(parsedItem.value);
+    expectingItem = false;
+    if (source[index] === ",") {
+      index += 1;
+      expectingItem = true;
+    }
+  }
+
+  yamlRegistrySyntaxError("незакрытый inline-массив.");
+}
+
+function parseYamlScalar(value) {
+  const source = value.trimStart();
+  if (!source || source.startsWith("#")) return "";
+  if (source.startsWith("[")) return parseYamlInlineArray(source);
+  if (source.startsWith("'") || source.startsWith("\"")) {
+    const parsed = parseQuotedYamlToken(source);
+    assertOnlyYamlCommentAfter(source, parsed.nextIndex);
+    return parsed.value;
+  }
+
+  const plain = stripPlainYamlComment(source).trim();
+  if (/[\[\]{}]/u.test(plain)) {
+    yamlRegistrySyntaxError("незавершённая или вложенная YAML-структура в scalar-значении.");
+  }
+  return plain;
+}
+
+export function parseYandexAccountsRegistry(sourceText) {
+  const accounts = Object.create(null);
+  let inAccounts = false;
+  let currentSlug = null;
+
+  for (const rawLine of String(sourceText ?? "").split(/\r?\n/u)) {
+    if (rawLine.includes("\t")) yamlRegistrySyntaxError("табуляция в отступах запрещена.");
+    const line = rawLine;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (!inAccounts) {
+      if (trimmed === "accounts:") inAccounts = true;
+      continue;
+    }
+
+    if (!/^\s/u.test(line)) break;
+
+    const accountMatch = line.match(/^  ([A-Za-z0-9][A-Za-z0-9._-]*):\s*$/u);
+    if (accountMatch) {
+      currentSlug = accountMatch[1].trim();
+      if (Object.hasOwn(accounts, currentSlug)) {
+        throw new Error(`Registry содержит дублирующий account slug ${currentSlug}.`);
+      }
+      accounts[currentSlug] = Object.create(null);
+      continue;
+    }
+
+    if (!currentSlug) yamlRegistrySyntaxError("свойство встретилось до имени account.");
+
+    const propertyMatch = line.match(/^    ([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/u);
+    if (!propertyMatch) yamlRegistrySyntaxError(`неподдерживаемая структура в account ${currentSlug}.`);
+    const propertyName = propertyMatch[1];
+    if (Object.hasOwn(accounts[currentSlug], propertyName)) {
+      throw new Error(`Registry account ${currentSlug} содержит дублирующее свойство ${propertyName}.`);
+    }
+    accounts[currentSlug][propertyName] = parseYamlScalar(propertyMatch[2]);
+  }
+
+  return accounts;
+}
+
+function normalizeComparablePath(filePath) {
+  return path.normalize(String(filePath ?? "")).toLowerCase();
+}
+
+function routeResolutionError(message, routeEvidence) {
+  const error = new Error(message);
+  error.routeEvidence = routeEvidence;
+  return error;
+}
+
+function routeEvidenceBase({
+  registryPath,
+  accountSlug,
+  projectRoot,
+  expectedApiEnv,
+  expectedProject,
+  expectedDirectLogin,
+}) {
+  return {
+    status: "blocked",
+    registryPath,
+    accountSlug,
+    projectRoot,
+    expectedProject,
+    expectedDirectLogin,
+    expectedApiEnv,
+  };
+}
+
+export function resolveProjectRoute({
+  registryPath = REGISTRY_PATH,
+  projectRoot = PROJECT_ROOT,
+  accountSlug = ROUTE_ACCOUNT_SLUG,
+  expectedProject = ROUTE_PROJECT,
+  expectedService = ROUTE_SERVICE,
+  requiredService = ROUTE_REQUIRED_SERVICE,
+  expectedDirectLogin = EXACT_LOGIN,
+} = {}) {
+  const expectedApiEnv = path.join(projectRoot, ".env.seo.local");
+  const baseEvidence = routeEvidenceBase({
+    registryPath,
+    accountSlug,
+    projectRoot,
+    expectedApiEnv,
+    expectedProject,
+    expectedDirectLogin,
+  });
+
+  if (!fs.existsSync(registryPath)) {
+    throw routeResolutionError(
+      "Маршрут Yandex account остановлен: registry yandex-accounts.yaml не найден.",
+      baseEvidence,
+    );
+  }
+
+  let accounts;
+  try {
+    accounts = parseYandexAccountsRegistry(fs.readFileSync(registryPath, "utf8"));
+  } catch (error) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: registry не удалось разобрать (${error.message}).`,
+      baseEvidence,
+    );
+  }
+
+  const account = accounts[accountSlug];
+  if (!account) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: в registry отсутствует точная запись ${accountSlug}.`,
+      baseEvidence,
+    );
+  }
+
+  const service = String(account.service ?? "").trim();
+  if (service !== expectedService) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен иметь service ${expectedService}.`,
+      { ...baseEvidence, actualService: service || null },
+    );
+  }
+
+  const services = Array.isArray(account.services) ? account.services.map((value) => String(value)) : [];
+  if (!services.includes(requiredService)) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен включать service ${requiredService}.`,
+      { ...baseEvidence, actualServices: services },
+    );
+  }
+
+  const project = String(account.project ?? "").trim();
+  if (project !== expectedProject) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен быть привязан к project ${expectedProject}.`,
+      { ...baseEvidence, actualProject: project || null },
+    );
+  }
+
+  const allowedProjects = Array.isArray(account.allowed_projects)
+    ? account.allowed_projects.map((value) => String(value))
+    : [];
+  if (!allowedProjects.includes(expectedProject)) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен разрешать project ${expectedProject} в allowed_projects.`,
+      { ...baseEvidence, actualAllowedProjects: allowedProjects },
+    );
+  }
+
+  const directLogin = String(account.direct_login ?? "").trim();
+  if (directLogin !== expectedDirectLogin) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен иметь direct_login ${expectedDirectLogin}.`,
+      { ...baseEvidence, actualDirectLogin: directLogin || null },
+    );
+  }
+
+  const apiEnvPath = String(account.api_env ?? "").trim();
+  if (!apiEnvPath || normalizeComparablePath(apiEnvPath) !== normalizeComparablePath(expectedApiEnv)) {
+    throw routeResolutionError(
+      `Маршрут Yandex account остановлен: ${accountSlug} должен иметь api_env ${expectedApiEnv}.`,
+      { ...baseEvidence, actualApiEnv: apiEnvPath || null },
+    );
+  }
+
+  return {
+    status: "verified",
+    registryPath,
+    accountSlug,
+    projectRoot,
+    expectedProject,
+    expectedDirectLogin,
+    expectedApiEnv,
+    service,
+    services,
+    project,
+    allowedProjects,
+    directLogin,
+    apiEnvPath,
+  };
+}
+
 function parseEnvFile(filePath) {
   const values = {};
   if (!fs.existsSync(filePath)) return values;
 
-  for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+  for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const separatorIndex = line.indexOf("=");
     if (separatorIndex === -1) continue;
     const key = line.slice(0, separatorIndex).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) continue;
     values[key] = line.slice(separatorIndex + 1).trim();
   }
 
@@ -47,7 +416,7 @@ function parseEnvFile(filePath) {
 export function loadProjectToken(filePath = ENV_PATH) {
   const token = parseEnvFile(filePath).YANDEX_OAUTH_TOKEN?.trim();
   if (!token) {
-    throw new Error("В проектном файле .env.seo.local отсутствует YANDEX_OAUTH_TOKEN.");
+    throw new Error(`В проектном env-файле ${filePath} отсутствует YANDEX_OAUTH_TOKEN.`);
   }
   return token;
 }
@@ -297,7 +666,12 @@ export function assertReadOnlyRequests(requests) {
   const live4Body = JSON.parse(live4.options.body);
   const v5HeaderNames = Object.keys(v5.options.headers).map((name) => name.toLowerCase());
   const live4HeaderNames = Object.keys(live4.options.headers).map((name) => name.toLowerCase());
-  if (hasForbiddenKey(v5.options.headers) || hasForbiddenKey(v5Body) || hasForbiddenKey(live4.options.headers) || hasForbiddenKey(live4Body)) {
+  if (
+    hasForbiddenKey(v5.options.headers) ||
+    hasForbiddenKey(v5Body) ||
+    hasForbiddenKey(live4.options.headers) ||
+    hasForbiddenKey(live4Body)
+  ) {
     throw new Error("Запрос заблокирован: обнаружен финансовый токен.");
   }
   if (v5.options.method !== "POST" || v5Body.method !== "get") {
@@ -483,7 +857,7 @@ function pendingBonus(client) {
   };
 }
 
-export function buildBalanceReport({ v5Response, live4Response, generatedAt }) {
+export function buildBalanceReport({ v5Response, live4Response, generatedAt, routeEvidence = null }) {
   const client = oneExactClient(v5Response.data);
   const account = oneExactAccount(live4Response.data);
   if (client.Currency !== account.Currency) {
@@ -496,6 +870,7 @@ export function buildBalanceReport({ v5Response, live4Response, generatedAt }) {
     generatedAt,
     status: "ok",
     provider: "Yandex Direct API",
+    routingEvidence: routeEvidence,
     accountIdentity: {
       login: EXACT_LOGIN,
       type: "CLIENT",
@@ -560,6 +935,7 @@ export async function executeBalanceAudit({
   generatedAt = new Date().toISOString(),
   request = safeJsonRequest,
   transportOptions,
+  routeEvidence = null,
 } = {}) {
   const requests = buildReadOnlyRequests(token);
   const v5Response = await request(V5_CLIENTS_URL, requests.v5ClientsGet.options, {
@@ -577,7 +953,7 @@ export async function executeBalanceAudit({
   const live4Failure = providerFailure("AccountManagement.Get", live4Response, [token]);
   if (live4Failure) throw live4Failure;
 
-  return buildBalanceReport({ v5Response, live4Response, generatedAt });
+  return buildBalanceReport({ v5Response, live4Response, generatedAt, routeEvidence });
 }
 
 function writeFileDurably(filePath, content, flag) {
@@ -626,12 +1002,13 @@ export function saveBalanceArtifacts(reportDir, report, secrets = []) {
   return outputs;
 }
 
-function failureReport(generatedAt, error, token) {
+function failureReport(generatedAt, error, token, routeEvidence = null) {
   return {
     receiptVersion: 1,
     generatedAt,
     status: "source_unavailable",
     provider: "Yandex Direct API",
+    routingEvidence: routeEvidence,
     accountIdentity: { login: EXACT_LOGIN },
     ownFunds: {
       status: "not_provable_via_direct_api",
@@ -643,47 +1020,59 @@ function failureReport(generatedAt, error, token) {
   };
 }
 
-export async function runCli(argv = process.argv.slice(2)) {
+export async function runCli(
+  argv = process.argv.slice(2),
+  {
+    resolveRoute = resolveProjectRoute,
+    loadToken = loadProjectToken,
+    executeAudit = executeBalanceAudit,
+    saveArtifacts = saveBalanceArtifacts,
+    reportDir = REPORT_DIR,
+    log = console.log,
+    generatedAt = new Date().toISOString(),
+  } = {},
+) {
   if (argv.length > 0) {
     throw new Error("У фиксированного помощника нет параметров командной строки.");
   }
 
-  const generatedAt = new Date().toISOString();
   let token = null;
+  let routeEvidence = null;
   let report;
   let failed = false;
   try {
-    token = loadProjectToken();
-    report = await executeBalanceAudit({ token, generatedAt });
+    routeEvidence = resolveRoute();
+    token = loadToken(routeEvidence.apiEnvPath);
+    report = await executeAudit({ token, generatedAt, routeEvidence });
   } catch (error) {
     failed = true;
-    report = failureReport(generatedAt, error, token);
+    report = failureReport(generatedAt, error, token, routeEvidence ?? error?.routeEvidence ?? null);
   }
 
-  const outputs = saveBalanceArtifacts(REPORT_DIR, report, token ? [token] : []);
-  console.log(`Статус: ${report.status}`);
-  console.log(`Аккаунт: ${EXACT_LOGIN}`);
+  const outputs = saveArtifacts(reportDir, report, token ? [token] : []);
+  log(`Статус: ${report.status}`);
+  log(`Аккаунт: ${EXACT_LOGIN}`);
   if (report.status === "ok") {
-    console.log(
+    log(
       `Баланс общего счёта: ${report.currentSharedAccountBalance.amount} ${report.currentSharedAccountBalance.currency}`,
     );
     const overdraft = report.overdraftLimitAvailable.status === "available"
       ? `${report.overdraftLimitAvailable.amount} ${report.overdraftLimitAvailable.currency}`
       : "не возвращён API";
-    console.log(`Лимит овердрафта (не собственные деньги, не используется): ${overdraft}`);
+    log(`Лимит овердрафта (не собственные деньги, не используется): ${overdraft}`);
   } else {
-    console.log("Баланс общего счёта: недоступен");
-    console.log("Лимит овердрафта (не собственные деньги, не используется): недоступен");
-    console.log(`Источник недоступен: ${report.error}`);
+    log("Баланс общего счёта: недоступен");
+    log("Лимит овердрафта (не собственные деньги, не используется): недоступен");
+    log(`Источник недоступен: ${report.error}`);
   }
-  console.log(OWN_FUNDS_CLI_MESSAGE);
-  console.log(`Отчёт: ${outputs.receipt}`);
+  log(OWN_FUNDS_CLI_MESSAGE);
+  log(`Отчёт: ${outputs.receipt}`);
 
   if (failed) process.exitCode = 1;
   return { report, outputs };
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_FILE;
 if (isMain) {
   runCli().catch((error) => {
     console.error(redactSensitive(error?.message || error));
