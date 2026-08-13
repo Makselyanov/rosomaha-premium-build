@@ -72,6 +72,8 @@ MAX_CANDIDATE_FILES = 20_000
 MAX_OPERATOR_BYTES = 512 * 1024
 APPLY_TIMEOUT_SECONDS = 1_200
 PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
+RECOVERY_DIAGNOSTIC_SCHEMA = "rosomaha-main-price-recovery-diagnostic/v1"
+DIAGNOSTIC_BASELINE_OPERATOR_SHA256 = "57e364d6f9439244f87b4d0b44ccdc092ff508aca20d8e90092a5d1926094e6c"
 MAX_PROGRESS_BYTES = 4 * 1024
 MAX_PROGRESS_ELAPSED_SECONDS = 24 * 60 * 60
 PROGRESS_PHASES = {
@@ -1674,7 +1676,9 @@ def load_baseline(path: Path) -> tuple[dict[str, Any], Path, Path, Path, Path]:
     return load_baseline_with_operator(path, frozen_operator)
 
 
-def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dict[str, Any], Path, Path, Path, Path]:
+def load_baseline_with_operator(
+    path: Path, frozen_operator: bytes, *, expected_operator_sha256: str | None = None,
+) -> tuple[dict[str, Any], Path, Path, Path, Path]:
     resolved = safe_baseline_path(path)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if payload.get("schema") != SCHEMA or payload.get("status") != "ready":
@@ -1689,7 +1693,8 @@ def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dic
         raise HelperError("baseline current release and staging dist differ")
     if payload.get("baseline_token") != calculate_baseline_token(payload):
         raise HelperError("baseline receipt token mismatch")
-    if payload.get("operator_sha256") != sha256_bytes(frozen_operator):
+    expected_operator = expected_operator_sha256 or sha256_bytes(frozen_operator)
+    if payload.get("operator_sha256") != expected_operator:
         raise HelperError("fixed operator changed after baseline capture")
     root_token = payload.get("artifacts", {}).get("root_token")
     if not isinstance(root_token, str) or not re.fullmatch(r"[0-9a-f]{16}", root_token):
@@ -1897,6 +1902,17 @@ def invoke_operator(client: paramiko.SSHClient, mode: str, remote_dir: str, froz
         raise HelperError("invalid fixed bundle invocation path")
     timeout_seconds = APPLY_TIMEOUT_SECONDS if mode == "apply" else 360
     result = run_remote(client, f"/bin/bash -s -- {mode} {remote_dir}", frozen_operator, timeout_seconds)
+    return parse_operator_json(result)
+
+
+def invoke_recovery_diagnostic(
+    client: paramiko.SSHClient, remote_dir: str, frozen_operator: bytes,
+) -> dict[str, Any]:
+    if not re.fullmatch(rf"/tmp/rosomaha-main-price-release-{TARGET_COMMIT[:7]}-[0-9a-f]{{16}}", remote_dir):
+        raise HelperError("invalid fixed diagnostic bundle path")
+    result = run_remote(
+        client, f"/bin/bash -s -- diagnose-recovery {remote_dir}", frozen_operator, 180,
+    )
     return parse_operator_json(result)
 
 
@@ -2396,11 +2412,249 @@ def recover_from_baseline(commit: str, baseline_path: Path) -> tuple[dict[str, A
     return recovered, receipt
 
 
+def validate_recovery_diagnostic(payload: dict[str, Any], baseline: dict[str, Any]) -> None:
+    def plain_int(value: Any, *, minimum: int = 0, maximum: int | None = None) -> bool:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            return False
+        return maximum is None or value <= maximum
+
+    def digest_or_none(value: Any) -> bool:
+        return value is None or bool(re.fullmatch(r"[0-9a-f]{64}", str(value)))
+
+    expected_keys = {
+        "schema", "status", "mode", "account", "role", "roles", "target_commit",
+        "baseline_token", "read_only", "receipt_valid", "current", "release_root",
+        "trusted_tree", "current_tree", "staging_tree", "articles",
+        "article_comparison", "articles_cz", "labels", "lock", "snapshot_consistent",
+    }
+    if (
+        not isinstance(payload, dict) or set(payload) != expected_keys
+        or payload.get("schema") != RECOVERY_DIAGNOSTIC_SCHEMA
+        or payload.get("status") != "diagnosed" or payload.get("mode") != "diagnose-recovery"
+        or payload.get("account") != APPLY_LOGIN or payload.get("role") != "root-release-diagnostic"
+        or payload.get("roles") != ROLES or payload.get("target_commit") != TARGET_COMMIT
+        or payload.get("baseline_token") != baseline.get("baseline_token")
+        or payload.get("read_only") is not True or payload.get("receipt_valid") is not True
+        or payload.get("snapshot_consistent") is not True
+        or payload.get("lock") != {"existing": True, "exclusive": True, "created": False}
+    ):
+        raise HelperError("recovery diagnostic identity/schema mismatch")
+
+    current = payload.get("current")
+    if not isinstance(current, dict) or set(current) != {"before", "after", "stable"} or current.get("stable") is not True:
+        raise HelperError("recovery diagnostic current state is unsafe")
+    current_keys = {"state", "matches_receipt", "matches_baseline", "link"}
+    link_keys = {"valid", "symlink", "uid", "gid", "dev", "ino"}
+    for item in (current.get("before"), current.get("after")):
+        link = item.get("link") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict) or set(item) != current_keys
+            or item.get("state") != "receipt_release" or item.get("matches_receipt") is not True
+            or item.get("matches_baseline") is not False
+            or not isinstance(link, dict) or set(link) != link_keys
+            or link.get("valid") is not True or link.get("symlink") is not True
+            or link.get("uid") != 0
+            or not all(plain_int(link.get(key)) for key in ("gid", "dev", "ino"))
+        ):
+            raise HelperError("recovery diagnostic current state is unsafe")
+    if current["before"] != current["after"]:
+        raise HelperError("recovery diagnostic current state is contradictory")
+
+    release_root = payload.get("release_root")
+    root_keys = {"valid", "lstat", "fstat", "same_inode"}
+    stat_keys = {"directory", "symlink", "uid", "gid", "mode", "dev", "ino"}
+    if not isinstance(release_root, dict) or set(release_root) != {"before", "after", "stable"} or release_root.get("stable") is not True:
+        raise HelperError("recovery diagnostic release root is unsafe")
+    for item in (release_root.get("before"), release_root.get("after")):
+        if (
+            not isinstance(item, dict) or set(item) != root_keys or item.get("valid") is not True
+            or item.get("same_inode") is not True
+            or not isinstance(item.get("lstat"), dict) or set(item["lstat"]) != stat_keys
+            or not isinstance(item.get("fstat"), dict) or set(item["fstat"]) != stat_keys
+            or item["lstat"] != item["fstat"] or item["lstat"].get("uid") != 0
+            or item["lstat"].get("directory") is not True or item["lstat"].get("symlink") is not False
+            or not all(plain_int(item["lstat"].get(key)) for key in ("gid", "dev", "ino"))
+            or not re.fullmatch(r"0o[0-7]{3,4}", str(item["lstat"].get("mode") or ""))
+        ):
+            raise HelperError("recovery diagnostic release root is unsafe")
+    if release_root["before"] != release_root["after"]:
+        raise HelperError("recovery diagnostic release root is contradictory")
+
+    trust = payload.get("trusted_tree")
+    trust_keys = {"valid", "error", "file_count", "directory_count", "root"}
+    trust_root_keys = {"directory", "symlink", "uid", "gid", "mode", "group_writable", "world_writable", "valid"}
+    if not isinstance(trust, dict) or set(trust) != {"before", "after", "stable"} or trust.get("stable") is not True:
+        raise HelperError("recovery diagnostic trust evidence is unsafe")
+    for item in (trust.get("before"), trust.get("after")):
+        root = item.get("root") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict) or set(item) != trust_keys or not isinstance(item.get("valid"), bool)
+            or item.get("error") not in {None, "untrusted_tree_root", "untrusted_tree_directory", "untrusted_tree_file", "file_count_limit", "unknown_tree_error"}
+            or not isinstance(root, dict) or set(root) != trust_root_keys
+            or not isinstance(root.get("valid"), bool)
+            or not isinstance(root.get("directory"), (bool, type(None)))
+            or not isinstance(root.get("symlink"), (bool, type(None)))
+            or not isinstance(root.get("group_writable"), (bool, type(None)))
+            or not isinstance(root.get("world_writable"), (bool, type(None)))
+            or (root.get("uid") is not None and not plain_int(root.get("uid")))
+            or (root.get("gid") is not None and not plain_int(root.get("gid")))
+            or (root.get("mode") is not None and not re.fullmatch(r"0o[0-7]{3,4}", str(root.get("mode"))))
+            or (item.get("valid") is True and item.get("error") is not None)
+            or (item.get("valid") is True and not all(plain_int(item.get(key)) for key in ("file_count", "directory_count")))
+            or (item.get("valid") is False and item.get("error") is None)
+        ):
+            raise HelperError("recovery diagnostic trust evidence is unsafe")
+    if trust["before"] != trust["after"]:
+        raise HelperError("recovery diagnostic trust evidence is contradictory")
+
+    tree_keys = {"valid", "error", "digest", "file_count", "directory_count", "exact_expected"}
+    for name in ("current_tree", "staging_tree"):
+        pair = payload.get(name)
+        if not isinstance(pair, dict) or set(pair) != {"before", "after", "stable"} or pair.get("stable") is not True:
+            raise HelperError("recovery diagnostic tree evidence is unsafe")
+        for item in (pair.get("before"), pair.get("after")):
+            if (
+                not isinstance(item, dict) or set(item) != tree_keys
+                or item.get("valid") is not True or item.get("exact_expected") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("digest") or ""))
+                or not plain_int(item.get("file_count")) or not plain_int(item.get("directory_count"))
+                or item.get("error") is not None
+            ):
+                raise HelperError("recovery diagnostic tree evidence is unsafe")
+        if pair["before"] != pair["after"]:
+            raise HelperError("recovery diagnostic tree evidence is contradictory")
+
+    articles = payload.get("articles")
+    if not isinstance(articles, dict) or set(articles) != {"canonical", "current", "live"}:
+        raise HelperError("recovery diagnostic article set is unsafe")
+    article_keys = {"valid", "sha256", "bytes", "count", "unique_count", "slug_digest", "http_status", "exact_public_url"}
+
+    def validate_article(item):
+        if (
+            not isinstance(item, dict)
+            or set(item) != article_keys or not isinstance(item.get("valid"), bool)
+            or not digest_or_none(item.get("sha256")) or not digest_or_none(item.get("slug_digest"))
+            or any(value is not None and not plain_int(value) for value in (item.get("bytes"), item.get("count"), item.get("unique_count")))
+            or (item.get("http_status") is not None and not plain_int(item.get("http_status"), minimum=100, maximum=599))
+            or not isinstance(item.get("exact_public_url"), (bool, type(None)))
+            or (
+                item.get("valid") is True
+                and (
+                    item.get("sha256") is None or item.get("slug_digest") is None
+                    or not all(plain_int(item.get(key)) for key in ("bytes", "count", "unique_count"))
+                )
+            )
+        ):
+            raise HelperError("recovery diagnostic article evidence is unsafe")
+
+    for name in ("canonical", "current"):
+        pair = articles[name]
+        if not isinstance(pair, dict) or set(pair) != {"before", "after", "stable"} or pair.get("stable") is not True:
+            raise HelperError("recovery diagnostic article evidence is unsafe")
+        validate_article(pair.get("before"))
+        validate_article(pair.get("after"))
+        if pair["before"] != pair["after"]:
+            raise HelperError("recovery diagnostic article evidence is contradictory")
+    validate_article(articles["live"])
+
+    comparison = payload.get("article_comparison")
+    comparison_keys = {
+        "baseline_sha256", "canonical_matches_baseline", "current_matches_baseline",
+        "live_matches_baseline", "canonical_matches_current", "canonical_matches_live",
+        "current_matches_live",
+    }
+    if not isinstance(comparison, dict) or set(comparison) != comparison_keys or not re.fullmatch(r"[0-9a-f]{64}", str(comparison.get("baseline_sha256") or "")):
+        raise HelperError("recovery diagnostic article comparison is unsafe")
+    hashes = {"canonical": articles["canonical"]["after"]["sha256"], "current": articles["current"]["after"]["sha256"], "live": articles["live"]["sha256"]}
+    expected_comparison = {
+        "baseline_sha256": comparison["baseline_sha256"],
+        "canonical_matches_baseline": hashes["canonical"] == comparison["baseline_sha256"],
+        "current_matches_baseline": hashes["current"] == comparison["baseline_sha256"],
+        "live_matches_baseline": hashes["live"] == comparison["baseline_sha256"],
+        "canonical_matches_current": hashes["canonical"] is not None and hashes["canonical"] == hashes["current"],
+        "canonical_matches_live": hashes["canonical"] is not None and hashes["canonical"] == hashes["live"],
+        "current_matches_live": hashes["current"] is not None and hashes["current"] == hashes["live"],
+    }
+    if comparison != expected_comparison or comparison["baseline_sha256"] != baseline["articles"]["canonical"]["sha256"]:
+        raise HelperError("recovery diagnostic article comparison is contradictory")
+
+    cz = payload.get("articles_cz")
+    cz_item_keys = {"valid", "count", "digest"}
+    if not isinstance(cz, dict) or set(cz) != {"before", "after", "stable", "matches_baseline"} or cz.get("stable") is not True:
+        raise HelperError("recovery diagnostic articles-cz evidence is unsafe")
+    for item in (cz.get("before"), cz.get("after")):
+        if (
+            not isinstance(item, dict) or set(item) != cz_item_keys or item.get("valid") is not True
+            or not plain_int(item.get("count"))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("digest") or ""))
+        ):
+            raise HelperError("recovery diagnostic articles-cz evidence is unsafe")
+    if cz["before"] != cz["after"]:
+        raise HelperError("recovery diagnostic articles-cz evidence is contradictory")
+    if not isinstance(cz.get("matches_baseline"), bool):
+        raise HelperError("recovery diagnostic articles-cz baseline evidence is unsafe")
+
+    labels = payload.get("labels")
+    label_keys = {"valid", "count", "releases", "truncated", "exact_receipt_set"}
+    if not isinstance(labels, dict) or set(labels) != {"before", "after", "stable"} or labels.get("stable") is not True:
+        raise HelperError("recovery diagnostic label evidence is unsafe")
+    for item in (labels.get("before"), labels.get("after")):
+        releases = item.get("releases") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict) or set(item) != label_keys or item.get("valid") is not True
+            or not plain_int(item.get("count")) or not isinstance(releases, list) or len(releases) > 4
+            or item.get("count") != len(releases) or item.get("truncated") is not False
+            or item.get("exact_receipt_set") is not True or len(releases) != 1
+            or not all(re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", release) for release in releases)
+        ):
+            raise HelperError("recovery diagnostic label evidence is unsafe")
+    if labels["before"] != labels["after"]:
+        raise HelperError("recovery diagnostic label evidence is contradictory")
+
+
+def bounded_public_article_diagnostic() -> dict[str, Any]:
+    try:
+        response = read_http(f"{BASE_URL}/api/articles.json", accept="application/json", attempts=1)
+        info = article_info(response["raw"], "wrapper-public-diagnostic")
+        return {
+            "valid": bool(info.get("valid") and response["status"] == 200 and response["final_url"] == response["url"]),
+            "http_status": response["status"], "exact_url": response["final_url"] == response["url"],
+            "sha256": info.get("sha256"), "bytes": info.get("bytes"),
+            "count": info.get("count"), "slug_digest": info.get("slug_digest"),
+        }
+    except Exception as exc:
+        return {"valid": False, "error_type": type(exc).__name__[:100]}
+
+
+def diagnose_recovery_from_baseline(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
+    prove_target_commit(commit)
+    frozen_operator = operator_bytes()
+    baseline, _resolved, _archive, _delta, _target = load_baseline_with_operator(
+        baseline_path, frozen_operator,
+        expected_operator_sha256=DIAGNOSTIC_BASELINE_OPERATOR_SHA256,
+    )
+    remote_dir = remote_bundle_path(baseline["baseline_token"])
+    client, identity = connect(APPLY_LOGIN)
+    try:
+        operator_result = invoke_recovery_diagnostic(client, remote_dir, frozen_operator)
+    finally:
+        client.close()
+    validate_recovery_diagnostic(operator_result, baseline)
+    payload = {
+        **operator_result,
+        "diagnostic_identity": identity,
+        "wrapper_public_readback": bounded_public_article_diagnostic(),
+    }
+    receipt = atomic_json_receipt("rosomaha-main-price-recovery-diagnostic", payload)
+    return payload, receipt
+
+
 def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fixed main Rosomaha price-release helper")
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument("--apply", action="store_true", help="apply only the exact pinned candidate")
     operation.add_argument("--recover", action="store_true", help="recover a prior ambiguous apply without retrying apply")
+    operation.add_argument("--diagnose-recovery", action="store_true", help="read-only diagnosis of a preserved ambiguous release")
     parser.add_argument("--commit", help="exact pinned commit required with --apply")
     parser.add_argument("--baseline", type=Path, help="captured baseline receipt required with --apply")
     return parser
@@ -2421,8 +2675,14 @@ def main(argv: list[str] | None = None) -> int:
             payload, receipt = recover_from_baseline(args.commit, args.baseline)
             print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
             return 0 if payload["status"] == "recovered_verified_success" else 2
+        if args.diagnose_recovery:
+            if args.commit != TARGET_COMMIT or args.baseline is None:
+                raise HelperError(f"--diagnose-recovery requires --commit {TARGET_COMMIT} and --baseline <fixed receipt>")
+            payload, receipt = diagnose_recovery_from_baseline(args.commit, args.baseline)
+            print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
+            return 0
         if args.commit is not None or args.baseline is not None:
-            raise HelperError("--commit/--baseline are accepted only with --apply or --recover")
+            raise HelperError("--commit/--baseline are accepted only with --apply, --recover or --diagnose-recovery")
         payload, receipt = audit()
         print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
         return 0

@@ -66,6 +66,83 @@ def fixture_tree(digest: str) -> dict:
     }
 
 
+def recovery_diagnostic_payload(token: str = "a" * 64) -> tuple[dict, dict]:
+    baseline_sha = "d" * 64
+    release_path = "/var/www/rosomaha/_releases/20260813-144814-prices-64ba304"
+    link = {"valid": True, "symlink": True, "uid": 0, "gid": 33, "dev": 7, "ino": 10}
+    current_item = {
+        "state": "receipt_release", "matches_receipt": True,
+        "matches_baseline": False, "link": link,
+    }
+    root_stat = {
+        "directory": True, "symlink": False, "uid": 0, "gid": 33,
+        "mode": "0o700", "dev": 7, "ino": 11,
+    }
+    root_item = {"valid": True, "lstat": root_stat, "fstat": root_stat, "same_inode": True}
+    trust_item = {
+        "valid": True, "error": None, "file_count": 1030, "directory_count": 1106,
+        "root": {
+            "directory": True, "symlink": False, "uid": 0, "gid": 33,
+            "mode": "0o700", "group_writable": False,
+            "world_writable": False, "valid": True,
+        },
+    }
+    tree_item = {
+        "valid": True, "error": None, "digest": "b" * 64,
+        "file_count": 1030, "directory_count": 1106, "exact_expected": True,
+    }
+    staging_item = {
+        "valid": True, "error": None, "digest": "c" * 64,
+        "file_count": 1029, "directory_count": 1105, "exact_expected": True,
+    }
+    article = {
+        "valid": True, "sha256": baseline_sha, "bytes": 857958,
+        "count": 61, "unique_count": 61, "slug_digest": "e" * 64,
+        "http_status": None, "exact_public_url": None,
+    }
+    live = {**article, "http_status": 200, "exact_public_url": True}
+    cz_item = {"valid": True, "count": 14, "digest": "f" * 64}
+    label_item = {
+        "valid": True, "count": 1, "releases": [release_path],
+        "truncated": False, "exact_receipt_set": True,
+    }
+    payload = {
+        "schema": helper.RECOVERY_DIAGNOSTIC_SCHEMA, "status": "diagnosed",
+        "mode": "diagnose-recovery", "account": helper.APPLY_LOGIN,
+        "role": "root-release-diagnostic", "roles": helper.ROLES,
+        "target_commit": helper.TARGET_COMMIT, "baseline_token": token,
+        "read_only": True, "receipt_valid": True,
+        "lock": {"existing": True, "exclusive": True, "created": False},
+        "snapshot_consistent": True,
+        "current": {"before": current_item, "after": current_item, "stable": True},
+        "release_root": {"before": root_item, "after": root_item, "stable": True},
+        "trusted_tree": {"before": trust_item, "after": trust_item, "stable": True},
+        "current_tree": {"before": tree_item, "after": tree_item, "stable": True},
+        "staging_tree": {"before": staging_item, "after": staging_item, "stable": True},
+        "articles": {
+            "canonical": {"before": article, "after": article, "stable": True},
+            "current": {"before": article, "after": article, "stable": True},
+            "live": live,
+        },
+        "article_comparison": {
+            "baseline_sha256": baseline_sha,
+            "canonical_matches_baseline": True, "current_matches_baseline": True,
+            "live_matches_baseline": True, "canonical_matches_current": True,
+            "canonical_matches_live": True, "current_matches_live": True,
+        },
+        "articles_cz": {
+            "before": cz_item, "after": cz_item, "stable": True,
+            "matches_baseline": True,
+        },
+        "labels": {"before": label_item, "after": label_item, "stable": True},
+    }
+    baseline = {
+        "baseline_token": token,
+        "articles": {"canonical": {"sha256": baseline_sha}},
+    }
+    return payload, baseline
+
+
 def private_directory_stat(
     mode: int, *, uid: int = 0, dev: int = 7, ino: int = 11,
 ):
@@ -573,7 +650,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         rollback_body = text[text.index("def rollback_release") : text.index("def main")]
         self.assertIn('audit|root-audit', text)
         self.assertIn('mode == "audit"', identity)
-        self.assertIn('mode in {"root-audit", "apply", "rollback"}', identity)
+        self.assertIn('mode in {"root-audit", "apply", "rollback", "diagnose-recovery"}', identity)
         self.assertIn('login == APPLY_LOGIN and uid == 0 and euid == 0', identity)
         self.assertIn('identity_for_mode("apply")["valid"]', apply_body)
         self.assertIn('identity_for_mode("rollback")["valid"]', rollback_body)
@@ -1460,6 +1537,91 @@ Allow: /
         self.assertEqual(code, 0)
         recover.assert_called_once()
         apply.assert_not_called()
+
+    def test_diagnose_recovery_cli_is_read_only(self) -> None:
+        payload = {"status": "diagnosed"}
+        with mock.patch.object(
+            helper, "diagnose_recovery_from_baseline",
+            return_value=(payload, Path("diagnostic.json")),
+        ) as diagnose, mock.patch.object(helper, "apply") as apply, mock.patch.object(
+            helper, "recover_from_baseline",
+        ) as recover:
+            code = helper.main([
+                "--diagnose-recovery", "--commit", helper.TARGET_COMMIT,
+                "--baseline", "baseline.json",
+            ])
+        self.assertEqual(code, 0)
+        diagnose.assert_called_once()
+        apply.assert_not_called()
+        recover.assert_not_called()
+
+    def test_diagnose_recovery_operator_has_no_mutation_path(self) -> None:
+        source = operator_source()
+        body = source[source.index("def diagnose_recovery(") : source.index("def rollback_release(")]
+        self.assertIn("baseline = validate_bundle(bundle)", body)
+        self.assertIn("read_diagnostic_apply_receipt(bundle, baseline)", body)
+        self.assertIn("DIAGNOSTIC_BASELINE_OPERATOR_SHA256", body)
+        self.assertEqual(body.count("open_lock("), 1)
+        self.assertIn("with open_lock(create=False) as lock:", body)
+        self.assertNotIn("open_lock(create=True)", body)
+        for forbidden in (
+            "run_fixed(", "os.replace(", "os.rename(", "os.unlink(",
+            "os.remove(", "os.mkdir(", "os.chmod(", "os.fchmod(", "shutil.rmtree(",
+        ):
+            self.assertNotIn(forbidden, body)
+
+    def test_diagnostic_baseline_uses_exact_historical_operator_pin(self) -> None:
+        self.assertEqual(
+            helper.DIAGNOSTIC_BASELINE_OPERATOR_SHA256,
+            "57e364d6f9439244f87b4d0b44ccdc092ff508aca20d8e90092a5d1926094e6c",
+        )
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        body = source[source.index("def diagnose_recovery_from_baseline"):source.index("def argument_parser")]
+        self.assertIn("expected_operator_sha256=DIAGNOSTIC_BASELINE_OPERATOR_SHA256", body)
+        operator = operator_source()
+        diagnose = operator[operator.index("def diagnose_recovery("):operator.index("def rollback_release(")]
+        self.assertIn('baseline.get("operator_sha256") != DIAGNOSTIC_BASELINE_OPERATOR_SHA256', diagnose)
+
+    def test_recovery_diagnostic_rejects_unexpected_release_path(self) -> None:
+        payload, baseline = recovery_diagnostic_payload()
+        payload["labels"]["before"]["releases"] = ["/tmp/secret"]
+        payload["labels"]["after"]["releases"] = ["/tmp/secret"]
+        with self.assertRaisesRegex(helper.HelperError, "label evidence is unsafe"):
+            helper.validate_recovery_diagnostic(payload, baseline)
+
+    def test_recovery_diagnostic_rejects_inconsistent_snapshot(self) -> None:
+        payload, baseline = recovery_diagnostic_payload()
+        payload["snapshot_consistent"] = False
+        with self.assertRaisesRegex(helper.HelperError, "identity/schema mismatch"):
+            helper.validate_recovery_diagnostic(payload, baseline)
+
+    def test_recovery_diagnostic_rejects_mid_read_article_drift(self) -> None:
+        payload, baseline = recovery_diagnostic_payload()
+        payload["articles"]["canonical"]["after"] = {
+            **payload["articles"]["canonical"]["after"], "sha256": "9" * 64,
+        }
+        with self.assertRaisesRegex(helper.HelperError, "contradictory"):
+            helper.validate_recovery_diagnostic(payload, baseline)
+
+    def test_recovery_diagnostic_rejects_malformed_nested_stat(self) -> None:
+        payload, baseline = recovery_diagnostic_payload()
+        payload["release_root"]["before"]["lstat"]["ino"] = "11"
+        payload["release_root"]["after"]["lstat"]["ino"] = "11"
+        with self.assertRaisesRegex(helper.HelperError, "release root is unsafe"):
+            helper.validate_recovery_diagnostic(payload, baseline)
+
+    def test_operator_diagnostic_pairs_detect_mid_read_drift(self) -> None:
+        namespace = operator_namespace()
+        before = fixture_tree("1" * 64)
+        after = fixture_tree("2" * 64)
+        pair = namespace["diagnostic_tree_pair"](before, after, before)
+        self.assertFalse(pair["stable"])
+        article_before = {
+            "valid": True, "sha256": "3" * 64, "bytes": 2, "count": 1,
+            "unique_count": 1, "slug_digest": "4" * 64,
+        }
+        article_after = {**article_before, "sha256": "5" * 64}
+        self.assertFalse(namespace["diagnostic_article_pair"](article_before, article_after)["stable"])
 
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:

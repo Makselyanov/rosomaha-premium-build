@@ -10,7 +10,7 @@ BUNDLE_DIR="${2:-}"
 
 case "$MODE" in
   audit|root-audit) ;;
-  apply|rollback)
+  apply|rollback|diagnose-recovery)
     [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-64ba304-[0-9a-f]{16}$ ]] || {
       echo '{"status":"error","error":"invalid fixed bundle path"}'
       exit 2
@@ -50,6 +50,7 @@ SCHEMA = "rosomaha-main-price-release/v4"
 DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
 DELTA_BASE_SOURCE = "current_release"
 PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
+RECOVERY_DIAGNOSTIC_SCHEMA = "rosomaha-main-price-recovery-diagnostic/v1"
 HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
@@ -68,6 +69,7 @@ LOCK_PATH = APP_ROOT / ".rosomaha-main-price-release.lock"
 PUBLIC_ARTICLES_URL = "https://xn--80aa8ahaki9a.site/api/articles.json"
 RELEASE_SCRIPT_SHA256 = "c25fc273a4cf88a27879207aaebf18be62f4487867a7de7674c611b400919edd"
 ROLLBACK_SCRIPT_SHA256 = "aeee52f314036112501a7acc0af5fa09ee7c081327fb867b91c64b983bd41acc"
+DIAGNOSTIC_BASELINE_OPERATOR_SHA256 = "57e364d6f9439244f87b4d0b44ccdc092ff508aca20d8e90092a5d1926094e6c"
 FIXED_COMMANDS = ("python3", "rsync", "bash", "date", "git", "mkdir", "ln", "readlink", "find", "sort")
 ARTICLES_CZ_ALLOWLIST = (
     "avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts",
@@ -628,9 +630,11 @@ def identity_for_mode(mode):
     if mode == "audit":
         valid = login == AUDIT_LOGIN and uid != 0 and euid == uid
         role = "read-only-audit"
-    elif mode in {"root-audit", "apply", "rollback"}:
+    elif mode in {"root-audit", "apply", "rollback", "diagnose-recovery"}:
         valid = login == APPLY_LOGIN and uid == 0 and euid == 0
-        role = "root-release-preflight" if mode == "root-audit" else "root-release-operator"
+        role = "root-release-preflight" if mode == "root-audit" else (
+            "root-release-diagnostic" if mode == "diagnose-recovery" else "root-release-operator"
+        )
     else:
         valid = False
         role = "invalid"
@@ -2017,6 +2021,342 @@ def apply_release(bundle):
         return apply_receipt
 
 
+def diagnostic_stat(value):
+    return {
+        "directory": stat.S_ISDIR(value.st_mode), "symlink": stat.S_ISLNK(value.st_mode),
+        "uid": value.st_uid, "gid": value.st_gid, "mode": oct(stat.S_IMODE(value.st_mode)),
+        "dev": value.st_dev, "ino": value.st_ino,
+    }
+
+
+def diagnostic_release_root(path):
+    result = {"valid": False, "lstat": None, "fstat": None, "same_inode": False}
+    fd = None
+    try:
+        linked = os.lstat(path)
+        result["lstat"] = diagnostic_stat(linked)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        result["fstat"] = diagnostic_stat(opened)
+        result["same_inode"] = (linked.st_dev, linked.st_ino) == (opened.st_dev, opened.st_ino)
+        result["valid"] = bool(
+            result["same_inode"] and stat.S_ISDIR(linked.st_mode) and stat.S_ISDIR(opened.st_mode)
+            and not stat.S_ISLNK(linked.st_mode)
+        )
+    except Exception as exc:
+        result["error_type"] = type(exc).__name__[:100]
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return result
+
+
+def diagnostic_trust(value):
+    error = value.get("error")
+    if error == "untrusted tree root":
+        error_code = "untrusted_tree_root"
+    elif isinstance(error, str) and error.startswith("untrusted tree directory:"):
+        error_code = "untrusted_tree_directory"
+    elif isinstance(error, str) and error.startswith("untrusted tree file:"):
+        error_code = "untrusted_tree_file"
+    elif error == "trusted tree file-count limit exceeded":
+        error_code = "file_count_limit"
+    else:
+        error_code = None if value.get("valid") else "unknown_tree_error"
+    root = value.get("root_info") if isinstance(value.get("root_info"), dict) else {}
+    return {
+        "valid": value.get("valid") is True, "error": error_code,
+        "file_count": value.get("file_count") if isinstance(value.get("file_count"), int) else None,
+        "directory_count": value.get("directory_count") if isinstance(value.get("directory_count"), int) else None,
+        "root": {
+            key: root.get(key) for key in (
+                "directory", "symlink", "uid", "gid", "mode",
+                "group_writable", "world_writable", "valid",
+            )
+        },
+    }
+
+
+def diagnostic_tree(value, expected):
+    error = value.get("error")
+    if error == "unsafe tree root":
+        error_code = "unsafe_tree_root"
+    elif isinstance(error, str) and error.startswith("unsafe directory:"):
+        error_code = "unsafe_tree_directory"
+    elif isinstance(error, str) and error.startswith("unsafe file:"):
+        error_code = "unsafe_tree_file"
+    elif error == "tree file-count limit exceeded":
+        error_code = "file_count_limit"
+    else:
+        error_code = None if value.get("valid") else "unknown_tree_error"
+    valid = value.get("valid") is True
+    return {
+        "valid": valid, "error": error_code,
+        "digest": value.get("digest") if valid else None,
+        "file_count": value.get("file_count") if valid else None,
+        "directory_count": value.get("directory_count") if valid else None,
+        "exact_expected": bool(valid and exact_tree_contract(value, expected)),
+    }
+
+
+def diagnostic_article(value):
+    return {
+        "valid": value.get("valid") is True,
+        "sha256": value.get("sha256") if re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256") or "")) else None,
+        "bytes": value.get("bytes") if isinstance(value.get("bytes"), int) else None,
+        "count": value.get("count") if isinstance(value.get("count"), int) else None,
+        "unique_count": value.get("unique_count") if isinstance(value.get("unique_count"), int) else None,
+        "slug_digest": value.get("slug_digest") if re.fullmatch(r"[0-9a-f]{64}", str(value.get("slug_digest") or "")) else None,
+        "http_status": value.get("http_status") if isinstance(value.get("http_status"), int) else None,
+        "exact_public_url": value.get("final_url") == PUBLIC_ARTICLES_URL if "final_url" in value else None,
+    }
+
+
+def diagnostic_current(exact_new, baseline_release):
+    try:
+        linked = os.lstat(CURRENT_LINK)
+        observed = resolved(CURRENT_LINK)
+        link = {
+            "valid": trusted_current_link_attributes(linked.st_uid, linked.st_mode),
+            "symlink": stat.S_ISLNK(linked.st_mode), "uid": linked.st_uid, "gid": linked.st_gid,
+            "dev": linked.st_dev, "ino": linked.st_ino,
+        }
+    except Exception as exc:
+        observed = None
+        link = {"valid": False, "symlink": False, "uid": None, "gid": None, "dev": None, "ino": None, "error_type": type(exc).__name__[:100]}
+    if observed == exact_new:
+        state = "receipt_release"
+    elif observed == baseline_release:
+        state = "baseline_release"
+    elif observed is None:
+        state = "missing"
+    else:
+        state = "unexpected_release"
+    return {
+        "state": state, "matches_receipt": observed == exact_new,
+        "matches_baseline": observed == baseline_release, "link": link,
+    }
+
+
+def diagnostic_tree_pair(before, after, expected):
+    return {
+        "before": diagnostic_tree(before, expected),
+        "after": diagnostic_tree(after, expected),
+        "stable": bool(
+            before.get("valid") and after.get("valid")
+            and exact_tree_contract(before, after)
+        ),
+    }
+
+
+def diagnostic_article_pair(before, after):
+    before_summary = diagnostic_article(before)
+    after_summary = diagnostic_article(after)
+    return {
+        "before": before_summary, "after": after_summary,
+        "stable": bool(before_summary["valid"] and after_summary["valid"] and before_summary == after_summary),
+    }
+
+
+def diagnostic_cz_pair(before, after, baseline):
+    def summary(value):
+        digest = value.get("digest")
+        return {
+            "valid": value.get("valid") is True,
+            "count": value.get("count") if isinstance(value.get("count"), int) else None,
+            "digest": digest if re.fullmatch(r"[0-9a-f]{64}", str(digest or "")) else None,
+        }
+    before_summary = summary(before)
+    after_summary = summary(after)
+    stable = bool(
+        before.get("valid") and after.get("valid")
+        and before.get("digest") == after.get("digest")
+        and before.get("files") == after.get("files")
+    )
+    return {
+        "before": before_summary, "after": after_summary, "stable": stable,
+        "matches_baseline": bool(
+            stable and after.get("digest") == baseline.get("digest")
+            and after.get("files") == baseline.get("files")
+        ),
+    }
+
+
+def diagnostic_labels(value, exact_new):
+    safe = [
+        item for item in value
+        if isinstance(item, str) and re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", item)
+    ]
+    valid = len(safe) == len(value) and len(value) <= 4
+    return {
+        "valid": valid, "count": len(value), "releases": safe if valid else [],
+        "truncated": len(value) > 4, "exact_receipt_set": valid and safe == [exact_new],
+    }
+
+
+def read_diagnostic_apply_receipt(bundle, baseline):
+    path = bundle / "apply-receipt.json"
+    info = safe_file(path, root=bundle)
+    if not info.get("valid") or info.get("uid") != 0 or stat.S_IMODE(os.lstat(path).st_mode) != 0o600:
+        raise ReleaseError("safe apply receipt is unavailable for diagnosis")
+
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReleaseError("apply receipt contains duplicate fields")
+            result[key] = value
+        return result
+
+    receipt = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+    expected_keys = {
+        "schema", "status", "mode", "completed_at", "account", "role", "roles",
+        "target_commit", "baseline_token", "previous_release", "new_release",
+        "candidate_tree_digest", "release", "delta_reconstruction",
+    }
+    exact_new = receipt.get("new_release")
+    if (
+        not isinstance(receipt, dict) or set(receipt) != expected_keys
+        or receipt.get("schema") != SCHEMA or receipt.get("status") != "released" or receipt.get("mode") != "apply"
+        or receipt.get("account") != APPLY_LOGIN or receipt.get("role") != "root-release-operator" or receipt.get("roles") != ROLES
+        or receipt.get("target_commit") != TARGET_COMMIT or receipt.get("baseline_token") != baseline.get("baseline_token")
+        or receipt.get("previous_release") != baseline.get("current_release")
+        or not isinstance(exact_new, str)
+        or not re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", exact_new)
+        or receipt.get("candidate_tree_digest") != baseline.get("candidate", {}).get("tree_digest")
+    ):
+        raise ReleaseError("apply receipt identity mismatch for diagnosis")
+    release = receipt.get("release")
+    if (
+        not isinstance(release, dict) or release.get("script") != "server-release.sh"
+        or release.get("script_sha256") != RELEASE_SCRIPT_SHA256
+        or release.get("argument") != RELEASE_LABEL or release.get("exit_code") != 0
+    ):
+        raise ReleaseError("apply receipt fixed release evidence mismatch for diagnosis")
+    evidence = receipt.get("delta_reconstruction")
+    base_expected = manifest_summary(baseline["current_tree"])
+    staging_expected = manifest_summary(baseline["staging_dist"])
+    target_expected = manifest_summary(baseline["candidate"]["target_manifest"])
+    counts = baseline["candidate"]["delta"]
+    if (
+        not isinstance(evidence, dict) or evidence.get("exact_match") is not True
+        or evidence.get("base") != {
+            "source": DELTA_BASE_SOURCE, "release": baseline["current_release"],
+            "expected": base_expected, "observed_before": base_expected,
+            "observed_after": base_expected, "exact_match": True,
+        }
+        or evidence.get("staging") != {
+            "expected": staging_expected, "observed_before": staging_expected,
+            "observed_after": staging_expected, "exact_match": True,
+        }
+        or evidence.get("target") != {
+            "expected": target_expected, "observed": target_expected, "exact_match": True,
+        }
+        or evidence.get("delta") != {
+            "added": counts["added_count"], "modified": counts["modified_count"],
+            "changed": counts["changed_count"], "deleted": counts["deleted_count"],
+        }
+    ):
+        raise ReleaseError("apply receipt reconstruction evidence mismatch for diagnosis")
+    return receipt
+
+
+def diagnose_recovery(bundle):
+    if not identity_for_mode("diagnose-recovery")["valid"]:
+        raise ReleaseError("recovery diagnosis requires exact root identity")
+    with open_lock(create=False) as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        baseline = validate_bundle(bundle)
+        if baseline.get("operator_sha256") != DIAGNOSTIC_BASELINE_OPERATOR_SHA256:
+            raise ReleaseError("diagnostic baseline operator pin mismatch")
+        receipt = read_diagnostic_apply_receipt(bundle, baseline)
+        exact_new = receipt["new_release"]
+        release_root = Path(exact_new)
+
+        current_before = diagnostic_current(exact_new, baseline["current_release"])
+        root_before = diagnostic_release_root(release_root)
+        trust_before = diagnostic_trust(trusted_closed_tree(release_root))
+        release_tree_before = tree_manifest(release_root)
+        staging_tree_before = tree_manifest(DIST_DIR)
+        canonical_before = article_file(CANONICAL_ARTICLES, "canonical-before")
+        current_articles_before = article_file(release_root / "api/articles.json", "receipt-release-before")
+        cz_before = articles_cz_manifest()
+        labels_before_raw = exact_label_releases()
+
+        live = live_articles()
+
+        labels_after_raw = exact_label_releases()
+        cz_after = articles_cz_manifest()
+        current_articles_after = article_file(release_root / "api/articles.json", "receipt-release-after")
+        canonical_after = article_file(CANONICAL_ARTICLES, "canonical-after")
+        staging_tree_after = tree_manifest(DIST_DIR)
+        release_tree_after = tree_manifest(release_root)
+        trust_after = diagnostic_trust(trusted_closed_tree(release_root))
+        root_after = diagnostic_release_root(release_root)
+        current_after = diagnostic_current(exact_new, baseline["current_release"])
+
+    current_stable = current_before == current_after
+    release_root_stable = bool(root_before.get("valid") and root_after.get("valid") and root_before == root_after)
+    trusted_tree_stable = trust_before == trust_after
+    current_tree = diagnostic_tree_pair(
+        release_tree_before, release_tree_after, baseline["candidate"]["target_manifest"],
+    )
+    staging_tree = diagnostic_tree_pair(staging_tree_before, staging_tree_after, baseline["staging_dist"])
+    canonical = diagnostic_article_pair(canonical_before, canonical_after)
+    current_articles = diagnostic_article_pair(current_articles_before, current_articles_after)
+    live_summary = diagnostic_article(live)
+    articles = {"canonical": canonical, "current": current_articles, "live": live_summary}
+    hashes = {
+        "canonical": canonical["after"].get("sha256"),
+        "current": current_articles["after"].get("sha256"),
+        "live": live_summary.get("sha256"),
+    }
+    baseline_sha = baseline["articles"]["canonical"]["sha256"]
+    cz = diagnostic_cz_pair(cz_before, cz_after, baseline["articles_cz"])
+    labels_before = diagnostic_labels(labels_before_raw, exact_new)
+    labels_after = diagnostic_labels(labels_after_raw, exact_new)
+    labels = {
+        "before": labels_before, "after": labels_after,
+        "stable": labels_before_raw == labels_after_raw and labels_before.get("valid") and labels_after.get("valid"),
+    }
+    snapshot_consistent = bool(
+        current_stable and current_before["matches_receipt"] and current_after["matches_receipt"]
+        and current_before["link"]["valid"] and current_after["link"]["valid"]
+        and release_root_stable and trusted_tree_stable
+        and current_tree["stable"] and staging_tree["stable"]
+        and canonical["stable"] and current_articles["stable"]
+        and cz["stable"] and labels["stable"]
+    )
+    return {
+        "schema": RECOVERY_DIAGNOSTIC_SCHEMA, "status": "diagnosed", "mode": "diagnose-recovery",
+        "account": APPLY_LOGIN, "role": "root-release-diagnostic", "roles": ROLES,
+        "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
+        "read_only": True, "receipt_valid": True,
+        "lock": {"existing": True, "exclusive": True, "created": False},
+        "snapshot_consistent": snapshot_consistent,
+        "current": {
+            "before": current_before, "after": current_after, "stable": current_stable,
+        },
+        "release_root": {"before": root_before, "after": root_after, "stable": release_root_stable},
+        "trusted_tree": {"before": trust_before, "after": trust_after, "stable": trusted_tree_stable},
+        "current_tree": current_tree,
+        "staging_tree": staging_tree,
+        "articles": articles,
+        "article_comparison": {
+            "baseline_sha256": baseline_sha,
+            "canonical_matches_baseline": hashes["canonical"] == baseline_sha,
+            "current_matches_baseline": hashes["current"] == baseline_sha,
+            "live_matches_baseline": hashes["live"] == baseline_sha,
+            "canonical_matches_current": hashes["canonical"] is not None and hashes["canonical"] == hashes["current"],
+            "canonical_matches_live": hashes["canonical"] is not None and hashes["canonical"] == hashes["live"],
+            "current_matches_live": hashes["current"] is not None and hashes["current"] == hashes["live"],
+        },
+        "articles_cz": cz,
+        "labels": labels,
+    }
+
+
 def rollback_release(bundle):
     if not identity_for_mode("rollback")["valid"]:
         raise ReleaseError("rollback requires exact root identity")
@@ -2096,10 +2436,12 @@ def main():
             result = apply_release(BUNDLE_DIR)
         elif MODE == "rollback" and BUNDLE_DIR is not None:
             result = rollback_release(BUNDLE_DIR)
+        elif MODE == "diagnose-recovery" and BUNDLE_DIR is not None:
+            result = diagnose_recovery(BUNDLE_DIR)
         else:
             raise ReleaseError("invalid fixed mode")
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ok", "released", "rolled_back"} else 3
+        return 0 if result.get("status") in {"ok", "released", "rolled_back", "diagnosed"} else 3
     except Exception as exc:
         print(json.dumps({
             "schema": SCHEMA, "status": "error", "mode": MODE,
