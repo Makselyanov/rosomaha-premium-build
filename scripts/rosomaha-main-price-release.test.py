@@ -59,6 +59,13 @@ def progress_payload(token: str, phase: str = "failed_before_switch") -> dict:
     return payload
 
 
+def fixture_tree(digest: str) -> dict:
+    return {
+        "valid": True, "files": [{"path": "index.html", "bytes": 2, "sha256": digest}],
+        "file_count": 1, "directory_count": 0, "digest": digest,
+    }
+
+
 def page_html(path: str, price: int | str | float | None = None, *, title: str = "Модель Росомаха", description: str = "Описание") -> bytes:
     url = helper.BASE_URL + ("/" if path == "/" else path)
     visible = ""
@@ -79,18 +86,6 @@ def page_html(path: str, price: int | str | float | None = None, *, title: str =
         f'<link rel="canonical" href="{url}">'
         f"{structured}</head><body>{visible}</body></html>"
     ).encode("utf-8")
-
-
-def operator_stat(
-    mode: int, *, uid: int = 0, gid: int = 33, nlink: int = 1,
-    dev: int = 7, ino: int = 11, size: int = 2,
-    mtime_ns: int = 100, ctime_ns: int = 200,
-):
-    return types.SimpleNamespace(
-        st_mode=mode, st_uid=uid, st_gid=gid, st_nlink=nlink,
-        st_dev=dev, st_ino=ino, st_size=size,
-        st_mtime_ns=mtime_ns, st_ctime_ns=ctime_ns,
-    )
 
 
 class FakeResponse:
@@ -239,133 +234,30 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         readiness = source[source.index("def root_apply_readiness") : source.index("def audit_state")]
         self.assertIn("and mutation.get(\"valid\")", readiness)
 
-    def test_delta_base_root_accepts_02775_but_rejects_world_write(self) -> None:
+    def test_root_audit_uses_current_release_delta_base_contract(self) -> None:
         namespace = operator_namespace()
-        root = Path("/var/www/rosomaha/dist")
-        root_info = {"valid": True}
-        accepted = operator_stat(stat.S_IFDIR | 0o2775)
-        with mock.patch.dict(namespace, {"DIST_DIR": root, "trusted_root_directory": mock.Mock(return_value=root_info)}), \
-                mock.patch.object(namespace["os"], "open", return_value=81), \
-                mock.patch.object(namespace["os"], "fstat", return_value=accepted), \
-                mock.patch.object(namespace["os"], "lstat", return_value=accepted), \
-                mock.patch.object(namespace["os"], "close") as close:
-            fd, snapshot = namespace["open_pinned_delta_base_root"]()
-            self.assertEqual((fd, snapshot), (81, (7, 11, 100, 200)))
-            self.assertEqual(namespace["trusted_root_directory"].call_args.kwargs, {"allow_group_write": True})
-            close.assert_not_called()
-        world_writable = operator_stat(stat.S_IFDIR | 0o2777)
-        with mock.patch.dict(namespace, {"DIST_DIR": root, "trusted_root_directory": mock.Mock(return_value=root_info)}), \
-                mock.patch.object(namespace["os"], "open", return_value=82), \
-                mock.patch.object(namespace["os"], "fstat", return_value=world_writable), \
-                mock.patch.object(namespace["os"], "lstat", return_value=world_writable), \
-                mock.patch.object(namespace["os"], "close") as close:
-            with self.assertRaises(namespace["ReleaseError"]):
-                namespace["open_pinned_delta_base_root"]()
-            close.assert_called_once_with(82)
-
-    def test_delta_base_pinned_root_rejects_entry_churn(self) -> None:
-        namespace = operator_namespace()
-        root = Path("/var/www/rosomaha/dist")
-        before = operator_stat(stat.S_IFDIR | 0o2775)
-        changed = operator_stat(stat.S_IFDIR | 0o2775, mtime_ns=101)
-        with mock.patch.dict(namespace, {"DIST_DIR": root}), \
-                mock.patch.object(namespace["os"], "fstat", return_value=changed), \
-                mock.patch.object(namespace["os"], "lstat", return_value=changed):
-            with self.assertRaisesRegex(namespace["ReleaseError"], "changed during reconstruction"):
-                namespace["verify_pinned_delta_base_root"](81, namespace["delta_base_root_identity"](before))
-
-    def test_delta_base_readiness_rejects_unsafe_child_directories(self) -> None:
-        namespace = operator_namespace()
-        root = Path("/dist")
-        cases = (
-            (operator_stat(stat.S_IFDIR | 0o775), "writable_by_group_or_world"),
-            (operator_stat(stat.S_IFDIR | 0o755, uid=1000), "owner_not_root"),
-            (operator_stat(stat.S_IFLNK | 0o777), "symlink"),
-        )
-        for details, reason in cases:
-            with self.subTest(reason=reason), mock.patch.dict(namespace, {
-                "DIST_DIR": root, "within": mock.Mock(return_value=True),
-                "verify_pinned_delta_base_root": mock.Mock(),
-            }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), ["unsafe"], [])]), \
-                    mock.patch.object(namespace["os"], "lstat", return_value=details):
-                result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
-            self.assertFalse(result["valid"])
-            self.assertEqual(result["invalid_count"], 1)
-            self.assertEqual(result["blockers"][0]["path"], "unsafe")
-            self.assertEqual(result["blockers"][0]["kind"], "directory")
-            self.assertEqual(result["blockers"][0]["reason"], reason)
-
-    def test_delta_base_readiness_rejects_unsafe_files(self) -> None:
-        namespace = operator_namespace()
-        root = Path("/dist")
-        cases = (
-            (operator_stat(stat.S_IFREG | 0o664), "writable_by_group_or_world"),
-            (operator_stat(stat.S_IFREG | 0o644, nlink=2), "multiple_hardlinks"),
-            (operator_stat(stat.S_IFLNK | 0o777), "symlink"),
-        )
-        for details, reason in cases:
-            with self.subTest(reason=reason), mock.patch.dict(namespace, {
-                "DIST_DIR": root, "within": mock.Mock(return_value=True),
-                "verify_pinned_delta_base_root": mock.Mock(),
-            }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), [], ["unsafe.html"])]), \
-                    mock.patch.object(namespace["os"], "lstat", return_value=details), \
-                    mock.patch.object(namespace["os"], "open", return_value=91), \
-                    mock.patch.object(namespace["os"], "fstat", return_value=details), \
-                    mock.patch.object(namespace["os"], "close"):
-                result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
-            self.assertFalse(result["valid"])
-            self.assertEqual(result["invalid_count"], 1)
-            self.assertEqual(result["blockers"][0]["path"], "unsafe.html")
-            self.assertEqual(result["blockers"][0]["kind"], "file")
-            self.assertEqual(result["blockers"][0]["reason"], reason)
-
-    def test_delta_base_readiness_bounds_first_ten_invalid_paths(self) -> None:
-        namespace = operator_namespace()
-        root = Path("/dist")
-        names = [f"unsafe-{index:02d}.html" for index in range(13)]
-        details = operator_stat(stat.S_IFLNK | 0o777)
-        with mock.patch.dict(namespace, {
-            "DIST_DIR": root, "within": mock.Mock(return_value=True),
-            "verify_pinned_delta_base_root": mock.Mock(),
-        }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), [], names)]), \
-                mock.patch.object(namespace["os"], "lstat", return_value=details):
-            result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
-        self.assertEqual(result["invalid_count"], 13)
-        self.assertEqual([item["path"] for item in result["blockers"]], sorted(names)[:10])
-        self.assertTrue(result["blockers_truncated"])
-
-    def test_root_audit_and_apply_use_identical_delta_base_contract(self) -> None:
-        namespace = operator_namespace()
-        invalid = {
-            "valid": False, "checked_files": 0, "checked_directories": 0,
-            "invalid_count": 1, "blockers": [{"path": "unsafe.html", "kind": "file", "uid": 0,
-                "mode": "0o664", "reason": "writable_by_group_or_world"}],
-            "blockers_truncated": False,
-        }
-        delta_readiness = mock.Mock(return_value=invalid)
+        current = "/var/www/rosomaha/_releases/old"
+        manifest = {"valid": True, "files": [], "file_count": 0, "directory_count": 0,
+                    "digest": namespace["sha256_bytes"](namespace["canonical_json"]([]))}
         valid_entry = {"valid": True, "writable": True, "mode": oct(0o600)}
         with mock.patch.dict(namespace, {
-            "resolved": mock.Mock(return_value="/var/www/rosomaha/_releases/current"),
             "rollback_target": mock.Mock(return_value="/var/www/rosomaha/_releases/rollback"),
-            "root_mutation_topology": mock.Mock(return_value={"valid": True}),
+            "root_mutation_topology": mock.Mock(return_value={"valid": True, "trees": {"current": {"valid": True}}}),
             "safe_directory": mock.Mock(return_value=valid_entry),
             "safe_file": mock.Mock(return_value={"valid": True, "mode": oct(0o600)}),
             "read_verified_script": mock.Mock(return_value=b"trusted"),
             "lock_readiness": mock.Mock(return_value={"valid": True}),
             "python_runtime_supported": mock.Mock(return_value=True),
-            "delta_base_readiness": delta_readiness,
+            "release_path": mock.Mock(return_value=True),
         }):
             audit = namespace["root_apply_readiness"](
                 {"temporary": {"valid": True, "writable": True}}, {"python3": {"valid": True}},
+                current, manifest, manifest,
             )
-            self.assertFalse(audit["valid"])
-            self.assertEqual(audit["delta_base"], invalid)
-            with mock.patch.dict(namespace, {
-                "open_pinned_delta_base_root": mock.Mock(return_value=(81, (7, 11, 100, 200))),
-            }), mock.patch.object(namespace["os"], "close"):
-                with self.assertRaisesRegex(namespace["ReleaseError"], "source contract is unsafe"):
-                    namespace["copy_delta_base"](Path("/candidate"), {"staging_dist": {"files": []}})
-        self.assertEqual(delta_readiness.call_args_list, [mock.call(), mock.call(81, (7, 11, 100, 200))])
+        self.assertTrue(audit["valid"])
+        self.assertEqual(audit["delta_base"]["source"], helper.DELTA_BASE_SOURCE)
+        self.assertEqual(audit["delta_base"]["release"], current)
+        self.assertTrue(audit["delta_base"]["current_staging_exact"])
 
     def test_candidate_is_closed_before_swap_and_rechecked_before_run(self) -> None:
         source = operator_source()
@@ -505,6 +397,8 @@ class MainPriceReleaseV4Test(unittest.TestCase):
             "schema": helper.SCHEMA, "status": "ready", "account": helper.AUDIT_LOGIN,
             "roles": helper.ROLES, "target_commit": helper.TARGET_COMMIT,
             "release_label": helper.RELEASE_LABEL, "operator_sha256": helper.sha256_bytes(b"old"),
+            "delta_base_source": helper.DELTA_BASE_SOURCE,
+            "current_tree": {}, "staging_dist": {},
         }
         payload["baseline_token"] = helper.calculate_baseline_token(payload)
         with mock.patch.object(helper, "safe_baseline_path", return_value=Path("baseline.json")), mock.patch.object(
@@ -564,7 +458,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         for forbidden in ("write_text", "write_bytes", "os.replace", "shutil.rmtree", "subprocess.run", "os.O_CREAT"):
             self.assertNotIn(forbidden, audit)
             self.assertNotIn(forbidden, readiness)
-        self.assertIn('root_apply_readiness(topo, command_paths, lock_already_held)', audit)
+        self.assertIn('topo, command_paths, current, current_tree, staging, lock_already_held', audit)
 
     def test_server_baseline_token_is_actor_neutral(self) -> None:
         text = OPERATOR_PATH.read_text(encoding="utf-8")
@@ -1170,15 +1064,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertNotIn("sha256", json.dumps(summary))
 
     def test_blocked_summary_bounds_and_sanitizes_delta_base_diagnostics(self) -> None:
-        blockers = [
-            {"path": f"unsafe-{index}.html", "kind": "file", "uid": 0,
-             "mode": "0o664", "reason": "writable_by_group_or_world"}
-            for index in range(13)
-        ]
-        blockers[0] = {
-            "path": "/absolute/secret", "kind": "unknown", "uid": -1,
-            "mode": "0777", "reason": "raw exception", "sha256": "hidden",
-        }
+        blockers = ["current_staging_mismatch"] * 10 + ["raw secret", "raw secret"]
         payload = {
             "status": "blocked", "blockers": ["root apply readiness is not proved"],
             "topology": {"valid": True, "directories": {}, "files": {},
@@ -1190,20 +1076,20 @@ class MainPriceReleaseV4Test(unittest.TestCase):
                 "mutation_topology": {"valid": True},
                 "blockers": ["delta base source contract is not proved"],
                 "delta_base": {
-                    "valid": False, "checked_files": True, "checked_directories": -1,
-                    "invalid_count": 13, "blockers": blockers, "blockers_truncated": True,
+                    "valid": False, "source": helper.DELTA_BASE_SOURCE,
+                    "release": "/var/www/rosomaha/_releases/original",
+                    "current_tree_valid": True, "staging_tree_valid": True,
+                    "current_staging_exact": False, "trusted_closed_tree": True,
+                    "blockers": blockers, "blockers_truncated": True,
                 },
             },
         }
         summary = json.loads(helper.summarize_blocked_payload(payload))
         delta = summary["root_readiness"]["delta_base"]
         self.assertEqual(len(delta["blockers"]), 10)
-        self.assertEqual(delta["blockers"][0], {
-            "path": "[invalid]", "kind": "root", "uid": None,
-            "mode": None, "reason": "unsafe_root",
-        })
-        self.assertIsNone(delta["checked_files"])
-        self.assertIsNone(delta["checked_directories"])
+        self.assertTrue(all(item == "current_staging_mismatch" for item in delta["blockers"]))
+        self.assertEqual(delta["source"], helper.DELTA_BASE_SOURCE)
+        self.assertFalse(delta["current_staging_exact"])
         self.assertTrue(delta["blockers_truncated"])
         self.assertNotIn("secret", json.dumps(summary))
         self.assertNotIn("sha256", json.dumps(summary))
@@ -1239,7 +1125,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         body = text[text.index("def rollback_release"):text.index("def main")]
         self.assertIn('topo = topology()', body)
         self.assertIn('baseline_tree = tree_manifest(Path(baseline["current_release"]))', body)
-        self.assertIn('baseline.get("current_tree", {}).get("digest")', body)
+        self.assertIn('exact_tree_contract(baseline_tree, baseline.get("current_tree", {}))', body)
         self.assertIn("verify_exact_baseline_state(baseline, require_staging=True)", body)
 
     def test_operator_auto_rollback_proves_full_recovery(self) -> None:
@@ -1757,9 +1643,9 @@ Allow: /
     def test_recovery_classifies_released_original_and_unexpected(self) -> None:
         baseline = {
             "current_release": "/var/www/rosomaha/_releases/original",
-            "current_tree": {"digest": "old-tree"},
-            "candidate": {"tree_digest": "new-tree"},
-            "staging_dist": {"digest": "staging"},
+            "current_tree": fixture_tree("old-tree"),
+            "candidate": {"tree_digest": "new-tree", "target_manifest": fixture_tree("new-tree")},
+            "staging_dist": fixture_tree("old-tree"),
             "articles_cz": {"digest": "cz", "files": [{"name": "index.ts"}]},
             "release_scripts": {"server-release.sh": "r", "server-rollback.sh": "b"},
             "articles": {"canonical": {"sha256": "article"}},
@@ -1770,9 +1656,10 @@ Allow: /
                 "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
                 "mode": "root-audit", "roles": helper.ROLES,
                 "root_readiness": {"valid": True},
-                "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
-                "current_release": current, "current_tree": {"valid": True, "digest": tree},
-                "staging_dist": {"valid": True, "digest": "staging"},
+                "target_commit": helper.TARGET_COMMIT, "delta_base_source": helper.DELTA_BASE_SOURCE,
+                "topology": {"valid": True},
+                "current_release": current, "current_tree": fixture_tree(tree),
+                "staging_dist": fixture_tree("old-tree"),
                 "articles_cz": {"valid": True, "digest": "cz", "files": [{"name": "index.ts"}]},
                 "release_scripts": baseline["release_scripts"],
                 "existing_label_releases": [] if labels is None else labels,
@@ -1820,9 +1707,9 @@ Allow: /
         baseline = {
             "baseline_token": "a" * 64,
             "current_release": "/var/www/rosomaha/_releases/original",
-            "current_tree": {"digest": "old-tree"},
-            "candidate": {"tree_digest": "new-tree"},
-            "staging_dist": {"digest": "staging"},
+            "current_tree": fixture_tree("old-tree"),
+            "candidate": {"tree_digest": "new-tree", "target_manifest": fixture_tree("new-tree")},
+            "staging_dist": fixture_tree("old-tree"),
             "articles_cz": {"digest": "cz", "files": [{"name": "index.ts"}]},
             "release_scripts": {"server-release.sh": "r", "server-rollback.sh": "b"},
             "articles": {"canonical": {"sha256": "article"}},
@@ -1830,10 +1717,11 @@ Allow: /
         audit_payload = {
             "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
             "mode": "root-audit", "roles": helper.ROLES, "root_readiness": {"valid": True},
-            "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
+            "target_commit": helper.TARGET_COMMIT, "delta_base_source": helper.DELTA_BASE_SOURCE,
+            "topology": {"valid": True},
             "current_release": baseline["current_release"],
-            "current_tree": {"valid": True, "digest": "old-tree"},
-            "staging_dist": {"valid": True, "digest": "staging"},
+            "current_tree": fixture_tree("old-tree"),
+            "staging_dist": fixture_tree("old-tree"),
             "articles_cz": {"valid": True, "digest": "cz", "files": [{"name": "index.ts"}]},
             "release_scripts": baseline["release_scripts"],
             "existing_label_releases": [],
@@ -1868,18 +1756,20 @@ Allow: /
         baseline = {
             "baseline_token": "a" * 64,
             "current_release": "/var/www/rosomaha/_releases/original",
-            "current_tree": {"digest": "old-tree"}, "candidate": {"tree_digest": "new-tree"},
-            "staging_dist": {"digest": "staging"},
+            "current_tree": fixture_tree("old-tree"),
+            "candidate": {"tree_digest": "new-tree", "target_manifest": fixture_tree("new-tree")},
+            "staging_dist": fixture_tree("old-tree"),
             "articles_cz": {"digest": "cz", "files": []},
             "release_scripts": {}, "articles": {"canonical": {"sha256": "article"}},
         }
         audit = {
             "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
             "mode": "root-audit", "roles": helper.ROLES, "root_readiness": {"valid": True},
-            "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
+            "target_commit": helper.TARGET_COMMIT, "delta_base_source": helper.DELTA_BASE_SOURCE,
+            "topology": {"valid": True},
             "current_release": baseline["current_release"],
-            "current_tree": {"valid": True, "digest": "old-tree"},
-            "staging_dist": {"valid": True, "digest": "staging"},
+            "current_tree": fixture_tree("old-tree"),
+            "staging_dist": fixture_tree("old-tree"),
             "articles_cz": {"valid": True, "digest": "cz", "files": []},
             "release_scripts": {}, "existing_label_releases": [],
             "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
@@ -1984,7 +1874,8 @@ Allow: /
             target_manifest = helper.tree_manifest(dist)
             base_manifest = helper.tree_manifest(base)
             archive, _delta_path, _target_path, delta = helper.write_delta_bundle(
-                dist, target_manifest, base_manifest, root,
+                dist, target_manifest, base_manifest,
+                "/var/www/rosomaha/_releases/original", root,
             )
             import tarfile
             with tarfile.open(archive, "r:gz") as handle:
@@ -2045,7 +1936,11 @@ Allow: /
             changed, deleted = namespace["expected_delta"](base, target)
             delta = {
                 "schema": namespace["DELTA_SCHEMA"],
-                "base": namespace["manifest_summary"](base),
+                "base": {
+                    "source": namespace["DELTA_BASE_SOURCE"],
+                    "release": "/var/www/rosomaha/_releases/original",
+                    **namespace["manifest_summary"](base),
+                },
                 "target": {
                     **namespace["manifest_summary"](target),
                     "manifest_sha256": namespace["sha256_file"](target_path),
@@ -2059,7 +1954,10 @@ Allow: /
                     "bytes": archive.stat().st_size,
                 },
             }
-            baseline = {"staging_dist": base}
+            baseline = {
+                "current_release": "/var/www/rosomaha/_releases/original",
+                "current_tree": base,
+            }
             self.assertEqual(
                 namespace["validate_delta_manifest"](delta, baseline, target, archive),
                 (changed, deleted),
@@ -2108,24 +2006,21 @@ Allow: /
     def test_v4_delta_base_drift_is_fail_closed(self) -> None:
         namespace = operator_namespace()
         release_error = namespace["ReleaseError"]
-        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:
-            root = Path(raw_root)
-            base = root / "base"
-            base.mkdir()
-            source = base / "index.html"
-            source.write_text("ok", encoding="utf-8")
-            expected = helper.tree_manifest(base)
-            namespace["APP_ROOT"] = root
-            namespace["DIST_DIR"] = base
-            original_tree_manifest = namespace["tree_manifest"]
-            drifted = json.loads(json.dumps(expected))
-            drifted["digest"] = "f" * 64
-            namespace["tree_manifest"] = mock.Mock(return_value=drifted)
-            try:
-                with self.assertRaises(release_error):
-                    namespace["copy_delta_base"](root / "candidate", {"staging_dist": expected})
-            finally:
-                namespace["tree_manifest"] = original_tree_manifest
+        current = "/var/www/rosomaha/_releases/original"
+        expected = {"valid": True, "files": [], "file_count": 0, "directory_count": 0,
+                    "digest": namespace["sha256_bytes"](namespace["canonical_json"]([]))}
+        drifted = {**expected, "directory_count": 1}
+        baseline = {
+            "delta_base_source": namespace["DELTA_BASE_SOURCE"],
+            "current_release": current, "current_tree": expected, "staging_dist": expected,
+        }
+        with mock.patch.dict(namespace, {
+            "resolved": mock.Mock(return_value=current), "release_path": mock.Mock(return_value=True),
+            "trusted_closed_tree": mock.Mock(return_value={"valid": True}),
+            "tree_manifest": mock.Mock(side_effect=[drifted, expected]),
+        }):
+            with self.assertRaisesRegex(release_error, "current link|differs from baseline"):
+                namespace["copy_delta_base"](Path("/candidate"), baseline)
 
 
     def test_v4_delta_base_symlink_is_fail_closed_without_platform_symlink_support(self) -> None:
@@ -2158,6 +2053,51 @@ Allow: /
         self.assertIn('"target-manifest.json"', upload)
         self.assertNotIn("candidate.tar.gz", upload)
         self.assertNotIn("candidate-manifest.json", upload)
+
+    def test_v4_audit_binds_candidate_to_current_tree_before_build(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        body = source[source.index("def audit()") : source.index("def safe_baseline_path")]
+        equality = body.index('exact_tree_contract(server.get("current_tree", {}), server.get("staging_dist", {}))')
+        build = body.index("candidate = build_candidate(")
+        self.assertLess(equality, build)
+        self.assertIn('server["current_tree"], server["current_release"]', body)
+        self.assertNotIn('canonical, server["staging_dist"]', body)
+
+    def test_v4_operator_delta_base_is_exact_current_release_not_dist(self) -> None:
+        source = operator_source()
+        state = source[source.index("def delta_base_source_state") : source.index("def copy_delta_base")]
+        copy = source[source.index("def copy_delta_base") : source.index("def remove_empty_candidate_directories")]
+        self.assertIn('source = Path(baseline["current_release"])', state)
+        self.assertIn('resolved(CURRENT_LINK) != str(source)', state)
+        self.assertIn("trusted_closed_tree(source)", state)
+        self.assertIn('expected = baseline["current_tree"]', copy)
+        self.assertIn("os.walk(source_root", copy)
+        self.assertNotIn("os.walk(DIST_DIR", copy)
+
+    def test_v4_full_tree_equality_detects_directory_count_only_drift(self) -> None:
+        base = fixture_tree("a" * 64)
+        drift = {**base, "directory_count": 1}
+        self.assertFalse(helper.exact_tree_contract(base, drift))
+        namespace = operator_namespace()
+        self.assertFalse(namespace["exact_tree_contract"](base, drift))
+
+    def test_v4_bundle_and_delta_manifest_require_current_release_source(self) -> None:
+        source = operator_source()
+        delta = source[source.index("def validate_delta_manifest") : source.index("def sanitize_progress_summary")]
+        bundle = source[source.index("def validate_bundle") : source.index("def verify_fresh_baseline")]
+        self.assertIn('base = baseline.get("current_tree")', delta)
+        self.assertIn('"source": DELTA_BASE_SOURCE, "release": baseline.get("current_release")', delta)
+        self.assertIn('candidate.get("base_source") != DELTA_BASE_SOURCE', bundle)
+        self.assertIn('candidate.get("base_release") != baseline.get("current_release")', bundle)
+
+    def test_v4_receipt_binds_current_source_and_preserved_staging_separately(self) -> None:
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        body = source[source.index("def validate_apply_receipt") : source.index("def public_verify")]
+        self.assertIn('base = baseline["current_tree"]', body)
+        self.assertIn('evidence.get("base", {}).get("source") != DELTA_BASE_SOURCE', body)
+        self.assertIn('evidence.get("base", {}).get("release") != baseline["current_release"]', body)
+        self.assertIn('staging = baseline["staging_dist"]', body)
+        self.assertIn("apply receipt staging preservation evidence mismatch", body)
 
 
 if __name__ == "__main__":

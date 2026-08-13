@@ -43,6 +43,7 @@ TEMP_ROOT = PROJECT_ROOT / ".codex_tmp/main-price-release"
 
 SCHEMA = "rosomaha-main-price-release/v4"
 DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
+DELTA_BASE_SOURCE = "current_release"
 HOST = "90.156.168.115"
 PORT = 22
 AUDIT_LOGIN = "deploy"
@@ -615,15 +616,10 @@ SAFE_TOPOLOGY_FIELDS = (
 MAX_SAFE_OBSERVED_ARTICLES_CZ = 128
 MAX_SAFE_ARTICLE_FILENAME_CHARS = 240
 MAX_SAFE_DELTA_BASE_BLOCKERS = 10
-MAX_SAFE_DELTA_BASE_PATH_CHARS = 512
 MAX_BLOCKED_SUMMARY_CHARS = 64 * 1024
-SAFE_DELTA_BASE_KINDS = {"root", "directory", "file"}
-SAFE_DELTA_BASE_REASONS = {
-    "unsafe_root", "missing_root_snapshot", "walk_failed", "lstat_failed",
-    "symlink", "not_directory", "owner_not_root", "writable_by_group_or_world",
-    "outside_root", "not_regular", "multiple_hardlinks", "inode_mismatch",
-    "changed_during_scan", "open_nofollow_failed", "file_count_limit",
-    "root_changed_during_scan",
+SAFE_DELTA_BASE_BLOCKERS = {
+    "current_release_unavailable", "current_tree_invalid", "staging_tree_invalid",
+    "current_staging_mismatch", "current_release_not_closed",
 }
 
 
@@ -638,54 +634,29 @@ def safe_topology_entry(value: Any) -> dict[str, Any]:
     return result
 
 
-def safe_delta_base_blocker(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {"path": "[invalid]", "kind": "root", "uid": None, "mode": None, "reason": "unsafe_root"}
-    path = value.get("path")
-    kind = value.get("kind")
-    uid = value.get("uid")
-    mode = value.get("mode")
-    reason = value.get("reason")
-    path_valid = bool(
-        isinstance(path, str) and 0 < len(path) <= MAX_SAFE_DELTA_BASE_PATH_CHARS
-        and "\\" not in path and "\x00" not in path
-        and not path.startswith("/") and not any(ord(character) < 32 for character in path)
-        and (path == "." or all(part not in {"", ".", ".."} for part in PurePosixPath(path).parts))
-    )
-    uid_valid = uid is None or (isinstance(uid, int) and not isinstance(uid, bool) and 0 <= uid <= 2**32 - 1)
-    mode_valid = mode is None or (isinstance(mode, str) and re.fullmatch(r"0o[0-7]{1,6}", mode) is not None)
-    if (
-        not path_valid or kind not in SAFE_DELTA_BASE_KINDS or not uid_valid
-        or not mode_valid or reason not in SAFE_DELTA_BASE_REASONS
-    ):
-        return {"path": "[invalid]", "kind": "root", "uid": None, "mode": None, "reason": "unsafe_root"}
-    return {"path": path, "kind": kind, "uid": uid, "mode": mode, "reason": reason}
-
-
 def safe_delta_base_summary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        return {"valid": False, "invalid_count": 1, "blockers": [safe_delta_base_blocker(None)], "blockers_truncated": False}
+        return {"valid": False, "source": None, "release": None, "blockers": ["malformed_delta_base"], "blockers_truncated": False}
     blockers = value.get("blockers")
     if not isinstance(blockers, list):
-        blockers = [None]
-    bounded = blockers[:MAX_SAFE_DELTA_BASE_BLOCKERS]
-    invalid_count = value.get("invalid_count")
-    if isinstance(invalid_count, bool) or not isinstance(invalid_count, int) or not 0 <= invalid_count <= 1_000_000:
-        invalid_count = max(1, len(blockers))
-    checked_files = value.get("checked_files")
-    if isinstance(checked_files, bool) or not isinstance(checked_files, int) or not 0 <= checked_files <= 1_000_000:
-        checked_files = None
-    checked_directories = value.get("checked_directories")
-    if (
-        isinstance(checked_directories, bool) or not isinstance(checked_directories, int)
-        or not 0 <= checked_directories <= 1_000_000
-    ):
-        checked_directories = None
+        blockers = ["malformed_delta_base"]
+    bounded = [
+        item if item in SAFE_DELTA_BASE_BLOCKERS else "unsafe_delta_base_evidence"
+        for item in blockers[:MAX_SAFE_DELTA_BASE_BLOCKERS]
+        if isinstance(item, str)
+    ]
+    release = value.get("release")
+    if not isinstance(release, str) or not re.fullmatch(rf"{re.escape(APP_ROOT)}/_releases/[A-Za-z0-9._-]+", release):
+        release = None
     return {
         "valid": value.get("valid") is True,
-        "checked_files": checked_files, "checked_directories": checked_directories,
-        "invalid_count": invalid_count,
-        "blockers": [safe_delta_base_blocker(item) for item in bounded],
+        "source": value.get("source") if value.get("source") == DELTA_BASE_SOURCE else None,
+        "release": release,
+        "current_tree_valid": value.get("current_tree_valid") is True,
+        "staging_tree_valid": value.get("staging_tree_valid") is True,
+        "current_staging_exact": value.get("current_staging_exact") is True,
+        "trusted_closed_tree": value.get("trusted_closed_tree") is True,
+        "blockers": bounded,
         "blockers_truncated": bool(value.get("blockers_truncated") or len(blockers) > len(bounded)),
     }
 
@@ -839,6 +810,10 @@ def remote_audit(client: paramiko.SSHClient, mode: str, expected_login: str, fro
         raise HelperError("remote audit identity mismatch")
     if payload.get("target_commit") != TARGET_COMMIT or payload.get("status") != "ok":
         raise HelperError("remote audit is not ready for the pinned release")
+    if payload.get("delta_base_source") != DELTA_BASE_SOURCE:
+        raise HelperError("remote audit delta base source mismatch")
+    if not exact_tree_contract(payload.get("current_tree", {}), payload.get("staging_dist", {})):
+        raise HelperError("remote current release and staging dist differ")
     if not payload.get("article_parity"):
         raise HelperError("canonical/current/live article raw parity is not proved")
     hashes = {payload.get("articles", {}).get(name, {}).get("sha256") for name in ("canonical", "current", "live")}
@@ -1463,6 +1438,17 @@ def manifest_files_digest(manifest: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json(manifest.get("files", [])))
 
 
+def tree_contract(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: manifest.get(key)
+        for key in ("valid", "files", "file_count", "directory_count", "digest")
+    }
+
+
+def exact_tree_contract(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return canonical_json(tree_contract(left)) == canonical_json(tree_contract(right))
+
+
 def delta_material(base: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     base_files = {item["path"]: item for item in base["files"]}
     target_files = {item["path"]: item for item in target["files"]}
@@ -1476,10 +1462,13 @@ def delta_material(base: dict[str, Any], target: dict[str, Any]) -> dict[str, An
 
 
 def write_delta_bundle(
-    dist: Path, target: dict[str, Any], base: dict[str, Any], artifact_root: Path,
+    dist: Path, target: dict[str, Any], base: dict[str, Any], base_release: str,
+    artifact_root: Path,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     if not base.get("valid") or not target.get("valid"):
         raise HelperError("delta source/target manifest is not valid")
+    if not isinstance(base_release, str) or not re.fullmatch(rf"{re.escape(APP_ROOT)}/_releases/[A-Za-z0-9._-]+", base_release):
+        raise HelperError("delta source release path is invalid")
     material = delta_material(base, target)
     changed = material["changed"]
     expanded_bytes = sum(item["bytes"] for item in changed)
@@ -1507,6 +1496,8 @@ def write_delta_bundle(
     delta = {
         "schema": DELTA_SCHEMA,
         "base": {
+            "source": DELTA_BASE_SOURCE,
+            "release": base_release,
             "digest": base["digest"], "file_count": base["file_count"],
             "directory_count": base["directory_count"],
             "files_digest": manifest_files_digest(base),
@@ -1534,7 +1525,7 @@ def write_delta_bundle(
 
 def build_candidate(
     commit: str, snapshot_root: Path, public_baseline: dict[str, Any],
-    canonical: dict[str, Any], base_manifest: dict[str, Any],
+    canonical: dict[str, Any], base_manifest: dict[str, Any], base_release: str,
 ) -> dict[str, Any]:
     prove_target_commit(commit)
     artifact_root = snapshot_root.parent
@@ -1584,7 +1575,7 @@ def build_candidate(
         verification = verify_candidate_dist(dist, snapshot_root, public_baseline)
         manifest = tree_manifest(dist)
         archive_path, delta_manifest_path, target_manifest_path, delta = write_delta_bundle(
-            dist, manifest, base_manifest, artifact_root,
+            dist, manifest, base_manifest, base_release, artifact_root,
         )
         candidate = {
             "archive_name": archive_path.name, "archive_sha256": sha256_file(archive_path), "archive_bytes": archive_path.stat().st_size,
@@ -1594,7 +1585,9 @@ def build_candidate(
             "target_manifest_sha256": sha256_file(target_manifest_path),
             "tree_digest": manifest["digest"], "file_count": manifest["file_count"],
             "directory_count": manifest["directory_count"],
+            "target_manifest": manifest,
             "base_tree_digest": base_manifest["digest"],
+            "base_source": DELTA_BASE_SOURCE, "base_release": base_release,
             "delta": {
                 "added_count": delta["added_count"], "modified_count": delta["modified_count"],
                 "changed_count": delta["changed_count"], "deleted_count": delta["deleted_count"],
@@ -1639,14 +1632,20 @@ def audit() -> tuple[dict[str, Any], Path]:
         raise HelperError("public canonical article endpoint is not exact HTTP 200")
     if public_info["sha256"] != canonical["articles"]["sha256"]:
         raise HelperError("public article raw SHA differs from the SFTP canonical snapshot")
+    if server.get("delta_base_source") != DELTA_BASE_SOURCE:
+        raise HelperError("server audit did not bind the current release delta source")
+    if not exact_tree_contract(server.get("current_tree", {}), server.get("staging_dist", {})):
+        raise HelperError("current release and staging dist differ before candidate build")
     candidate = build_candidate(
-        TARGET_COMMIT, snapshot_root, public_baseline, canonical, server["staging_dist"],
+        TARGET_COMMIT, snapshot_root, public_baseline, canonical,
+        server["current_tree"], server["current_release"],
     )
 
     payload = {key: value for key, value in server.items() if key != "captured_at"}
     payload.update({
         "schema": SCHEMA, "mode": "baseline", "status": "ready", "captured_at": utc_now(),
         "target_commit": TARGET_COMMIT, "release_label": RELEASE_LABEL,
+        "delta_base_source": DELTA_BASE_SOURCE,
         "account": AUDIT_LOGIN, "roles": ROLES, "audit_identity": identity,
         "operator_sha256": sha256_bytes(frozen_operator),
         "canonical_snapshot": canonical, "public_articles": public_info,
@@ -1684,6 +1683,10 @@ def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dic
         raise HelperError("baseline receipt role identity mismatch")
     if payload.get("target_commit") != TARGET_COMMIT or payload.get("release_label") != RELEASE_LABEL:
         raise HelperError("baseline receipt is for another release")
+    if payload.get("delta_base_source") != DELTA_BASE_SOURCE:
+        raise HelperError("baseline receipt delta base source mismatch")
+    if not exact_tree_contract(payload.get("current_tree", {}), payload.get("staging_dist", {})):
+        raise HelperError("baseline current release and staging dist differ")
     if payload.get("baseline_token") != calculate_baseline_token(payload):
         raise HelperError("baseline receipt token mismatch")
     if payload.get("operator_sha256") != sha256_bytes(frozen_operator):
@@ -1705,6 +1708,15 @@ def load_baseline_with_operator(path: Path, frozen_operator: bytes) -> tuple[dic
         raise HelperError("local delta manifest differs from baseline")
     if sha256_file(target_manifest) != candidate["target_manifest_sha256"]:
         raise HelperError("local target manifest differs from baseline")
+    if (
+        candidate.get("base_source") != DELTA_BASE_SOURCE
+        or candidate.get("base_release") != payload.get("current_release")
+        or candidate.get("base_tree_digest") != payload.get("current_tree", {}).get("digest")
+    ):
+        raise HelperError("local candidate current release base binding mismatch")
+    delta = json.loads(delta_manifest.read_text(encoding="utf-8"))
+    if delta.get("base", {}).get("source") != DELTA_BASE_SOURCE or delta.get("base", {}).get("release") != payload.get("current_release"):
+        raise HelperError("local delta manifest source binding mismatch")
     return payload, resolved, archive, delta_manifest, target_manifest
 
 
@@ -1968,19 +1980,31 @@ def validate_apply_receipt(receipt: dict[str, Any], baseline: dict[str, Any], op
     if receipt.get("candidate_tree_digest") != baseline["candidate"]["tree_digest"]:
         raise HelperError("apply receipt candidate digest mismatch")
     evidence = receipt.get("delta_reconstruction")
-    base = baseline["staging_dist"]
+    base = baseline["current_tree"]
     expected_base = {
         "digest": base["digest"], "file_count": base["file_count"],
         "directory_count": base["directory_count"], "files_digest": manifest_files_digest(base),
     }
     if (
         not isinstance(evidence, dict) or evidence.get("exact_match") is not True
+        or evidence.get("base", {}).get("source") != DELTA_BASE_SOURCE
+        or evidence.get("base", {}).get("release") != baseline["current_release"]
         or evidence.get("base", {}).get("expected") != expected_base
         or evidence.get("base", {}).get("observed_before") != expected_base
         or evidence.get("base", {}).get("observed_after") != expected_base
         or evidence.get("base", {}).get("exact_match") is not True
     ):
         raise HelperError("apply receipt delta base evidence mismatch")
+    staging = baseline["staging_dist"]
+    expected_staging = {
+        "digest": staging["digest"], "file_count": staging["file_count"],
+        "directory_count": staging["directory_count"], "files_digest": manifest_files_digest(staging),
+    }
+    if evidence.get("staging") != {
+        "expected": expected_staging, "observed_before": expected_staging,
+        "observed_after": expected_staging, "exact_match": True,
+    }:
+        raise HelperError("apply receipt staging preservation evidence mismatch")
     target_expected = evidence.get("target", {}).get("expected")
     delta_evidence = evidence.get("delta", {})
     valid_delta_counts = bool(
@@ -2091,24 +2115,30 @@ def bounded_reconnect() -> tuple[paramiko.SSHClient, dict[str, Any], list[dict[s
 
 
 def recovery_audit_matches(
-    audit_payload: dict[str, Any], baseline: dict[str, Any], *, expected_current: str, expected_tree_digest: str,
+    audit_payload: dict[str, Any], baseline: dict[str, Any], *,
+    expected_current: str, expected_tree: dict[str, Any], require_current_staging_equal: bool,
 ) -> bool:
     expected_article_sha = baseline["articles"]["canonical"]["sha256"]
     articles = audit_payload.get("articles", {})
+    current_tree = audit_payload.get("current_tree", {})
+    staging_tree = audit_payload.get("staging_dist", {})
     return bool(
         audit_payload.get("schema") == SCHEMA
         and audit_payload.get("host") == HOST
         and audit_payload.get("account") == APPLY_LOGIN
         and audit_payload.get("mode") == "root-audit"
         and audit_payload.get("roles") == ROLES
-        and audit_payload.get("root_readiness", {}).get("valid")
+        and (
+            audit_payload.get("root_readiness", {}).get("valid")
+            or not require_current_staging_equal
+        )
         and audit_payload.get("target_commit") == TARGET_COMMIT
+        and audit_payload.get("delta_base_source") == DELTA_BASE_SOURCE
         and audit_payload.get("topology", {}).get("valid")
         and audit_payload.get("current_release") == expected_current
-        and audit_payload.get("current_tree", {}).get("valid")
-        and audit_payload.get("current_tree", {}).get("digest") == expected_tree_digest
-        and audit_payload.get("staging_dist", {}).get("valid")
-        and audit_payload.get("staging_dist", {}).get("digest") == baseline["staging_dist"]["digest"]
+        and current_tree.get("valid") and exact_tree_contract(current_tree, expected_tree)
+        and staging_tree.get("valid") and exact_tree_contract(staging_tree, baseline["staging_dist"])
+        and (not require_current_staging_equal or exact_tree_contract(current_tree, staging_tree))
         and audit_payload.get("articles_cz", {}).get("valid")
         and audit_payload.get("articles_cz", {}).get("digest") == baseline["articles_cz"]["digest"]
         and audit_payload.get("articles_cz", {}).get("files") == baseline["articles_cz"]["files"]
@@ -2125,14 +2155,15 @@ def classify_recovery_state(audit_payload: dict[str, Any], baseline: dict[str, A
             and audit_payload.get("existing_label_releases") == [new_release]
             and recovery_audit_matches(
             audit_payload, baseline, expected_current=new_release,
-            expected_tree_digest=baseline["candidate"]["tree_digest"],
+            expected_tree=baseline["candidate"]["target_manifest"],
+            require_current_staging_equal=False,
             )
         ):
             return "released_candidate"
         return "unexpected"
     if audit_payload.get("existing_label_releases") == [] and recovery_audit_matches(
         audit_payload, baseline, expected_current=baseline["current_release"],
-        expected_tree_digest=baseline["current_tree"]["digest"],
+        expected_tree=baseline["current_tree"], require_current_staging_equal=True,
     ):
         return "original"
     return "unexpected"

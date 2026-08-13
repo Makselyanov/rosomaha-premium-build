@@ -48,6 +48,7 @@ BUNDLE_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
 
 SCHEMA = "rosomaha-main-price-release/v4"
 DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
+DELTA_BASE_SOURCE = "current_release"
 PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
 HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
@@ -129,8 +130,6 @@ MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_DELTA_FILES = 1_000
 MAX_TARGET_BYTES = 1024 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
-MAX_DELTA_BASE_BLOCKERS = 10
-MAX_SAFE_DELTA_BASE_PATH_CHARS = 512
 MAX_SCRIPT_BYTES = 256 * 1024
 FIXED_BIN_PATHS = {
     "bash": "/bin/bash",
@@ -434,226 +433,6 @@ def trusted_closed_tree(root, *, require_root_mode=None):
     }
 
 
-def delta_base_root_identity(details):
-    return (
-        details.st_dev, details.st_ino,
-        details.st_mtime_ns, details.st_ctime_ns,
-    )
-
-
-def open_pinned_delta_base_root():
-    root_info = trusted_root_directory(DIST_DIR, allow_group_write=True)
-    if not root_info.get("valid"):
-        raise ReleaseError("delta base root contract is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(DIST_DIR, flags)
-    try:
-        opened = os.fstat(fd)
-        linked = os.lstat(DIST_DIR)
-        if (
-            not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
-            or stat.S_ISLNK(linked.st_mode)
-            or not trusted_directory_permissions(
-                opened.st_uid, opened.st_mode,
-                allow_group_write=True, require_sticky=False,
-            )
-            or not trusted_directory_permissions(
-                linked.st_uid, linked.st_mode,
-                allow_group_write=True, require_sticky=False,
-            )
-            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
-        ):
-            raise ReleaseError("delta base root inode contract is unsafe")
-        snapshot = delta_base_root_identity(opened)
-        if delta_base_root_identity(linked) != snapshot:
-            raise ReleaseError("delta base root changed while it was pinned")
-        return fd, snapshot
-    except Exception:
-        os.close(fd)
-        raise
-
-
-def verify_pinned_delta_base_root(fd, expected):
-    opened = os.fstat(fd)
-    linked = os.lstat(DIST_DIR)
-    if (
-        not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
-        or stat.S_ISLNK(linked.st_mode)
-        or not trusted_directory_permissions(
-            opened.st_uid, opened.st_mode,
-            allow_group_write=True, require_sticky=False,
-        )
-        or not trusted_directory_permissions(
-            linked.st_uid, linked.st_mode,
-            allow_group_write=True, require_sticky=False,
-        )
-        or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
-        or delta_base_root_identity(opened) != expected
-        or delta_base_root_identity(linked) != expected
-    ):
-        raise ReleaseError("pinned delta base root changed during reconstruction")
-
-
-def safe_delta_base_relative(path):
-    try:
-        relative = path.relative_to(DIST_DIR).as_posix()
-    except (TypeError, ValueError):
-        return "[invalid-relative-path]"
-    if relative == ".":
-        return relative
-    if (
-        not relative or relative.startswith("/") or "\\" in relative
-        or "\x00" in relative or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
-        or any(ord(character) < 32 for character in relative)
-    ):
-        return "[invalid-relative-path]"
-    if len(relative) > MAX_SAFE_DELTA_BASE_PATH_CHARS:
-        return relative[:MAX_SAFE_DELTA_BASE_PATH_CHARS - 3] + "..."
-    return relative
-
-
-def delta_base_readiness(root_fd=None, root_snapshot=None):
-    blockers = []
-    invalid_count = 0
-    checked_files = 0
-    checked_directories = 0
-    owns_root_fd = root_fd is None
-
-    def add_blocker(path, kind, details, reason):
-        nonlocal invalid_count
-        invalid_count += 1
-        if len(blockers) >= MAX_DELTA_BASE_BLOCKERS:
-            return
-        uid = getattr(details, "st_uid", None) if details is not None else None
-        mode = oct(stat.S_IMODE(details.st_mode)) if details is not None else None
-        blockers.append({
-            "path": "." if path == DIST_DIR else safe_delta_base_relative(path),
-            "kind": kind, "uid": uid, "mode": mode, "reason": reason,
-        })
-
-    try:
-        if owns_root_fd:
-            try:
-                root_fd, root_snapshot = open_pinned_delta_base_root()
-            except (OSError, ReleaseError):
-                try:
-                    details = os.lstat(DIST_DIR)
-                except OSError:
-                    details = None
-                add_blocker(DIST_DIR, "root", details, "unsafe_root")
-                return {
-                    "valid": False, "checked_files": 0, "checked_directories": 0,
-                    "invalid_count": invalid_count, "blockers": blockers,
-                    "blockers_truncated": invalid_count > len(blockers),
-                }
-        elif root_snapshot is None:
-            add_blocker(DIST_DIR, "root", None, "missing_root_snapshot")
-            return {
-                "valid": False, "checked_files": 0, "checked_directories": 0,
-                "invalid_count": invalid_count, "blockers": blockers,
-                "blockers_truncated": invalid_count > len(blockers),
-            }
-
-        def walk_error(_error):
-            add_blocker(DIST_DIR, "directory", None, "walk_failed")
-
-        for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False, onerror=walk_error):
-            dir_names.sort()
-            file_names.sort()
-            current_path = Path(current)
-            safe_directories = []
-            for name in dir_names:
-                item = current_path / name
-                try:
-                    details = os.lstat(item)
-                except OSError:
-                    add_blocker(item, "directory", None, "lstat_failed")
-                    continue
-                reason = None
-                if stat.S_ISLNK(details.st_mode):
-                    reason = "symlink"
-                elif not stat.S_ISDIR(details.st_mode):
-                    reason = "not_directory"
-                elif details.st_uid != 0:
-                    reason = "owner_not_root"
-                elif stat.S_IMODE(details.st_mode) & 0o022:
-                    reason = "writable_by_group_or_world"
-                elif not within(DIST_DIR, item):
-                    reason = "outside_root"
-                if reason:
-                    add_blocker(item, "directory", details, reason)
-                else:
-                    checked_directories += 1
-                    safe_directories.append(name)
-            dir_names[:] = safe_directories
-            for name in file_names:
-                item = current_path / name
-                source_fd = -1
-                details = None
-                reason = None
-                try:
-                    details = os.lstat(item)
-                    if stat.S_ISLNK(details.st_mode):
-                        reason = "symlink"
-                    elif not within(DIST_DIR, item):
-                        reason = "outside_root"
-                    else:
-                        source_fd = os.open(item, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                        before = os.fstat(source_fd)
-                        linked = os.lstat(item)
-                        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(linked.st_mode):
-                            reason = "not_regular"
-                        elif stat.S_ISLNK(linked.st_mode):
-                            reason = "symlink"
-                        elif before.st_uid != 0 or linked.st_uid != 0:
-                            reason = "owner_not_root"
-                        elif before.st_nlink != 1 or linked.st_nlink != 1:
-                            reason = "multiple_hardlinks"
-                        elif stat.S_IMODE(before.st_mode) & 0o022 or stat.S_IMODE(linked.st_mode) & 0o022:
-                            reason = "writable_by_group_or_world"
-                        elif (before.st_dev, before.st_ino) != (linked.st_dev, linked.st_ino):
-                            reason = "inode_mismatch"
-                        else:
-                            after = os.fstat(source_fd)
-                            if (
-                                before.st_dev, before.st_ino, before.st_size,
-                                before.st_mtime_ns, before.st_ctime_ns,
-                            ) != (
-                                after.st_dev, after.st_ino, after.st_size,
-                                after.st_mtime_ns, after.st_ctime_ns,
-                            ):
-                                reason = "changed_during_scan"
-                except OSError:
-                    reason = "open_nofollow_failed"
-                finally:
-                    if source_fd >= 0:
-                        os.close(source_fd)
-                if reason:
-                    add_blocker(item, "file", details, reason)
-                else:
-                    checked_files += 1
-                    if checked_files > MAX_CANDIDATE_FILES:
-                        add_blocker(item, "file", details, "file_count_limit")
-                        break
-        try:
-            verify_pinned_delta_base_root(root_fd, root_snapshot)
-        except (OSError, ReleaseError):
-            try:
-                details = os.lstat(DIST_DIR)
-            except OSError:
-                details = None
-            add_blocker(DIST_DIR, "root", details, "root_changed_during_scan")
-    finally:
-        if owns_root_fd and root_fd is not None:
-            os.close(root_fd)
-    return {
-        "valid": invalid_count == 0,
-        "checked_files": checked_files, "checked_directories": checked_directories,
-        "invalid_count": invalid_count, "blockers": blockers,
-        "blockers_truncated": invalid_count > len(blockers),
-    }
-
-
 def tree_manifest(root):
     root_info = safe_directory(root, root=APP_ROOT)
     if not root_info["valid"]:
@@ -923,8 +702,48 @@ def root_mutation_topology(current, rollback, *, require_closed_dist=False):
     return {"valid": valid, "parents": parents, "current_link": current_link, "trees": trees}
 
 
-def root_apply_readiness(topo, command_paths, lock_already_held=False):
-    current = resolved(CURRENT_LINK)
+def tree_contract(value):
+    return {
+        key: value.get(key)
+        for key in ("valid", "files", "file_count", "directory_count", "digest")
+    }
+
+
+def exact_tree_contract(left, right):
+    return canonical_json(tree_contract(left)) == canonical_json(tree_contract(right))
+
+
+def delta_base_source_readiness(current, current_tree, staging, mutation):
+    blockers = []
+    release_valid = bool(current and release_path(current))
+    current_valid = bool(current_tree.get("valid"))
+    staging_valid = bool(staging.get("valid"))
+    manifests_equal = bool(current_valid and staging_valid and exact_tree_contract(current_tree, staging))
+    source_trusted = bool(mutation.get("trees", {}).get("current", {}).get("valid"))
+    if not release_valid:
+        blockers.append("current_release_unavailable")
+    if not current_valid:
+        blockers.append("current_tree_invalid")
+    if not staging_valid:
+        blockers.append("staging_tree_invalid")
+    if current_valid and staging_valid and not manifests_equal:
+        blockers.append("current_staging_mismatch")
+    if not source_trusted:
+        blockers.append("current_release_not_closed")
+    return {
+        "source": DELTA_BASE_SOURCE,
+        "release": current if release_valid else None,
+        "current_tree_valid": current_valid, "staging_tree_valid": staging_valid,
+        "current_staging_exact": manifests_equal,
+        "trusted_closed_tree": source_trusted,
+        "blockers": blockers[:10], "blockers_truncated": len(blockers) > 10,
+        "valid": not blockers,
+    }
+
+
+def root_apply_readiness(
+    topo, command_paths, current, current_tree, staging, lock_already_held=False,
+):
     rollback = rollback_target(current)
     mutation = root_mutation_topology(current, rollback)
     writable_directories = {
@@ -957,7 +776,7 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         lock["held_by_operator"] = True
     else:
         lock = lock_readiness()
-    delta_base = delta_base_readiness()
+    delta_base = delta_base_source_readiness(current, current_tree, staging, mutation)
     blockers = []
     if not delta_base.get("valid"):
         blockers.append("delta base source contract is not proved")
@@ -1017,9 +836,16 @@ def audit_state(mode, lock_already_held=False):
         blockers.append("staging dist topology is unsafe")
     if not current_tree.get("valid"):
         blockers.append("current release tree topology is unsafe")
+    if (
+        staging.get("valid") and current_tree.get("valid")
+        and not exact_tree_contract(current_tree, staging)
+    ):
+        blockers.append("current release and staging dist manifests differ")
     if existing_label_releases:
         blockers.append("the exact release label already exists; replay is forbidden")
-    root_readiness = root_apply_readiness(topo, command_paths, lock_already_held) if mode == "root-audit" else None
+    root_readiness = root_apply_readiness(
+        topo, command_paths, current, current_tree, staging, lock_already_held,
+    ) if mode == "root-audit" else None
     if mode == "root-audit" and not root_readiness.get("valid"):
         blockers.append("root apply readiness is not proved")
     result = {
@@ -1028,7 +854,8 @@ def audit_state(mode, lock_already_held=False):
         "app_root": str(APP_ROOT), "current_release": current,
         "rollback_release": rollback, "articles": articles, "articles_cz": cz_manifest, "article_parity": article_parity,
         "release_scripts": scripts, "topology": topo, "staging_dist": staging, "current_tree": current_tree,
-        "target_commit": TARGET_COMMIT, "commands": command_paths,
+        "target_commit": TARGET_COMMIT, "delta_base_source": DELTA_BASE_SOURCE,
+        "commands": command_paths,
         "root_readiness": root_readiness,
         "existing_label_releases": existing_label_releases,
         "blockers": blockers, "status": "ok" if not blockers else "blocked",
@@ -1073,7 +900,7 @@ def server_baseline_material(value):
         "articles_cz": value["articles_cz"],
         "staging_dist": {key: value["staging_dist"].get(key) for key in tree_keys},
         "current_tree": {key: value["current_tree"].get(key) for key in tree_keys},
-        "target_commit": value["target_commit"],
+        "target_commit": value["target_commit"], "delta_base_source": value["delta_base_source"],
         "existing_label_releases": value["existing_label_releases"],
     }
 
@@ -1183,12 +1010,15 @@ def validate_delta_manifest(delta, baseline, target, archive):
         "modified_count", "changed_count", "deleted_count", "expanded_bytes", "archive",
     } or delta.get("schema") != DELTA_SCHEMA:
         raise ReleaseError("delta manifest shape/schema mismatch")
-    base = baseline.get("staging_dist")
+    base = baseline.get("current_tree")
     if not isinstance(base, dict) or not isinstance(base.get("files"), list):
-        raise ReleaseError("baseline does not contain the full staging manifest")
+        raise ReleaseError("baseline does not contain the full current release manifest")
     validate_target_manifest({key: base.get(key) for key in ("valid", "files", "file_count", "directory_count", "digest")})
     target_raw = (Path(archive).parent / "target-manifest.json").read_bytes()
-    expected_base = manifest_summary(base)
+    expected_base = {
+        "source": DELTA_BASE_SOURCE, "release": baseline.get("current_release"),
+        **manifest_summary(base),
+    }
     expected_target = {**manifest_summary(target), "manifest_sha256": sha256_bytes(target_raw)}
     if delta.get("base") != expected_base or delta.get("target") != expected_target:
         raise ReleaseError("delta base/target binding mismatch")
@@ -1338,6 +1168,7 @@ def validate_bundle(bundle):
         baseline.get("schema") != SCHEMA or baseline.get("host") != HOST
         or baseline.get("account") != AUDIT_LOGIN or baseline.get("roles") != ROLES
         or baseline.get("target_commit") != TARGET_COMMIT
+        or baseline.get("delta_base_source") != DELTA_BASE_SOURCE
     ):
         raise ReleaseError("bundle baseline identity mismatch")
     if baseline.get("baseline_token", "")[:16] != match.group(1):
@@ -1379,11 +1210,18 @@ def validate_bundle(bundle):
     target = validate_target_manifest(json.loads(target_raw.decode("utf-8")))
     delta = json.loads(delta_raw.decode("utf-8"))
     validate_delta_manifest(delta, baseline, target, archive)
+    current_tree = validate_target_manifest(tree_contract(baseline.get("current_tree", {})))
+    staging_tree = validate_target_manifest(tree_contract(baseline.get("staging_dist", {})))
+    if not exact_tree_contract(current_tree, staging_tree):
+        raise ReleaseError("baseline current release and staging dist differ")
     if (
         target.get("digest") != candidate.get("tree_digest")
         or target.get("file_count") != candidate.get("file_count")
         or target.get("directory_count") != candidate.get("directory_count")
-        or baseline.get("staging_dist", {}).get("digest") != candidate.get("base_tree_digest")
+        or target != candidate.get("target_manifest")
+        or current_tree.get("digest") != candidate.get("base_tree_digest")
+        or candidate.get("base_source") != DELTA_BASE_SOURCE
+        or candidate.get("base_release") != baseline.get("current_release")
         or candidate.get("delta") != {
             "added_count": delta["added_count"], "modified_count": delta["modified_count"],
             "changed_count": delta["changed_count"], "deleted_count": delta["deleted_count"],
@@ -1402,6 +1240,14 @@ def verify_fresh_baseline(baseline):
         raise ReleaseError("fresh server audit is blocked")
     if fresh["server_baseline_token"] != baseline["server_baseline_token"]:
         raise ReleaseError("server baseline changed")
+    if (
+        fresh.get("delta_base_source") != DELTA_BASE_SOURCE
+        or baseline.get("delta_base_source") != DELTA_BASE_SOURCE
+        or not exact_tree_contract(fresh["current_tree"], fresh["staging_dist"])
+        or not exact_tree_contract(fresh["current_tree"], baseline["current_tree"])
+        or not exact_tree_contract(fresh["staging_dist"], baseline["staging_dist"])
+    ):
+        raise ReleaseError("fresh current release delta base parity is not proved")
     return fresh
 
 
@@ -1412,7 +1258,7 @@ def verify_exact_baseline_state(baseline, *, require_staging):
     if resolved(CURRENT_LINK) != baseline["current_release"] or not release_path(baseline["current_release"]):
         raise ReleaseError("exact baseline release was not restored")
     baseline_tree = tree_manifest(Path(baseline["current_release"]))
-    if baseline_tree.get("digest") != baseline.get("current_tree", {}).get("digest"):
+    if not exact_tree_contract(baseline_tree, baseline.get("current_tree", {})):
         raise ReleaseError("baseline release tree changed")
     expected_sha = baseline["articles"]["canonical"]["sha256"]
     articles = (
@@ -1427,9 +1273,15 @@ def verify_exact_baseline_state(baseline, *, require_staging):
     cz_manifest = articles_cz_manifest()
     if not cz_manifest.get("valid") or cz_manifest.get("digest") != baseline.get("articles_cz", {}).get("digest") or cz_manifest.get("files") != baseline.get("articles_cz", {}).get("files"):
         raise ReleaseError("canonical articles-cz baseline is not restored")
-    if require_staging and tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
+    staging_tree = tree_manifest(DIST_DIR)
+    if require_staging and not exact_tree_contract(staging_tree, baseline["staging_dist"]):
         raise ReleaseError("baseline staging dist is not restored")
-    return {"topology": topo, "baseline_tree": baseline_tree, "articles": list(articles), "articles_cz": cz_manifest}
+    if require_staging and not exact_tree_contract(baseline_tree, staging_tree):
+        raise ReleaseError("restored current release and staging dist differ")
+    return {
+        "topology": topo, "baseline_tree": baseline_tree,
+        "staging_tree": staging_tree, "articles": list(articles), "articles_cz": cz_manifest,
+    }
 
 
 def ensure_candidate_parent(candidate, parent):
@@ -1588,13 +1440,6 @@ def materialize_trusted_scripts(bundle, token, purpose):
         raise
 
 
-def tree_contract(value):
-    return {
-        key: value.get(key)
-        for key in ("valid", "files", "file_count", "directory_count", "digest")
-    }
-
-
 def copy_regular_verified(source, target, expected):
     source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     source_fd = os.open(source, source_flags)
@@ -1652,66 +1497,73 @@ def copy_regular_verified(source, target, expected):
         raise ReleaseError(f"copied delta base file mismatch: {target}")
 
 
-def copy_delta_base(candidate, baseline, root_fd=None, root_snapshot=None):
-    expected = baseline["staging_dist"]
-    owns_root_fd = root_fd is None
-    if owns_root_fd:
-        root_fd, root_snapshot = open_pinned_delta_base_root()
-    elif root_snapshot is None:
-        raise ReleaseError("pinned delta base root snapshot is missing")
+def delta_base_source_state(baseline):
+    source = Path(baseline["current_release"])
+    if baseline.get("delta_base_source") != DELTA_BASE_SOURCE:
+        raise ReleaseError("delta base source marker mismatch")
+    if resolved(CURRENT_LINK) != str(source) or not release_path(str(source)):
+        raise ReleaseError("current link differs from the pinned delta base release")
+    trust = trusted_closed_tree(source)
+    if not trust.get("valid"):
+        raise ReleaseError("current release delta base is not a closed root-owned tree")
+    current_manifest = tree_manifest(source)
+    staging_manifest = tree_manifest(DIST_DIR)
+    if not exact_tree_contract(current_manifest, baseline["current_tree"]):
+        raise ReleaseError("current release delta base differs from baseline")
+    if not exact_tree_contract(staging_manifest, baseline["staging_dist"]):
+        raise ReleaseError("staging dist differs from baseline before delta reconstruction")
+    if not exact_tree_contract(current_manifest, staging_manifest):
+        raise ReleaseError("current release and staging dist differ before delta reconstruction")
+    return source, current_manifest, staging_manifest
+
+
+def copy_delta_base(candidate, baseline):
+    source_root, before, staging_before = delta_base_source_state(baseline)
+    expected = baseline["current_tree"]
+    expected_files = {item["path"]: item for item in expected["files"]}
+    old_umask = os.umask(0)
     try:
-        readiness = delta_base_readiness(root_fd, root_snapshot)
-        if not readiness.get("valid"):
-            raise ReleaseError("delta base source contract is unsafe")
-        before = tree_manifest(DIST_DIR)
-        if canonical_json(tree_contract(before)) != canonical_json(tree_contract(expected)):
-            raise ReleaseError("delta base tree differs before reconstruction")
-        verify_pinned_delta_base_root(root_fd, root_snapshot)
-        expected_files = {item["path"]: item for item in expected["files"]}
-        old_umask = os.umask(0)
-        try:
-            os.mkdir(candidate, 0o700)
-        finally:
-            os.umask(old_umask)
-        for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False):
-            dir_names.sort()
-            file_names.sort()
-            current_path = Path(current)
-            relative_current = current_path.relative_to(DIST_DIR)
-            target_current = candidate / relative_current
-            for name in dir_names:
-                source_dir = current_path / name
-                source_info = os.lstat(source_dir)
-                if (
-                    not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
-                    or source_info.st_uid != 0 or stat.S_IMODE(source_info.st_mode) & 0o022
-                    or not within(DIST_DIR, source_dir)
-                ):
-                    raise ReleaseError(f"unsafe delta base directory: {source_dir}")
-                target_dir = target_current / name
-                old_umask = os.umask(0)
-                try:
-                    os.mkdir(target_dir, stat.S_IMODE(source_info.st_mode))
-                finally:
-                    os.umask(old_umask)
-            for name in file_names:
-                source = current_path / name
-                relative = source.relative_to(DIST_DIR).as_posix()
-                item = expected_files.get(relative)
-                if item is None:
-                    raise ReleaseError(f"unexpected delta base file: {relative}")
-                copy_regular_verified(source, target_current / name, item)
-        copied = tree_manifest(candidate)
-        if canonical_json(tree_contract(copied)) != canonical_json(tree_contract(expected)):
-            raise ReleaseError("root-private delta base copy mismatch")
-        base_after_copy = tree_manifest(DIST_DIR)
-        if canonical_json(tree_contract(base_after_copy)) != canonical_json(tree_contract(expected)):
-            raise ReleaseError("delta base tree changed during root-private copy")
-        verify_pinned_delta_base_root(root_fd, root_snapshot)
-        return before
+        os.mkdir(candidate, 0o700)
     finally:
-        if owns_root_fd:
-            os.close(root_fd)
+        os.umask(old_umask)
+    for current, dir_names, file_names in os.walk(source_root, followlinks=False):
+        dir_names.sort()
+        file_names.sort()
+        current_path = Path(current)
+        relative_current = current_path.relative_to(source_root)
+        target_current = candidate / relative_current
+        for name in dir_names:
+            source_dir = current_path / name
+            source_info = os.lstat(source_dir)
+            if (
+                not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
+                or source_info.st_uid != 0 or stat.S_IMODE(source_info.st_mode) & 0o022
+                or not within(source_root, source_dir)
+            ):
+                raise ReleaseError(f"unsafe delta base directory: {source_dir}")
+            target_dir = target_current / name
+            old_umask = os.umask(0)
+            try:
+                os.mkdir(target_dir, stat.S_IMODE(source_info.st_mode))
+            finally:
+                os.umask(old_umask)
+        for name in file_names:
+            source = current_path / name
+            relative = source.relative_to(source_root).as_posix()
+            item = expected_files.get(relative)
+            if item is None:
+                raise ReleaseError(f"unexpected delta base file: {relative}")
+            copy_regular_verified(source, target_current / name, item)
+    copied = tree_manifest(candidate)
+    if not exact_tree_contract(copied, expected):
+        raise ReleaseError("root-private delta base copy mismatch")
+    source_after, after, staging_after = delta_base_source_state(baseline)
+    if source_after != source_root:
+        raise ReleaseError("delta base release path changed during copy")
+    return {
+        "source": source_root, "before": before, "after": after,
+        "staging_before": staging_before, "staging_after": staging_after,
+    }
 
 
 def remove_empty_candidate_directories(candidate):
@@ -1759,10 +1611,8 @@ def reconstruct_candidate(bundle, baseline):
     delta = json.loads((bundle / "delta-manifest.json").read_text(encoding="utf-8"))
     changed, deleted = validate_delta_manifest(delta, baseline, target, bundle / "delta.tar.gz")
     expected_changed = {item["path"]: item for item in changed}
-    root_fd = -1
     try:
-        root_fd, root_snapshot = open_pinned_delta_base_root()
-        before = copy_delta_base(candidate, baseline, root_fd, root_snapshot)
+        base_copy = copy_delta_base(candidate, baseline)
         for relative in deleted:
             target_path = candidate / Path(relative)
             info = safe_file(target_path, root=candidate)
@@ -1794,12 +1644,15 @@ def reconstruct_candidate(bundle, baseline):
         target_exact = canonical_json(tree_contract(actual)) == canonical_json(target)
         if not target_exact:
             raise ReleaseError("reconstructed candidate full target manifest mismatch")
-        base_after = tree_manifest(DIST_DIR)
-        base_expected = tree_contract(baseline["staging_dist"])
-        base_exact = canonical_json(tree_contract(base_after)) == canonical_json(base_expected)
+        source, base_after, staging_after = delta_base_source_state(baseline)
+        base_expected = tree_contract(baseline["current_tree"])
+        staging_expected = tree_contract(baseline["staging_dist"])
+        base_exact = exact_tree_contract(base_after, base_expected)
+        staging_exact = exact_tree_contract(staging_after, staging_expected)
         if not base_exact:
             raise ReleaseError("original delta base changed during reconstruction")
-        verify_pinned_delta_base_root(root_fd, root_snapshot)
+        if not staging_exact:
+            raise ReleaseError("staging dist changed during reconstruction")
         articles = article_file(candidate / "api/articles.json", "candidate")
         canonical = baseline["articles"]["canonical"]
         article_exact = bool(
@@ -1810,10 +1663,17 @@ def reconstruct_candidate(bundle, baseline):
             raise ReleaseError("candidate article export differs from canonical export")
         evidence = {
             "base": {
+                "source": DELTA_BASE_SOURCE, "release": str(source),
                 "expected": manifest_summary(base_expected),
-                "observed_before": observed_manifest_summary(before),
+                "observed_before": observed_manifest_summary(base_copy["before"]),
                 "observed_after": observed_manifest_summary(base_after),
                 "exact_match": base_exact,
+            },
+            "staging": {
+                "expected": manifest_summary(staging_expected),
+                "observed_before": observed_manifest_summary(base_copy["staging_before"]),
+                "observed_after": observed_manifest_summary(staging_after),
+                "exact_match": staging_exact,
             },
             "target": {
                 "expected": manifest_summary(target),
@@ -1832,15 +1692,12 @@ def reconstruct_candidate(bundle, baseline):
                 "observed_slug_digest": articles["slug_digest"],
                 "exact_match": article_exact,
             },
-            "exact_match": base_exact and target_exact and article_exact,
+            "exact_match": base_exact and staging_exact and target_exact and article_exact,
         }
         return candidate, evidence
     except Exception:
         shutil.rmtree(candidate, ignore_errors=True)
         raise
-    finally:
-        if root_fd >= 0:
-            os.close(root_fd)
 
 
 def run_fixed(script_path, argument, timeout):
@@ -1959,7 +1816,7 @@ def apply_release(bundle):
             final_fresh = verify_fresh_baseline(baseline)
             if not topology()["valid"]:
                 raise ReleaseError("server topology changed under the release lock")
-            if tree_manifest(DIST_DIR).get("digest") != final_fresh["staging_dist"].get("digest"):
+            if not exact_tree_contract(tree_manifest(DIST_DIR), final_fresh["staging_dist"]):
                 raise ReleaseError("staging dist changed under lock")
             if exact_label_releases() != []:
                 raise ReleaseError("exact release target label appeared before apply")
@@ -2115,7 +1972,7 @@ def apply_release(bundle):
             ) from failure
         if apply_receipt is None:
             raise ReleaseError("apply completed without a receipt")
-        if tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
+        if not exact_tree_contract(tree_manifest(DIST_DIR), baseline["staging_dist"]):
             raise ReleaseError("staging dist was not restored after successful release")
         write_apply_progress(
             bundle, baseline["baseline_token"], "staging_restored",
@@ -2165,9 +2022,9 @@ def rollback_release(bundle):
         if not before_cz.get("valid") or before_cz.get("digest") != baseline.get("articles_cz", {}).get("digest") or before_cz.get("files") != baseline.get("articles_cz", {}).get("files"):
             raise ReleaseError("canonical articles-cz baseline changed before rollback")
         baseline_tree = tree_manifest(Path(baseline["current_release"]))
-        if not baseline_tree.get("valid") or baseline_tree.get("digest") != baseline.get("current_tree", {}).get("digest"):
+        if not baseline_tree.get("valid") or not exact_tree_contract(baseline_tree, baseline.get("current_tree", {})):
             raise ReleaseError("exact baseline release tree changed before rollback")
-        if tree_manifest(DIST_DIR).get("digest") != baseline["staging_dist"].get("digest"):
+        if not exact_tree_contract(tree_manifest(DIST_DIR), baseline["staging_dist"]):
             raise ReleaseError("restored staging dist changed before rollback")
         mutation_before_rollback = root_mutation_topology(exact_new, baseline["current_release"])
         if not mutation_before_rollback.get("valid") or exact_label_releases() != [exact_new]:
