@@ -147,6 +147,19 @@ def topology(info):
     }
 
 
+def same_stable_file(left, right):
+    return bool(
+        same_inode(left, right)
+        and left.st_uid == right.st_uid
+        and left.st_gid == right.st_gid
+        and left.st_mode == right.st_mode
+        and left.st_nlink == right.st_nlink
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
 def require_dir(info, label, *, uid=0, gid=0, exact_mode=None, forbidden_mode=0o022):
     mode = stat.S_IMODE(info.st_mode)
     if (
@@ -249,14 +262,15 @@ def inspect_member(scripts_fd, key):
         before = os.fstat(fd)
         linked = os.stat(spec["name"], dir_fd=scripts_fd, follow_symlinks=False)
         require_script(before, spec["name"])
-        if stat.S_ISLNK(linked.st_mode) or not same_inode(before, linked):
+        if stat.S_ISLNK(linked.st_mode) or not same_stable_file(before, linked):
             raise InstallError(f"{spec['name']} binding is unsafe")
         raw = read_fd_exact(fd, MAX_SCRIPT_BYTES)
         after = os.fstat(fd)
+        rebound = os.stat(spec["name"], dir_fd=scripts_fd, follow_symlinks=False)
         if (
-            not same_inode(before, after)
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
+            stat.S_ISLNK(rebound.st_mode)
+            or not same_stable_file(before, after)
+            or not same_stable_file(after, rebound)
             or len(raw) != before.st_size
         ):
             raise InstallError(f"{spec['name']} changed during readback")
@@ -336,7 +350,7 @@ def read_regular_path(
         if (
             not stat.S_ISREG(before.st_mode)
             or stat.S_ISLNK(linked.st_mode)
-            or not same_inode(before, linked)
+            or not same_stable_file(before, linked)
             or before.st_nlink != 1
             or (expected_uid is not None and before.st_uid != expected_uid)
             or (expected_gid is not None and before.st_gid != expected_gid)
@@ -346,10 +360,11 @@ def read_regular_path(
             raise InstallError(f"{label} topology is unsafe")
         raw = read_fd_exact(fd, maximum)
         after = os.fstat(fd)
+        rebound = os.lstat(str(path))
         if (
-            not same_inode(before, after)
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
+            stat.S_ISLNK(rebound.st_mode)
+            or not same_stable_file(before, after)
+            or not same_stable_file(after, rebound)
             or len(raw) != before.st_size
         ):
             raise InstallError(f"{label} changed during read")
@@ -382,7 +397,7 @@ def read_cz_member(directory_fd, name):
         if (
             not stat.S_ISREG(before.st_mode)
             or stat.S_ISLNK(linked.st_mode)
-            or not same_inode(before, linked)
+            or not same_stable_file(before, linked)
             or before.st_uid != 0
             or before.st_gid != 33
             or stat.S_IMODE(before.st_mode) != 0o664
@@ -391,14 +406,18 @@ def read_cz_member(directory_fd, name):
             raise InstallError(f"articles-cz file {name} topology is not root:33 0664")
         raw = read_fd_exact(fd, 2 * 1024 * 1024)
         after = os.fstat(fd)
+        rebound = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if (
-            not same_inode(before, after)
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
+            stat.S_ISLNK(rebound.st_mode)
+            or not same_stable_file(before, after)
+            or not same_stable_file(after, rebound)
             or len(raw) != before.st_size
         ):
             raise InstallError(f"articles-cz file {name} changed during read")
-        return {"name": name, "bytes": len(raw), "sha256": sha256_bytes(raw), "topology": topology(before)}
+        return {
+            "name": name, "bytes": len(raw), "sha256": sha256_bytes(raw),
+            "topology": {**topology(before), "same_inode": True},
+        }
     finally:
         os.close(fd)
 

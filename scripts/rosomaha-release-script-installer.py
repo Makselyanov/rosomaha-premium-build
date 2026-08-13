@@ -54,8 +54,15 @@ PAIR_SPECS = {
         "new_sha256": "8f2390ec2d6b3248b49ef8b690de5413bdcc7930180e584524de72094d676388",
     },
 }
-OPERATOR_SHA256 = "52a8fc095a0211958d9e6e550c701287391a2f07890548268bb2a786e234b45e"
+OPERATOR_SHA256 = "9b3ba9b530b411c785d445c57955efcc58c0f74d8d70fcf0ba1ad84fc226ffb7"
 MIGRATION_COVERAGE = "migration_window_bounded_then_all_compliant_pair_installed"
+TOPOLOGY_FIELDS = frozenset({
+    "uid", "gid", "mode", "nlink", "dev", "ino", "same_inode",
+})
+TOPOLOGY_CONTEXTS = frozenset({
+    "canonical-article", "runtime-article", "articles-cz-directory",
+    "articles-cz-file",
+})
 ROOT_AUDIT_SCOPE = {
     "pair_only": True,
     "installed_scripts_executed": False,
@@ -417,12 +424,20 @@ def valid_digest(value: Any) -> bool:
 
 def validate_topology(
     item: Any, *, uid: int, gid: int | None, mode: str | None,
-    non_022: bool, nlink: int | None = 1,
+    non_022: bool, context: str, nlink: int | None = 1,
 ) -> None:
-    if not isinstance(item, dict) or set(item) != {
-        "uid", "gid", "mode", "nlink", "dev", "ino", "same_inode",
-    }:
-        raise InstallerError("file topology evidence is incomplete")
+    if context not in TOPOLOGY_CONTEXTS:
+        raise InstallerError("file topology diagnostic context is invalid")
+    fields = set(item) if isinstance(item, dict) else set()
+    missing = sorted(TOPOLOGY_FIELDS - fields)
+    unexpected_count = len(fields - TOPOLOGY_FIELDS)
+    if not isinstance(item, dict) or missing or unexpected_count:
+        missing_text = ",".join(missing) if missing else "none"
+        raise InstallerError(
+            "file topology evidence fields mismatch: "
+            f"context={context} missing={missing_text} "
+            f"unexpected_count={unexpected_count}"
+        )
     if (
         item.get("uid") != uid
         or (gid is not None and item.get("gid") != gid)
@@ -478,9 +493,15 @@ def validate_article(item: Any, source: str, *, topology_kind: str | None, live:
     ):
         raise InstallerError("article evidence is invalid")
     if topology_kind == "canonical":
-        validate_topology(item["topology"], uid=0, gid=33, mode="0o664", non_022=False)
+        validate_topology(
+            item["topology"], uid=0, gid=33, mode="0o664", non_022=False,
+            context="canonical-article",
+        )
     elif topology_kind == "runtime":
-        validate_topology(item["topology"], uid=0, gid=None, mode=None, non_022=True)
+        validate_topology(
+            item["topology"], uid=0, gid=None, mode=None, non_022=True,
+            context="runtime-article",
+        )
     if live and (item.get("status") != 200 or item.get("final_url") != PUBLIC_ARTICLES_URL):
         raise InstallerError("live article HTTP evidence is invalid")
 
@@ -590,7 +611,8 @@ def validate_seo_snapshot(snapshot: Any) -> None:
     if not isinstance(cz, dict) or set(cz) != {"directory", "count", "files", "digest"}:
         raise InstallerError("articles-cz evidence is not exact")
     validate_topology(
-        cz["directory"], uid=0, gid=33, mode="0o2775", non_022=False, nlink=None,
+        cz["directory"], uid=0, gid=33, mode="0o2775", non_022=False,
+        context="articles-cz-directory", nlink=None,
     )
     if not isinstance(cz.get("files"), list) or len(cz["files"]) != cz.get("count") or not valid_digest(cz.get("digest")):
         raise InstallerError("articles-cz manifest is invalid")
@@ -602,7 +624,10 @@ def validate_seo_snapshot(snapshot: Any) -> None:
             or not valid_digest(item.get("sha256"))
         ):
             raise InstallerError("articles-cz file evidence is invalid")
-        validate_topology(item["topology"], uid=0, gid=33, mode="0o664", non_022=False)
+        validate_topology(
+            item["topology"], uid=0, gid=33, mode="0o664", non_022=False,
+            context="articles-cz-file",
+        )
     labels = snapshot["release_labels"]
     if (
         not isinstance(labels, dict)

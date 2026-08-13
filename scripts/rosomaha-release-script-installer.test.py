@@ -67,6 +67,42 @@ def topo(*, uid=0, gid=33, mode="0o664", nlink=1, same_inode=True):
     }
 
 
+def file_stat(
+    *, uid=0, gid=0, mode=0o755, nlink=1, size=4, dev=7, ino=11,
+    mtime_ns=1_700_000_000_000_000_001,
+    ctime_ns=1_700_000_000_000_000_002,
+    file_type=stat.S_IFREG,
+):
+    return types.SimpleNamespace(
+        st_mode=file_type | mode,
+        st_uid=uid,
+        st_gid=gid,
+        st_nlink=nlink,
+        st_size=size,
+        st_dev=dev,
+        st_ino=ino,
+        st_mtime_ns=mtime_ns,
+        st_ctime_ns=ctime_ns,
+    )
+
+
+def changed_file_stat(info, **changes):
+    values = {
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "mode": stat.S_IMODE(info.st_mode),
+        "nlink": info.st_nlink,
+        "size": info.st_size,
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+        "file_type": stat.S_IFMT(info.st_mode),
+    }
+    values.update(changes)
+    return file_stat(**values)
+
+
 def fixture_public():
     pages = {
         path: {
@@ -488,6 +524,162 @@ class PairInstallerTests(unittest.TestCase):
             }
             with self.subTest(release=release, rollback=rollback):
                 self.assertEqual(self.operator.classify_pair(members), expected)
+
+    def _call_operator_reader(self, reader, rebound=None, after=None):
+        if reader == "inspect_member":
+            before = file_stat(uid=0, gid=0, mode=0o755)
+            path_method = "stat"
+        else:
+            before = file_stat(uid=0, gid=33, mode=0o664)
+            path_method = "lstat" if reader == "read_regular_path" else "stat"
+        after = before if after is None else after
+        rebound = after if rebound is None else rebound
+        with mock.patch.object(self.operator.os, "open", return_value=200), mock.patch.object(
+            self.operator.os, "fstat", side_effect=(before, after),
+        ), mock.patch.object(
+            self.operator.os, path_method, side_effect=(before, rebound),
+        ), mock.patch.object(
+            self.operator.os, "close",
+        ), mock.patch.object(
+            self.operator, "read_fd_exact", return_value=b"old\n",
+        ), mock.patch.object(
+            self.operator, "sha256_bytes", return_value=RELEASE_OLD,
+        ):
+            if reader == "inspect_member":
+                return before, self.operator.inspect_member(100, "release")
+            if reader == "read_regular_path":
+                return before, self.operator.read_regular_path(
+                    "/fixed/articles.json", 1024, "canonical articles",
+                    expected_uid=0, expected_gid=33, expected_mode=0o664,
+                    forbidden_mode=0,
+                )
+            return before, self.operator.read_cz_member(100, "index.ts")
+
+    def test_stable_reader_producers_emit_client_accepted_inode_evidence(self):
+        _before, inspected = self._call_operator_reader("inspect_member")
+        self.assertTrue(inspected["valid"])
+        self.assertEqual(inspected["state"], "old")
+        pair = fixture_pair("old", "old")
+        pair["members"]["release"] = inspected
+        self.client.validate_pair(pair)
+
+        _before, (raw, regular_topology) = self._call_operator_reader("read_regular_path")
+        self.assertEqual(raw, b"old\n")
+        self.assertIs(regular_topology["same_inode"], True)
+        self.client.validate_topology(
+            regular_topology, uid=0, gid=33, mode="0o664", non_022=False,
+            context="canonical-article",
+        )
+
+        _before, cz = self._call_operator_reader("read_cz_member")
+        self.assertEqual(cz["bytes"], 4)
+        self.assertIs(cz["topology"]["same_inode"], True)
+        self.client.validate_topology(
+            cz["topology"], uid=0, gid=33, mode="0o664", non_022=False,
+            context="articles-cz-file",
+        )
+
+    def test_all_reader_producers_reject_post_read_path_rebind_and_topology_drift(self):
+        mutations = {
+            "inode-rebind": {"ino": 12},
+            "chmod": {"mode": 0o600},
+            "chown": {"uid": 1},
+            "chgrp": {"gid": 1},
+            "nlink": {"nlink": 2},
+            "size": {"size": 5},
+            "mtime": {"mtime_ns": 1_700_000_000_000_000_101},
+            "ctime": {"ctime_ns": 1_700_000_000_000_000_102},
+        }
+        for reader in ("inspect_member", "read_regular_path", "read_cz_member"):
+            if reader == "inspect_member":
+                baseline = file_stat(uid=0, gid=0, mode=0o755)
+            else:
+                baseline = file_stat(uid=0, gid=33, mode=0o664)
+            for mutation, changes in mutations.items():
+                with self.subTest(reader=reader, mutation=mutation):
+                    rebound = changed_file_stat(baseline, **changes)
+                    if reader == "inspect_member":
+                        _before, result = self._call_operator_reader(reader, rebound)
+                        self.assertFalse(result["valid"])
+                        self.assertEqual(result["state"], "unknown")
+                        self.assertIn("changed during readback", result["error"])
+                    else:
+                        with self.assertRaisesRegex(
+                            self.operator.InstallError, "changed during read",
+                        ):
+                            self._call_operator_reader(reader, rebound)
+
+    def test_all_reader_producers_reject_open_fd_drift_and_post_read_symlink(self):
+        for reader in ("inspect_member", "read_regular_path", "read_cz_member"):
+            if reader == "inspect_member":
+                baseline = file_stat(uid=0, gid=0, mode=0o755)
+            else:
+                baseline = file_stat(uid=0, gid=33, mode=0o664)
+            drifted = changed_file_stat(
+                baseline, ctime_ns=baseline.st_ctime_ns + 1,
+            )
+            rebound_symlink = changed_file_stat(
+                baseline, file_type=stat.S_IFLNK, mode=0o777, ino=12,
+            )
+            for case, after, rebound in (
+                ("fstat-after-drift", drifted, drifted),
+                ("post-read-symlink", baseline, rebound_symlink),
+            ):
+                with self.subTest(reader=reader, case=case):
+                    if reader == "inspect_member":
+                        _before, result = self._call_operator_reader(
+                            reader, rebound=rebound, after=after,
+                        )
+                        self.assertFalse(result["valid"])
+                        self.assertEqual(result["state"], "unknown")
+                        self.assertIn("changed during readback", result["error"])
+                    else:
+                        with self.assertRaisesRegex(
+                            self.operator.InstallError, "changed during read",
+                        ):
+                            self._call_operator_reader(
+                                reader, rebound=rebound, after=after,
+                            )
+
+    def test_topology_field_diagnostic_is_contextual_and_does_not_echo_unknown_data(self):
+        missing = topo()
+        missing.pop("same_inode")
+        with self.assertRaisesRegex(
+            self.client.InstallerError,
+            r"context=articles-cz-file missing=same_inode unexpected_count=0$",
+        ):
+            self.client.validate_topology(
+                missing, uid=0, gid=33, mode="0o664", non_022=False,
+                context="articles-cz-file",
+            )
+
+        hostile = topo()
+        hostile.pop("mode")
+        hostile["secret-token-name"] = "secret-value-must-not-leak"
+        try:
+            self.client.validate_topology(
+                hostile, uid=0, gid=33, mode="0o664", non_022=False,
+                context="canonical-article",
+            )
+        except self.client.InstallerError as exc:
+            message = str(exc)
+        else:
+            self.fail("hostile topology fields were accepted")
+        self.assertIn(
+            "context=canonical-article missing=mode unexpected_count=1",
+            message,
+        )
+        self.assertNotIn("secret-token-name", message)
+        self.assertNotIn("secret-value-must-not-leak", message)
+
+        with self.assertRaisesRegex(
+            self.client.InstallerError,
+            r"^file topology diagnostic context is invalid$",
+        ):
+            self.client.validate_topology(
+                topo(), uid=0, gid=33, mode="0o664", non_022=False,
+                context="untrusted-secret-context",
+            )
 
     def test_client_pair_validator_accepts_four_states_and_rejects_inconsistent_state(self):
         for release, rollback in (
