@@ -129,6 +129,8 @@ MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_DELTA_FILES = 1_000
 MAX_TARGET_BYTES = 1024 * 1024 * 1024
 MAX_CANDIDATE_FILES = 20_000
+MAX_DELTA_BASE_BLOCKERS = 10
+MAX_SAFE_DELTA_BASE_PATH_CHARS = 512
 MAX_SCRIPT_BYTES = 256 * 1024
 FIXED_BIN_PATHS = {
     "bash": "/bin/bash",
@@ -429,6 +431,226 @@ def trusted_closed_tree(root, *, require_root_mode=None):
     return {
         "root": str(root), "valid": True, "root_info": root_info,
         "file_count": file_count, "directory_count": directory_count,
+    }
+
+
+def delta_base_root_identity(details):
+    return (
+        details.st_dev, details.st_ino,
+        details.st_mtime_ns, details.st_ctime_ns,
+    )
+
+
+def open_pinned_delta_base_root():
+    root_info = trusted_root_directory(DIST_DIR, allow_group_write=True)
+    if not root_info.get("valid"):
+        raise ReleaseError("delta base root contract is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(DIST_DIR, flags)
+    try:
+        opened = os.fstat(fd)
+        linked = os.lstat(DIST_DIR)
+        if (
+            not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
+            or stat.S_ISLNK(linked.st_mode)
+            or not trusted_directory_permissions(
+                opened.st_uid, opened.st_mode,
+                allow_group_write=True, require_sticky=False,
+            )
+            or not trusted_directory_permissions(
+                linked.st_uid, linked.st_mode,
+                allow_group_write=True, require_sticky=False,
+            )
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+        ):
+            raise ReleaseError("delta base root inode contract is unsafe")
+        snapshot = delta_base_root_identity(opened)
+        if delta_base_root_identity(linked) != snapshot:
+            raise ReleaseError("delta base root changed while it was pinned")
+        return fd, snapshot
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def verify_pinned_delta_base_root(fd, expected):
+    opened = os.fstat(fd)
+    linked = os.lstat(DIST_DIR)
+    if (
+        not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
+        or stat.S_ISLNK(linked.st_mode)
+        or not trusted_directory_permissions(
+            opened.st_uid, opened.st_mode,
+            allow_group_write=True, require_sticky=False,
+        )
+        or not trusted_directory_permissions(
+            linked.st_uid, linked.st_mode,
+            allow_group_write=True, require_sticky=False,
+        )
+        or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+        or delta_base_root_identity(opened) != expected
+        or delta_base_root_identity(linked) != expected
+    ):
+        raise ReleaseError("pinned delta base root changed during reconstruction")
+
+
+def safe_delta_base_relative(path):
+    try:
+        relative = path.relative_to(DIST_DIR).as_posix()
+    except (TypeError, ValueError):
+        return "[invalid-relative-path]"
+    if relative == ".":
+        return relative
+    if (
+        not relative or relative.startswith("/") or "\\" in relative
+        or "\x00" in relative or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
+        or any(ord(character) < 32 for character in relative)
+    ):
+        return "[invalid-relative-path]"
+    if len(relative) > MAX_SAFE_DELTA_BASE_PATH_CHARS:
+        return relative[:MAX_SAFE_DELTA_BASE_PATH_CHARS - 3] + "..."
+    return relative
+
+
+def delta_base_readiness(root_fd=None, root_snapshot=None):
+    blockers = []
+    invalid_count = 0
+    checked_files = 0
+    checked_directories = 0
+    owns_root_fd = root_fd is None
+
+    def add_blocker(path, kind, details, reason):
+        nonlocal invalid_count
+        invalid_count += 1
+        if len(blockers) >= MAX_DELTA_BASE_BLOCKERS:
+            return
+        uid = getattr(details, "st_uid", None) if details is not None else None
+        mode = oct(stat.S_IMODE(details.st_mode)) if details is not None else None
+        blockers.append({
+            "path": "." if path == DIST_DIR else safe_delta_base_relative(path),
+            "kind": kind, "uid": uid, "mode": mode, "reason": reason,
+        })
+
+    try:
+        if owns_root_fd:
+            try:
+                root_fd, root_snapshot = open_pinned_delta_base_root()
+            except (OSError, ReleaseError):
+                try:
+                    details = os.lstat(DIST_DIR)
+                except OSError:
+                    details = None
+                add_blocker(DIST_DIR, "root", details, "unsafe_root")
+                return {
+                    "valid": False, "checked_files": 0, "checked_directories": 0,
+                    "invalid_count": invalid_count, "blockers": blockers,
+                    "blockers_truncated": invalid_count > len(blockers),
+                }
+        elif root_snapshot is None:
+            add_blocker(DIST_DIR, "root", None, "missing_root_snapshot")
+            return {
+                "valid": False, "checked_files": 0, "checked_directories": 0,
+                "invalid_count": invalid_count, "blockers": blockers,
+                "blockers_truncated": invalid_count > len(blockers),
+            }
+
+        def walk_error(_error):
+            add_blocker(DIST_DIR, "directory", None, "walk_failed")
+
+        for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False, onerror=walk_error):
+            dir_names.sort()
+            file_names.sort()
+            current_path = Path(current)
+            safe_directories = []
+            for name in dir_names:
+                item = current_path / name
+                try:
+                    details = os.lstat(item)
+                except OSError:
+                    add_blocker(item, "directory", None, "lstat_failed")
+                    continue
+                reason = None
+                if stat.S_ISLNK(details.st_mode):
+                    reason = "symlink"
+                elif not stat.S_ISDIR(details.st_mode):
+                    reason = "not_directory"
+                elif details.st_uid != 0:
+                    reason = "owner_not_root"
+                elif stat.S_IMODE(details.st_mode) & 0o022:
+                    reason = "writable_by_group_or_world"
+                elif not within(DIST_DIR, item):
+                    reason = "outside_root"
+                if reason:
+                    add_blocker(item, "directory", details, reason)
+                else:
+                    checked_directories += 1
+                    safe_directories.append(name)
+            dir_names[:] = safe_directories
+            for name in file_names:
+                item = current_path / name
+                source_fd = -1
+                details = None
+                reason = None
+                try:
+                    details = os.lstat(item)
+                    if stat.S_ISLNK(details.st_mode):
+                        reason = "symlink"
+                    elif not within(DIST_DIR, item):
+                        reason = "outside_root"
+                    else:
+                        source_fd = os.open(item, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        before = os.fstat(source_fd)
+                        linked = os.lstat(item)
+                        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(linked.st_mode):
+                            reason = "not_regular"
+                        elif stat.S_ISLNK(linked.st_mode):
+                            reason = "symlink"
+                        elif before.st_uid != 0 or linked.st_uid != 0:
+                            reason = "owner_not_root"
+                        elif before.st_nlink != 1 or linked.st_nlink != 1:
+                            reason = "multiple_hardlinks"
+                        elif stat.S_IMODE(before.st_mode) & 0o022 or stat.S_IMODE(linked.st_mode) & 0o022:
+                            reason = "writable_by_group_or_world"
+                        elif (before.st_dev, before.st_ino) != (linked.st_dev, linked.st_ino):
+                            reason = "inode_mismatch"
+                        else:
+                            after = os.fstat(source_fd)
+                            if (
+                                before.st_dev, before.st_ino, before.st_size,
+                                before.st_mtime_ns, before.st_ctime_ns,
+                            ) != (
+                                after.st_dev, after.st_ino, after.st_size,
+                                after.st_mtime_ns, after.st_ctime_ns,
+                            ):
+                                reason = "changed_during_scan"
+                except OSError:
+                    reason = "open_nofollow_failed"
+                finally:
+                    if source_fd >= 0:
+                        os.close(source_fd)
+                if reason:
+                    add_blocker(item, "file", details, reason)
+                else:
+                    checked_files += 1
+                    if checked_files > MAX_CANDIDATE_FILES:
+                        add_blocker(item, "file", details, "file_count_limit")
+                        break
+        try:
+            verify_pinned_delta_base_root(root_fd, root_snapshot)
+        except (OSError, ReleaseError):
+            try:
+                details = os.lstat(DIST_DIR)
+            except OSError:
+                details = None
+            add_blocker(DIST_DIR, "root", details, "root_changed_during_scan")
+    finally:
+        if owns_root_fd and root_fd is not None:
+            os.close(root_fd)
+    return {
+        "valid": invalid_count == 0,
+        "checked_files": checked_files, "checked_directories": checked_directories,
+        "invalid_count": invalid_count, "blockers": blockers,
+        "blockers_truncated": invalid_count > len(blockers),
     }
 
 
@@ -735,6 +957,10 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         lock["held_by_operator"] = True
     else:
         lock = lock_readiness()
+    delta_base = delta_base_readiness()
+    blockers = []
+    if not delta_base.get("valid"):
+        blockers.append("delta base source contract is not proved")
     valid = bool(
         all(item.get("valid") for item in writable_directories.values())
         and tmp.get("valid") and tmp.get("writable")
@@ -742,6 +968,7 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         and lock.get("valid") and all(item.get("valid") for item in command_paths.values())
         and python_runtime_supported()
         and mutation.get("valid")
+        and delta_base.get("valid")
     )
     return {
         "valid": valid, "writable_directories": writable_directories,
@@ -750,6 +977,7 @@ def root_apply_readiness(topo, command_paths, lock_already_held=False):
         "python_version": list(sys.version_info[:3]),
         "python_version_supported": python_runtime_supported(),
         "mutation_topology": mutation,
+        "delta_base": delta_base, "blockers": blockers,
     }
 
 
@@ -1424,52 +1652,66 @@ def copy_regular_verified(source, target, expected):
         raise ReleaseError(f"copied delta base file mismatch: {target}")
 
 
-def copy_delta_base(candidate, baseline):
+def copy_delta_base(candidate, baseline, root_fd=None, root_snapshot=None):
     expected = baseline["staging_dist"]
-    before = tree_manifest(DIST_DIR)
-    if canonical_json(tree_contract(before)) != canonical_json(tree_contract(expected)):
-        raise ReleaseError("delta base tree differs before reconstruction")
-    trust = trusted_closed_tree(DIST_DIR)
-    if not trust.get("valid"):
-        raise ReleaseError("delta base tree is not a trusted closed tree")
-    expected_files = {item["path"]: item for item in expected["files"]}
-    old_umask = os.umask(0)
+    owns_root_fd = root_fd is None
+    if owns_root_fd:
+        root_fd, root_snapshot = open_pinned_delta_base_root()
+    elif root_snapshot is None:
+        raise ReleaseError("pinned delta base root snapshot is missing")
     try:
-        os.mkdir(candidate, 0o700)
+        readiness = delta_base_readiness(root_fd, root_snapshot)
+        if not readiness.get("valid"):
+            raise ReleaseError("delta base source contract is unsafe")
+        before = tree_manifest(DIST_DIR)
+        if canonical_json(tree_contract(before)) != canonical_json(tree_contract(expected)):
+            raise ReleaseError("delta base tree differs before reconstruction")
+        verify_pinned_delta_base_root(root_fd, root_snapshot)
+        expected_files = {item["path"]: item for item in expected["files"]}
+        old_umask = os.umask(0)
+        try:
+            os.mkdir(candidate, 0o700)
+        finally:
+            os.umask(old_umask)
+        for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False):
+            dir_names.sort()
+            file_names.sort()
+            current_path = Path(current)
+            relative_current = current_path.relative_to(DIST_DIR)
+            target_current = candidate / relative_current
+            for name in dir_names:
+                source_dir = current_path / name
+                source_info = os.lstat(source_dir)
+                if (
+                    not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
+                    or source_info.st_uid != 0 or stat.S_IMODE(source_info.st_mode) & 0o022
+                    or not within(DIST_DIR, source_dir)
+                ):
+                    raise ReleaseError(f"unsafe delta base directory: {source_dir}")
+                target_dir = target_current / name
+                old_umask = os.umask(0)
+                try:
+                    os.mkdir(target_dir, stat.S_IMODE(source_info.st_mode))
+                finally:
+                    os.umask(old_umask)
+            for name in file_names:
+                source = current_path / name
+                relative = source.relative_to(DIST_DIR).as_posix()
+                item = expected_files.get(relative)
+                if item is None:
+                    raise ReleaseError(f"unexpected delta base file: {relative}")
+                copy_regular_verified(source, target_current / name, item)
+        copied = tree_manifest(candidate)
+        if canonical_json(tree_contract(copied)) != canonical_json(tree_contract(expected)):
+            raise ReleaseError("root-private delta base copy mismatch")
+        base_after_copy = tree_manifest(DIST_DIR)
+        if canonical_json(tree_contract(base_after_copy)) != canonical_json(tree_contract(expected)):
+            raise ReleaseError("delta base tree changed during root-private copy")
+        verify_pinned_delta_base_root(root_fd, root_snapshot)
+        return before
     finally:
-        os.umask(old_umask)
-    for current, dir_names, file_names in os.walk(DIST_DIR, followlinks=False):
-        dir_names.sort()
-        file_names.sort()
-        current_path = Path(current)
-        relative_current = current_path.relative_to(DIST_DIR)
-        target_current = candidate / relative_current
-        for name in dir_names:
-            source_dir = current_path / name
-            source_info = os.lstat(source_dir)
-            if (
-                not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
-                or source_info.st_uid != 0 or stat.S_IMODE(source_info.st_mode) & 0o022
-                or not within(DIST_DIR, source_dir)
-            ):
-                raise ReleaseError(f"unsafe delta base directory: {source_dir}")
-            target_dir = target_current / name
-            old_umask = os.umask(0)
-            try:
-                os.mkdir(target_dir, stat.S_IMODE(source_info.st_mode))
-            finally:
-                os.umask(old_umask)
-        for name in file_names:
-            source = current_path / name
-            relative = source.relative_to(DIST_DIR).as_posix()
-            item = expected_files.get(relative)
-            if item is None:
-                raise ReleaseError(f"unexpected delta base file: {relative}")
-            copy_regular_verified(source, target_current / name, item)
-    copied = tree_manifest(candidate)
-    if canonical_json(tree_contract(copied)) != canonical_json(tree_contract(expected)):
-        raise ReleaseError("root-private delta base copy mismatch")
-    return before
+        if owns_root_fd:
+            os.close(root_fd)
 
 
 def remove_empty_candidate_directories(candidate):
@@ -1517,8 +1759,10 @@ def reconstruct_candidate(bundle, baseline):
     delta = json.loads((bundle / "delta-manifest.json").read_text(encoding="utf-8"))
     changed, deleted = validate_delta_manifest(delta, baseline, target, bundle / "delta.tar.gz")
     expected_changed = {item["path"]: item for item in changed}
+    root_fd = -1
     try:
-        copy_delta_base(candidate, baseline)
+        root_fd, root_snapshot = open_pinned_delta_base_root()
+        before = copy_delta_base(candidate, baseline, root_fd, root_snapshot)
         for relative in deleted:
             target_path = candidate / Path(relative)
             info = safe_file(target_path, root=candidate)
@@ -1555,6 +1799,7 @@ def reconstruct_candidate(bundle, baseline):
         base_exact = canonical_json(tree_contract(base_after)) == canonical_json(base_expected)
         if not base_exact:
             raise ReleaseError("original delta base changed during reconstruction")
+        verify_pinned_delta_base_root(root_fd, root_snapshot)
         articles = article_file(candidate / "api/articles.json", "candidate")
         canonical = baseline["articles"]["canonical"]
         article_exact = bool(
@@ -1593,6 +1838,9 @@ def reconstruct_candidate(bundle, baseline):
     except Exception:
         shutil.rmtree(candidate, ignore_errors=True)
         raise
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
 
 
 def run_fixed(script_path, argument, timeout):

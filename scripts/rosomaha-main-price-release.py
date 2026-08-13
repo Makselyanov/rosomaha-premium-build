@@ -614,7 +614,17 @@ SAFE_TOPOLOGY_FIELDS = (
 )
 MAX_SAFE_OBSERVED_ARTICLES_CZ = 128
 MAX_SAFE_ARTICLE_FILENAME_CHARS = 240
+MAX_SAFE_DELTA_BASE_BLOCKERS = 10
+MAX_SAFE_DELTA_BASE_PATH_CHARS = 512
 MAX_BLOCKED_SUMMARY_CHARS = 64 * 1024
+SAFE_DELTA_BASE_KINDS = {"root", "directory", "file"}
+SAFE_DELTA_BASE_REASONS = {
+    "unsafe_root", "missing_root_snapshot", "walk_failed", "lstat_failed",
+    "symlink", "not_directory", "owner_not_root", "writable_by_group_or_world",
+    "outside_root", "not_regular", "multiple_hardlinks", "inode_mismatch",
+    "changed_during_scan", "open_nofollow_failed", "file_count_limit",
+    "root_changed_during_scan",
+}
 
 
 def safe_topology_entry(value: Any) -> dict[str, Any]:
@@ -626,6 +636,58 @@ def safe_topology_entry(value: Any) -> dict[str, Any]:
         if isinstance(item, (str, int, bool)) or item is None:
             result[field] = sanitized_diagnostic_tail(item, 500) if isinstance(item, str) else item
     return result
+
+
+def safe_delta_base_blocker(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"path": "[invalid]", "kind": "root", "uid": None, "mode": None, "reason": "unsafe_root"}
+    path = value.get("path")
+    kind = value.get("kind")
+    uid = value.get("uid")
+    mode = value.get("mode")
+    reason = value.get("reason")
+    path_valid = bool(
+        isinstance(path, str) and 0 < len(path) <= MAX_SAFE_DELTA_BASE_PATH_CHARS
+        and "\\" not in path and "\x00" not in path
+        and not path.startswith("/") and not any(ord(character) < 32 for character in path)
+        and (path == "." or all(part not in {"", ".", ".."} for part in PurePosixPath(path).parts))
+    )
+    uid_valid = uid is None or (isinstance(uid, int) and not isinstance(uid, bool) and 0 <= uid <= 2**32 - 1)
+    mode_valid = mode is None or (isinstance(mode, str) and re.fullmatch(r"0o[0-7]{1,6}", mode) is not None)
+    if (
+        not path_valid or kind not in SAFE_DELTA_BASE_KINDS or not uid_valid
+        or not mode_valid or reason not in SAFE_DELTA_BASE_REASONS
+    ):
+        return {"path": "[invalid]", "kind": "root", "uid": None, "mode": None, "reason": "unsafe_root"}
+    return {"path": path, "kind": kind, "uid": uid, "mode": mode, "reason": reason}
+
+
+def safe_delta_base_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"valid": False, "invalid_count": 1, "blockers": [safe_delta_base_blocker(None)], "blockers_truncated": False}
+    blockers = value.get("blockers")
+    if not isinstance(blockers, list):
+        blockers = [None]
+    bounded = blockers[:MAX_SAFE_DELTA_BASE_BLOCKERS]
+    invalid_count = value.get("invalid_count")
+    if isinstance(invalid_count, bool) or not isinstance(invalid_count, int) or not 0 <= invalid_count <= 1_000_000:
+        invalid_count = max(1, len(blockers))
+    checked_files = value.get("checked_files")
+    if isinstance(checked_files, bool) or not isinstance(checked_files, int) or not 0 <= checked_files <= 1_000_000:
+        checked_files = None
+    checked_directories = value.get("checked_directories")
+    if (
+        isinstance(checked_directories, bool) or not isinstance(checked_directories, int)
+        or not 0 <= checked_directories <= 1_000_000
+    ):
+        checked_directories = None
+    return {
+        "valid": value.get("valid") is True,
+        "checked_files": checked_files, "checked_directories": checked_directories,
+        "invalid_count": invalid_count,
+        "blockers": [safe_delta_base_blocker(item) for item in bounded],
+        "blockers_truncated": bool(value.get("blockers_truncated") or len(blockers) > len(bounded)),
+    }
 
 
 def summarize_blocked_payload(payload: dict[str, Any]) -> str:
@@ -678,6 +740,12 @@ def summarize_blocked_payload(payload: dict[str, Any]) -> str:
             "valid": False,
             "temporary_writable": bool(readiness.get("temporary_writable")),
             "commands_available": bool(readiness.get("commands_available")),
+            "blockers": [
+                sanitized_diagnostic_tail(item, 500)
+                for item in readiness.get("blockers", [])[:25]
+                if isinstance(item, str)
+            ] if isinstance(readiness.get("blockers"), list) else ["malformed readiness blockers"],
+            "delta_base": safe_delta_base_summary(readiness.get("delta_base")),
             "invalid": {},
         }
         for section in ("writable_directories", "scripts"):

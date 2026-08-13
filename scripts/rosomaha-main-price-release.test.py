@@ -81,6 +81,18 @@ def page_html(path: str, price: int | str | float | None = None, *, title: str =
     ).encode("utf-8")
 
 
+def operator_stat(
+    mode: int, *, uid: int = 0, gid: int = 33, nlink: int = 1,
+    dev: int = 7, ino: int = 11, size: int = 2,
+    mtime_ns: int = 100, ctime_ns: int = 200,
+):
+    return types.SimpleNamespace(
+        st_mode=mode, st_uid=uid, st_gid=gid, st_nlink=nlink,
+        st_dev=dev, st_ino=ino, st_size=size,
+        st_mtime_ns=mtime_ns, st_ctime_ns=ctime_ns,
+    )
+
+
 class FakeResponse:
     def __init__(self, raw: bytes, url: str, status: int = 200) -> None:
         self.raw = raw
@@ -226,6 +238,134 @@ class MainPriceReleaseV4Test(unittest.TestCase):
             self.assertIn(marker, mutation)
         readiness = source[source.index("def root_apply_readiness") : source.index("def audit_state")]
         self.assertIn("and mutation.get(\"valid\")", readiness)
+
+    def test_delta_base_root_accepts_02775_but_rejects_world_write(self) -> None:
+        namespace = operator_namespace()
+        root = Path("/var/www/rosomaha/dist")
+        root_info = {"valid": True}
+        accepted = operator_stat(stat.S_IFDIR | 0o2775)
+        with mock.patch.dict(namespace, {"DIST_DIR": root, "trusted_root_directory": mock.Mock(return_value=root_info)}), \
+                mock.patch.object(namespace["os"], "open", return_value=81), \
+                mock.patch.object(namespace["os"], "fstat", return_value=accepted), \
+                mock.patch.object(namespace["os"], "lstat", return_value=accepted), \
+                mock.patch.object(namespace["os"], "close") as close:
+            fd, snapshot = namespace["open_pinned_delta_base_root"]()
+            self.assertEqual((fd, snapshot), (81, (7, 11, 100, 200)))
+            self.assertEqual(namespace["trusted_root_directory"].call_args.kwargs, {"allow_group_write": True})
+            close.assert_not_called()
+        world_writable = operator_stat(stat.S_IFDIR | 0o2777)
+        with mock.patch.dict(namespace, {"DIST_DIR": root, "trusted_root_directory": mock.Mock(return_value=root_info)}), \
+                mock.patch.object(namespace["os"], "open", return_value=82), \
+                mock.patch.object(namespace["os"], "fstat", return_value=world_writable), \
+                mock.patch.object(namespace["os"], "lstat", return_value=world_writable), \
+                mock.patch.object(namespace["os"], "close") as close:
+            with self.assertRaises(namespace["ReleaseError"]):
+                namespace["open_pinned_delta_base_root"]()
+            close.assert_called_once_with(82)
+
+    def test_delta_base_pinned_root_rejects_entry_churn(self) -> None:
+        namespace = operator_namespace()
+        root = Path("/var/www/rosomaha/dist")
+        before = operator_stat(stat.S_IFDIR | 0o2775)
+        changed = operator_stat(stat.S_IFDIR | 0o2775, mtime_ns=101)
+        with mock.patch.dict(namespace, {"DIST_DIR": root}), \
+                mock.patch.object(namespace["os"], "fstat", return_value=changed), \
+                mock.patch.object(namespace["os"], "lstat", return_value=changed):
+            with self.assertRaisesRegex(namespace["ReleaseError"], "changed during reconstruction"):
+                namespace["verify_pinned_delta_base_root"](81, namespace["delta_base_root_identity"](before))
+
+    def test_delta_base_readiness_rejects_unsafe_child_directories(self) -> None:
+        namespace = operator_namespace()
+        root = Path("/dist")
+        cases = (
+            (operator_stat(stat.S_IFDIR | 0o775), "writable_by_group_or_world"),
+            (operator_stat(stat.S_IFDIR | 0o755, uid=1000), "owner_not_root"),
+            (operator_stat(stat.S_IFLNK | 0o777), "symlink"),
+        )
+        for details, reason in cases:
+            with self.subTest(reason=reason), mock.patch.dict(namespace, {
+                "DIST_DIR": root, "within": mock.Mock(return_value=True),
+                "verify_pinned_delta_base_root": mock.Mock(),
+            }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), ["unsafe"], [])]), \
+                    mock.patch.object(namespace["os"], "lstat", return_value=details):
+                result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["invalid_count"], 1)
+            self.assertEqual(result["blockers"][0]["path"], "unsafe")
+            self.assertEqual(result["blockers"][0]["kind"], "directory")
+            self.assertEqual(result["blockers"][0]["reason"], reason)
+
+    def test_delta_base_readiness_rejects_unsafe_files(self) -> None:
+        namespace = operator_namespace()
+        root = Path("/dist")
+        cases = (
+            (operator_stat(stat.S_IFREG | 0o664), "writable_by_group_or_world"),
+            (operator_stat(stat.S_IFREG | 0o644, nlink=2), "multiple_hardlinks"),
+            (operator_stat(stat.S_IFLNK | 0o777), "symlink"),
+        )
+        for details, reason in cases:
+            with self.subTest(reason=reason), mock.patch.dict(namespace, {
+                "DIST_DIR": root, "within": mock.Mock(return_value=True),
+                "verify_pinned_delta_base_root": mock.Mock(),
+            }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), [], ["unsafe.html"])]), \
+                    mock.patch.object(namespace["os"], "lstat", return_value=details), \
+                    mock.patch.object(namespace["os"], "open", return_value=91), \
+                    mock.patch.object(namespace["os"], "fstat", return_value=details), \
+                    mock.patch.object(namespace["os"], "close"):
+                result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["invalid_count"], 1)
+            self.assertEqual(result["blockers"][0]["path"], "unsafe.html")
+            self.assertEqual(result["blockers"][0]["kind"], "file")
+            self.assertEqual(result["blockers"][0]["reason"], reason)
+
+    def test_delta_base_readiness_bounds_first_ten_invalid_paths(self) -> None:
+        namespace = operator_namespace()
+        root = Path("/dist")
+        names = [f"unsafe-{index:02d}.html" for index in range(13)]
+        details = operator_stat(stat.S_IFLNK | 0o777)
+        with mock.patch.dict(namespace, {
+            "DIST_DIR": root, "within": mock.Mock(return_value=True),
+            "verify_pinned_delta_base_root": mock.Mock(),
+        }), mock.patch.object(namespace["os"], "walk", return_value=[(str(root), [], names)]), \
+                mock.patch.object(namespace["os"], "lstat", return_value=details):
+            result = namespace["delta_base_readiness"](81, (7, 11, 100, 200))
+        self.assertEqual(result["invalid_count"], 13)
+        self.assertEqual([item["path"] for item in result["blockers"]], sorted(names)[:10])
+        self.assertTrue(result["blockers_truncated"])
+
+    def test_root_audit_and_apply_use_identical_delta_base_contract(self) -> None:
+        namespace = operator_namespace()
+        invalid = {
+            "valid": False, "checked_files": 0, "checked_directories": 0,
+            "invalid_count": 1, "blockers": [{"path": "unsafe.html", "kind": "file", "uid": 0,
+                "mode": "0o664", "reason": "writable_by_group_or_world"}],
+            "blockers_truncated": False,
+        }
+        delta_readiness = mock.Mock(return_value=invalid)
+        valid_entry = {"valid": True, "writable": True, "mode": oct(0o600)}
+        with mock.patch.dict(namespace, {
+            "resolved": mock.Mock(return_value="/var/www/rosomaha/_releases/current"),
+            "rollback_target": mock.Mock(return_value="/var/www/rosomaha/_releases/rollback"),
+            "root_mutation_topology": mock.Mock(return_value={"valid": True}),
+            "safe_directory": mock.Mock(return_value=valid_entry),
+            "safe_file": mock.Mock(return_value={"valid": True, "mode": oct(0o600)}),
+            "read_verified_script": mock.Mock(return_value=b"trusted"),
+            "lock_readiness": mock.Mock(return_value={"valid": True}),
+            "python_runtime_supported": mock.Mock(return_value=True),
+            "delta_base_readiness": delta_readiness,
+        }):
+            audit = namespace["root_apply_readiness"](
+                {"temporary": {"valid": True, "writable": True}}, {"python3": {"valid": True}},
+            )
+            self.assertFalse(audit["valid"])
+            self.assertEqual(audit["delta_base"], invalid)
+            with mock.patch.dict(namespace, {
+                "open_pinned_delta_base_root": mock.Mock(return_value=(81, (7, 11, 100, 200))),
+            }), mock.patch.object(namespace["os"], "close"):
+                with self.assertRaisesRegex(namespace["ReleaseError"], "source contract is unsafe"):
+                    namespace["copy_delta_base"](Path("/candidate"), {"staging_dist": {"files": []}})
+        self.assertEqual(delta_readiness.call_args_list, [mock.call(), mock.call(81, (7, 11, 100, 200))])
 
     def test_candidate_is_closed_before_swap_and_rechecked_before_run(self) -> None:
         source = operator_source()
@@ -1027,6 +1167,45 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         invalid = summary["root_readiness"]["invalid"]
         self.assertEqual(sorted(invalid), ["lock", "scripts.server_release", "writable_directories.dist"])
         self.assertFalse(invalid["scripts.server_release"]["executable"])
+        self.assertNotIn("sha256", json.dumps(summary))
+
+    def test_blocked_summary_bounds_and_sanitizes_delta_base_diagnostics(self) -> None:
+        blockers = [
+            {"path": f"unsafe-{index}.html", "kind": "file", "uid": 0,
+             "mode": "0o664", "reason": "writable_by_group_or_world"}
+            for index in range(13)
+        ]
+        blockers[0] = {
+            "path": "/absolute/secret", "kind": "unknown", "uid": -1,
+            "mode": "0777", "reason": "raw exception", "sha256": "hidden",
+        }
+        payload = {
+            "status": "blocked", "blockers": ["root apply readiness is not proved"],
+            "topology": {"valid": True, "directories": {}, "files": {},
+                         "current_link": {"valid": True}, "temporary": {"valid": True}},
+            "articles_cz": {"valid": True},
+            "root_readiness": {
+                "valid": False, "temporary_writable": True, "commands_available": True,
+                "writable_directories": {}, "scripts": {}, "lock": {"valid": True},
+                "mutation_topology": {"valid": True},
+                "blockers": ["delta base source contract is not proved"],
+                "delta_base": {
+                    "valid": False, "checked_files": True, "checked_directories": -1,
+                    "invalid_count": 13, "blockers": blockers, "blockers_truncated": True,
+                },
+            },
+        }
+        summary = json.loads(helper.summarize_blocked_payload(payload))
+        delta = summary["root_readiness"]["delta_base"]
+        self.assertEqual(len(delta["blockers"]), 10)
+        self.assertEqual(delta["blockers"][0], {
+            "path": "[invalid]", "kind": "root", "uid": None,
+            "mode": None, "reason": "unsafe_root",
+        })
+        self.assertIsNone(delta["checked_files"])
+        self.assertIsNone(delta["checked_directories"])
+        self.assertTrue(delta["blockers_truncated"])
+        self.assertNotIn("secret", json.dumps(summary))
         self.assertNotIn("sha256", json.dumps(summary))
 
     def test_operator_has_no_privileged_or_server_build_path(self) -> None:
