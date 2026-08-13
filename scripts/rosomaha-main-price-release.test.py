@@ -428,7 +428,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
 
             def listdir(self, remote_dir: str):  # noqa: ANN001
                 self.listdir_remote_dir = remote_dir
-                return ["baseline.json.part", "operator.sh"]
+                return ["candidate.tar.gz.part", "operator.sh"]
 
             def lstat(self, path: str):  # noqa: ANN001
                 if path == remote_dir:
@@ -446,7 +446,7 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertTrue(helper.cleanup_bundle_sftp(sftp, remote_dir))
         self.assertEqual(
             sftp.removed,
-            [f"{remote_dir}/baseline.json.part", f"{remote_dir}/operator.sh"],
+            [f"{remote_dir}/candidate.tar.gz.part", f"{remote_dir}/operator.sh"],
         )
         self.assertEqual(sftp.rmdir_calls, [remote_dir])
 
@@ -475,6 +475,31 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir, preserve_on_unknown=True))
         self.assertFalse(sftp.remove_called)
         self.assertFalse(sftp.rmdir_called)
+
+    def test_cleanup_bundle_sftp_preserves_non_root_owned_partial(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-eeeeeeeeeeeeeeee"
+
+        class FakeSFTP:
+            def __init__(self) -> None:
+                self.remove_called = False
+
+            def lstat(self, path: str):
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1000, st_nlink=1)
+
+            def listdir(self, _remote_dir: str):
+                return ["candidate.tar.gz.part"]
+
+            def remove(self, _path: str):
+                self.remove_called = True
+
+            def rmdir(self, _path: str):
+                raise AssertionError("non-root-owned partial must be preserved")
+
+        sftp = FakeSFTP()
+        self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir))
+        self.assertFalse(sftp.remove_called)
 
     def test_cleanup_bundle_sftp_preserves_unexpected_file_without_deleting_anything(self) -> None:
         remote_dir = "/tmp/rosomaha-main-price-release-64ba304-cccccccccccccccc"
@@ -1432,6 +1457,65 @@ Allow: /
             )
         self.assertFalse(success)
         self.assertEqual(payload["status"], "apply_not_switched_cleanup_required")
+        self.assertTrue(payload["bundle_preserved"])
+
+    def test_direct_apply_does_not_claim_success_when_cleanup_fails(self) -> None:
+        baseline = {"baseline_token": "f" * 64, "server_baseline_token": "server-token"}
+        remote_dir = helper.remote_bundle_path(baseline["baseline_token"])
+        receipt = {"new_release": "/var/www/rosomaha/_releases/new"}
+        client = types.SimpleNamespace(close=mock.Mock())
+        shared = (
+            mock.patch.object(helper, "prove_target_commit"),
+            mock.patch.object(helper, "operator_bytes", return_value=b"operator"),
+            mock.patch.object(
+                helper, "load_baseline_with_operator",
+                return_value=(baseline, Path("baseline.json"), Path("candidate.tar.gz"), Path("candidate-manifest.json")),
+            ),
+            mock.patch.object(helper, "connect", return_value=(client, {"login": helper.APPLY_LOGIN})),
+            mock.patch.object(
+                helper, "remote_audit",
+                return_value={"server_baseline_token": "server-token", "account": helper.APPLY_LOGIN,
+                              "mode": "root-audit", "root_readiness": {"valid": True}},
+            ),
+            mock.patch.object(helper, "upload_bundle", return_value=remote_dir),
+            mock.patch.object(helper, "invoke_operator", return_value={"new_release": receipt["new_release"]}),
+            mock.patch.object(helper, "download_apply_receipt", return_value=receipt),
+            mock.patch.object(helper, "validate_apply_receipt"),
+            mock.patch.object(helper, "cleanup_bundle", return_value=False),
+            mock.patch.object(helper, "atomic_json_receipt", return_value=Path("result.json")),
+        )
+        with shared[0], shared[1], shared[2], shared[3], shared[4], shared[5], shared[6], shared[7], shared[8], shared[9], shared[10], mock.patch.object(
+            helper, "public_verify", side_effect=({"stage": "old"}, {"stage": "new"}),
+        ):
+            payload, _report = helper.apply(helper.TARGET_COMMIT, Path("baseline.json"))
+        self.assertEqual(payload["status"], "released_verified_cleanup_required")
+        self.assertTrue(payload["bundle_preserved"])
+
+    def test_direct_rollback_reports_failed_cleanup_truthfully(self) -> None:
+        baseline = {"baseline_token": "1" * 64, "server_baseline_token": "server-token"}
+        remote_dir = helper.remote_bundle_path(baseline["baseline_token"])
+        receipt = {"new_release": "/var/www/rosomaha/_releases/new"}
+        client = types.SimpleNamespace(close=mock.Mock())
+        with mock.patch.object(helper, "prove_target_commit"), mock.patch.object(
+            helper, "operator_bytes", return_value=b"operator",
+        ), mock.patch.object(
+            helper, "load_baseline_with_operator",
+            return_value=(baseline, Path("baseline.json"), Path("candidate.tar.gz"), Path("candidate-manifest.json")),
+        ), mock.patch.object(helper, "connect", return_value=(client, {"login": helper.APPLY_LOGIN})), mock.patch.object(
+            helper, "remote_audit",
+            return_value={"server_baseline_token": "server-token", "account": helper.APPLY_LOGIN,
+                          "mode": "root-audit", "root_readiness": {"valid": True}},
+        ), mock.patch.object(helper, "upload_bundle", return_value=remote_dir), mock.patch.object(
+            helper, "invoke_operator", return_value={"new_release": receipt["new_release"]},
+        ), mock.patch.object(helper, "download_apply_receipt", return_value=receipt), mock.patch.object(
+            helper, "validate_apply_receipt",
+        ), mock.patch.object(
+            helper, "public_verify", side_effect=({"stage": "old"}, RuntimeError("public failure")),
+        ), mock.patch.object(helper, "rollback_and_verify", return_value={"status": "rolled_back_verified"}), mock.patch.object(
+            helper, "cleanup_bundle", return_value=False,
+        ), mock.patch.object(helper, "atomic_json_receipt", return_value=Path("result.json")):
+            payload, _report = helper.apply(helper.TARGET_COMMIT, Path("baseline.json"))
+        self.assertEqual(payload["status"], "verification_failed_rolled_back_cleanup_required")
         self.assertTrue(payload["bundle_preserved"])
 
     def test_candidate_archive_members_are_fixed_under_dist(self) -> None:

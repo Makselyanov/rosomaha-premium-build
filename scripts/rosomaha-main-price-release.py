@@ -1567,9 +1567,11 @@ def upload_bundle(
         if observed != expected:
             raise HelperError("remote bundle file set mismatch")
         return remote_dir
-    except Exception:
+    except Exception as exc:
         if created:
-            cleanup_bundle_sftp(sftp, remote_dir, preserve_on_unknown=True)
+            cleanup_succeeded = cleanup_bundle_sftp(sftp, remote_dir, preserve_on_unknown=True)
+            if not cleanup_succeeded:
+                raise HelperError("bundle upload failed and safe cleanup could not be proven; remote bundle preserved") from exc
         raise
     finally:
         sftp.close()
@@ -1845,16 +1847,6 @@ def recover_ambiguous_apply(
                 raise HelperError("recovery audit does not prove released tree, staging restore, articles and scripts")
             try:
                 verified = public_verify(baseline, stage="new")
-                payload = {
-                    "schema": SCHEMA, "status": "recovered_verified_success", "mode": "apply-recovery", "roles": ROLES,
-                    "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
-                    "public_verify": verified, "attempts": recovery_attempts,
-                }
-                cleanup_succeeded = cleanup_bundle(client, remote_dir)
-                payload["bundle_preserved"] = not cleanup_succeeded
-                if not cleanup_succeeded:
-                    payload["status"] = "recovered_verified_success_cleanup_required"
-                return payload, cleanup_succeeded
             except Exception as verify_error:
                 rolled_back = rollback_and_verify(client, remote_dir, baseline, frozen_operator)
                 payload = {
@@ -1868,6 +1860,16 @@ def recover_ambiguous_apply(
                 if not cleanup_succeeded:
                     payload["status"] = "recovered_rolled_back_cleanup_required"
                 return payload, False
+            payload = {
+                "schema": SCHEMA, "status": "recovered_verified_success", "mode": "apply-recovery", "roles": ROLES,
+                "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
+                "public_verify": verified, "attempts": recovery_attempts,
+            }
+            cleanup_succeeded = cleanup_bundle(client, remote_dir)
+            payload["bundle_preserved"] = not cleanup_succeeded
+            if not cleanup_succeeded:
+                payload["status"] = "recovered_verified_success_cleanup_required"
+            return payload, cleanup_succeeded
         if current == baseline["current_release"]:
             if classification != "original":
                 raise HelperError("recovery audit does not prove the exact original state")
@@ -1936,7 +1938,10 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                     "preflight": preflight, "apply_receipt": receipt,
                     "verification_error_type": type(verify_error).__name__, "rollback": rollback,
                 }
-                cleanup_bundle(client, remote_dir)
+                cleanup_succeeded = cleanup_bundle(client, remote_dir)
+                payload["bundle_preserved"] = not cleanup_succeeded
+                if not cleanup_succeeded:
+                    payload["status"] = "verification_failed_rolled_back_cleanup_required"
                 report = atomic_json_receipt("rosomaha-main-price-release", payload)
                 return payload, report
             payload = {
@@ -1951,7 +1956,10 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
                 "preflight": preflight, "apply_receipt": receipt, "operator": operator_result,
                 "public_verify": postflight,
             }
-            cleanup_bundle(client, remote_dir)
+            cleanup_succeeded = cleanup_bundle(client, remote_dir)
+            payload["bundle_preserved"] = not cleanup_succeeded
+            if not cleanup_succeeded:
+                payload["status"] = "released_verified_cleanup_required"
             report = atomic_json_receipt("rosomaha-main-price-release", payload)
             return payload, report
         except Exception as exc:
@@ -1966,14 +1974,16 @@ def apply(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
     finally:
         client.close()
         if remote_dir is not None and not apply_invoked:
+            cleanup_client: paramiko.SSHClient | None = None
             try:
                 cleanup_client, _ = connect(APPLY_LOGIN)
-                try:
-                    cleanup_bundle(cleanup_client, remote_dir)
-                finally:
+                if not cleanup_bundle(cleanup_client, remote_dir):
+                    raise HelperError("pre-apply bundle cleanup could not be proven; remote bundle preserved")
+            except Exception as cleanup_error:
+                raise HelperError("pre-apply bundle cleanup failed closed") from cleanup_error
+            finally:
+                if cleanup_client is not None:
                     cleanup_client.close()
-            except Exception:
-                pass
 
 
 def recover_from_baseline(commit: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
