@@ -88,6 +88,7 @@ class FakeKernel:
         self.rsync_calls: list[tuple[list[str], dict[str, object]]] = []
         self.collision = False
         self.target_open_is_symlink = False
+        self.replace_error: OSError | None = None
         self.releases_lstat_calls = 0
         self.swap_releases_on_lstat_call: int | None = None
         self.target_stat_calls = 0
@@ -229,8 +230,17 @@ class FakeKernel:
             or self.temporary_entry is None
         ):
             raise AssertionError((source, destination, src_dir_fd, dst_dir_fd))
+        if self.replace_error is not None:
+            raise self.replace_error
         self.current_entry = self.temporary_entry
         self.current_text = self.temporary_text or ""
+        self.temporary_entry = None
+        self.temporary_text = None
+
+    def unlink(self, name: str, *, dir_fd: int) -> None:
+        self.events.append(f"unlink:{dir_fd}:{name}")
+        if dir_fd != self.APP_FD or self.temporary_entry is None or not name.startswith("."):
+            raise AssertionError((name, dir_fd))
         self.temporary_entry = None
         self.temporary_text = None
 
@@ -374,6 +384,16 @@ class ReleaseRootOperatorTests(unittest.TestCase):
             execute(kernel)
         self.assertFalse(any(event.startswith("fchmod:") for event in kernel.events))
         self.assertFalse(any(event.startswith("replace:") for event in kernel.events))
+
+    def test_temporary_link_is_cleaned_if_switch_fails(self) -> None:
+        kernel = FakeKernel()
+        kernel.replace_error = OSError("replace blocked")
+        with self.assertRaisesRegex(OSError, "replace blocked"):
+            execute(kernel)
+        self.assertTrue(any(event.startswith("symlink:") for event in kernel.events))
+        self.assertIn(f"unlink:{kernel.APP_FD}:.{RELEASE_NAME}.current.tmp", kernel.events)
+        self.assertIsNone(kernel.temporary_entry)
+        self.assertEqual(kernel.current_text, "/var/www/rosomaha/_releases/old")
 
     def test_invalid_paths_and_name_are_rejected_before_open(self) -> None:
         namespace = embedded_namespace()

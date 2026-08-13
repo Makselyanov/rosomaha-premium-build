@@ -321,40 +321,50 @@ def guarded_release(
             else:
                 raise RuntimeError("temporary current-link entry already exists")
 
-            os.symlink(str(target), temporary_link, dir_fd=app_fd)
-            temporary_info = os.stat(
-                temporary_link, dir_fd=app_fd, follow_symlinks=False,
-            )
-            if (
-                not stat.S_ISLNK(temporary_info.st_mode)
-                or temporary_info.st_uid != 0
-                or os.readlink(temporary_link, dir_fd=app_fd) != str(target)
-            ):
-                raise RuntimeError("temporary current link is unsafe")
+            temporary_created = False
+            try:
+                os.symlink(str(target), temporary_link, dir_fd=app_fd)
+                temporary_created = True
+                temporary_info = os.stat(
+                    temporary_link, dir_fd=app_fd, follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISLNK(temporary_info.st_mode)
+                    or temporary_info.st_uid != 0
+                    or os.readlink(temporary_link, dir_fd=app_fd) != str(target)
+                ):
+                    raise RuntimeError("temporary current link is unsafe")
 
-            revalidate_before_mutation()
-            if not same_inode(
-                after,
-                os.stat(release_name, dir_fd=releases_fd, follow_symlinks=False),
-            ):
-                raise RuntimeError("release root binding changed before switch")
+                revalidate_before_mutation()
+                if not same_inode(
+                    after,
+                    os.stat(release_name, dir_fd=releases_fd, follow_symlinks=False),
+                ):
+                    raise RuntimeError("release root binding changed before switch")
 
-            os.replace(
-                temporary_link,
-                "current",
-                src_dir_fd=app_fd,
-                dst_dir_fd=app_fd,
-            )
-            os.fsync(app_fd)
-            switched = os.stat("current", dir_fd=app_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISLNK(switched.st_mode)
-                or switched.st_uid != 0
-                or os.readlink("current", dir_fd=app_fd) != str(target)
-                or not same_inode(app_info, os.lstat(app_root))
-                or not same_inode(releases_info, os.lstat(releases_dir))
-            ):
-                raise RuntimeError("current link switch could not be verified")
+                os.replace(
+                    temporary_link,
+                    "current",
+                    src_dir_fd=app_fd,
+                    dst_dir_fd=app_fd,
+                )
+                temporary_created = False
+                os.fsync(app_fd)
+                switched = os.stat("current", dir_fd=app_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISLNK(switched.st_mode)
+                    or switched.st_uid != 0
+                    or os.readlink("current", dir_fd=app_fd) != str(target)
+                    or not same_inode(app_info, os.lstat(app_root))
+                    or not same_inode(releases_info, os.lstat(releases_dir))
+                ):
+                    raise RuntimeError("current link switch could not be verified")
+            finally:
+                if temporary_created:
+                    try:
+                        os.unlink(temporary_link, dir_fd=app_fd)
+                    except FileNotFoundError:
+                        pass
         finally:
             os.close(target_fd)
     finally:
