@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import posixpath
 import stat
@@ -15,6 +17,10 @@ RELEASES = APP / "_releases"
 CURRENT = APP / "current"
 SOURCE = APP / "dist"
 RELEASE_NAME = "20260813-153103-safe"
+OPERATOR_MARKER = '"$APP_ROOT/dist" <<\'PY\'\n'
+CONTENT_GUARD_MARKER = (
+    '/usr/bin/python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<\'PY\'\n'
+)
 
 
 def script_text() -> str:
@@ -23,15 +29,24 @@ def script_text() -> str:
 
 def embedded_namespace() -> dict[str, object]:
     text = script_text()
-    marker = '"$APP_ROOT/dist" <<\'PY\'\n'
-    start = text.index(marker) + len(marker)
+    start = text.index(OPERATOR_MARKER) + len(OPERATOR_MARKER)
     end = text.index("\nPY\n", start)
     source = text[start:end]
-    source = source.split("\nreleased_target = guarded_release(", maxsplit=1)[0]
+    source = source.split(
+        "\nraise SystemExit(release_cli(sys.argv))",
+        maxsplit=1,
+    )[0]
     namespace: dict[str, object] = {}
     exec(compile(source, str(SCRIPT), "exec"), namespace)
     namespace["Path"] = PurePosixPath
     return namespace
+
+
+def content_guard_source() -> str:
+    text = script_text()
+    start = text.index(CONTENT_GUARD_MARKER) + len(CONTENT_GUARD_MARKER)
+    end = text.index("\nPY\n", start)
+    return text[start:end]
 
 
 def inode_stat(
@@ -89,10 +104,15 @@ class FakeKernel:
         self.collision = False
         self.target_open_is_symlink = False
         self.replace_error: OSError | None = None
+        self.replace_current_text_override: str | None = None
+        self.rsync_error: OSError | None = None
+        self.fsync_error_fd: int | None = None
         self.releases_lstat_calls = 0
         self.swap_releases_on_lstat_call: int | None = None
         self.target_stat_calls = 0
         self.swap_target_on_stat_call: int | None = None
+        self.temporary_stat_calls = 0
+        self.swap_temporary_on_stat_call: int | None = None
 
     @staticmethod
     def _copy(info: os.stat_result) -> os.stat_result:
@@ -170,6 +190,12 @@ class FakeKernel:
         if value.startswith(".") and dir_fd == self.APP_FD and not follow_symlinks:
             if self.temporary_entry is None:
                 raise FileNotFoundError(value)
+            self.temporary_stat_calls += 1
+            if (
+                self.swap_temporary_on_stat_call is not None
+                and self.temporary_stat_calls >= self.swap_temporary_on_stat_call
+            ):
+                return symlink_stat(ino=999)
             return self._copy(self.temporary_entry)
         raise AssertionError((value, dir_fd, follow_symlinks))
 
@@ -193,6 +219,8 @@ class FakeKernel:
 
     def fsync(self, fd: int) -> None:
         self.events.append(f"fsync:{fd}")
+        if fd == self.fsync_error_fd:
+            raise OSError("fsync blocked")
 
     def symlink(self, target: str, name: str, *, dir_fd: int) -> None:
         self.events.append(f"symlink:{dir_fd}:{name}:{target}")
@@ -233,7 +261,11 @@ class FakeKernel:
         if self.replace_error is not None:
             raise self.replace_error
         self.current_entry = self.temporary_entry
-        self.current_text = self.temporary_text or ""
+        self.current_text = (
+            self.replace_current_text_override
+            if self.replace_current_text_override is not None
+            else self.temporary_text or ""
+        )
         self.temporary_entry = None
         self.temporary_text = None
 
@@ -250,6 +282,8 @@ class FakeKernel:
     def run_rsync(self, args: list[str], **kwargs: object) -> None:
         self.events.append("rsync")
         self.rsync_calls.append((args, kwargs))
+        if self.rsync_error is not None:
+            raise self.rsync_error
         info = self.fd_stats[self.TARGET_FD]
         copied = directory_stat(self.post_rsync_mode, uid=info.st_uid, ino=info.st_ino)
         self.fd_stats[self.TARGET_FD] = copied
@@ -270,10 +304,33 @@ def execute(kernel: FakeKernel) -> PurePosixPath:
     )
 
 
+def execute_cli(kernel: FakeKernel) -> tuple[int, str, str]:
+    namespace = embedded_namespace()
+    namespace["os"] = kernel
+    guarded_release = namespace["guarded_release"]
+    namespace["guarded_release"] = lambda *args: guarded_release(
+        *args,
+        run_rsync=kernel.run_rsync,
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    argv = [
+        "server-release.sh",
+        str(APP),
+        str(RELEASES),
+        str(CURRENT),
+        RELEASE_NAME,
+        str(SOURCE),
+    ]
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        status = namespace["release_cli"](argv)
+    return status, stdout.getvalue(), stderr.getvalue()
+
+
 class ReleaseRootOperatorTests(unittest.TestCase):
     def test_shell_has_no_pre_operator_release_write_or_path_based_rsync(self) -> None:
         text = script_text()
-        operator = text.index('/usr/bin/python3 - ')
+        operator = text.index(OPERATOR_MARKER) - len('/usr/bin/python3 - \\\n  ')
         content_guard = text.index("Content guard passed")
         self.assertLess(content_guard, operator)
         prefix = text[:operator]
@@ -282,7 +339,18 @@ class ReleaseRootOperatorTests(unittest.TestCase):
         self.assertNotIn('ln -sfn', text)
         self.assertNotIn("chmod -R", text)
         self.assertNotIn("os.chmod", text)
+        self.assertNotIn("shutil.rmtree", text)
+        self.assertNotIn("rm -rf", text)
         self.assertIn('f"/proc/self/fd/{target_fd}"', text)
+
+    def test_content_guard_uses_exact_python_and_no_pep585_annotations(self) -> None:
+        text = script_text()
+        source = content_guard_source()
+        self.assertIn(CONTENT_GUARD_MARKER, text)
+        self.assertNotIn("\n  python3 - ", text)
+        self.assertNotIn("set[", source)
+        self.assertNotIn("list[", source)
+        compile(source, str(SCRIPT), "exec")
 
     def test_label_is_bounded_before_release_name_is_built(self) -> None:
         text = script_text()
@@ -386,9 +454,47 @@ class ReleaseRootOperatorTests(unittest.TestCase):
 
         symlink = FakeKernel()
         symlink.target_open_is_symlink = True
-        with self.assertRaisesRegex(OSError, "O_NOFOLLOW"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=not_switched.*cause=O_NOFOLLOW rejected target symlink",
+        ):
             execute(symlink)
         self.assertEqual(symlink.rsync_calls, [])
+        self.assertEqual(symlink.current_text, "/var/www/rosomaha/_releases/old")
+
+    def test_pre_copy_failure_preserves_partial_target_and_forbids_retry(self) -> None:
+        kernel = FakeKernel()
+        kernel.swap_target_on_stat_call = 2
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=not_switched.*partial_target=preserved; "
+            "automatic_retry=forbidden",
+        ) as caught:
+            execute(kernel)
+        error = caught.exception
+        self.assertEqual(error.state, "not_switched")
+        self.assertEqual(error.target, RELEASES / RELEASE_NAME)
+        self.assertIsNotNone(kernel.target_named)
+        self.assertEqual(kernel.current_text, "/var/www/rosomaha/_releases/old")
+        self.assertEqual(kernel.rsync_calls, [])
+        self.assertFalse(any(event.startswith("replace:") for event in kernel.events))
+
+    def test_rsync_failure_reports_not_switched_and_preserves_target(self) -> None:
+        kernel = FakeKernel()
+        kernel.rsync_error = OSError("rsync blocked")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=not_switched.*cause=rsync blocked.*"
+            "automatic_retry=forbidden",
+        ) as caught:
+            execute(kernel)
+        error = caught.exception
+        self.assertEqual(error.state, "not_switched")
+        self.assertEqual(error.temporary_cleanup_status, "not_created")
+        self.assertIsNotNone(kernel.target_named)
+        self.assertEqual(kernel.current_text, "/var/www/rosomaha/_releases/old")
+        self.assertEqual(len(kernel.rsync_calls), 1)
+        self.assertFalse(any(event.startswith("replace:") for event in kernel.events))
 
     def test_target_inode_swap_before_copy_fails_closed(self) -> None:
         kernel = FakeKernel()
@@ -439,12 +545,75 @@ class ReleaseRootOperatorTests(unittest.TestCase):
     def test_temporary_link_is_cleaned_if_switch_fails(self) -> None:
         kernel = FakeKernel()
         kernel.replace_error = OSError("replace blocked")
-        with self.assertRaisesRegex(OSError, "replace blocked"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=not_switched.*temporary_link_cleanup=removed.*"
+            "cause=replace blocked",
+        ) as caught:
             execute(kernel)
+        self.assertEqual(caught.exception.state, "not_switched")
+        self.assertEqual(caught.exception.temporary_cleanup_status, "removed")
         self.assertTrue(any(event.startswith("symlink:") for event in kernel.events))
         self.assertIn(f"unlink:{kernel.APP_FD}:.{RELEASE_NAME}.current.tmp", kernel.events)
         self.assertIsNone(kernel.temporary_entry)
         self.assertEqual(kernel.current_text, "/var/www/rosomaha/_releases/old")
+
+    def test_unverified_temporary_link_is_preserved_and_reported(self) -> None:
+        kernel = FakeKernel()
+        kernel.replace_error = OSError("replace blocked")
+        kernel.swap_temporary_on_stat_call = 2
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=not_switched.*"
+            "temporary_link_cleanup=preserved_unverified",
+        ) as caught:
+            execute(kernel)
+        self.assertEqual(
+            caught.exception.temporary_cleanup_status,
+            "preserved_unverified",
+        )
+        self.assertIsNotNone(kernel.temporary_entry)
+        self.assertFalse(any(event.startswith("unlink:") for event in kernel.events))
+        self.assertEqual(kernel.current_text, "/var/www/rosomaha/_releases/old")
+
+    def test_post_switch_fsync_failure_requires_live_verification_or_rollback(self) -> None:
+        kernel = FakeKernel()
+        kernel.fsync_error_fd = kernel.APP_FD
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=switched_to_new_release.*"
+            "current_may_already_be_new=true.*recovery_required=true",
+        ) as caught:
+            execute(kernel)
+        error = caught.exception
+        self.assertEqual(error.state, "switched_to_new_release")
+        self.assertEqual(error.temporary_cleanup_status, "consumed_by_switch")
+        self.assertEqual(kernel.current_text, str(RELEASES / RELEASE_NAME))
+        self.assertTrue(any(event.startswith("replace:") for event in kernel.events))
+        self.assertNotIn("Released:", str(error))
+
+        cli_kernel = FakeKernel()
+        cli_kernel.fsync_error_fd = cli_kernel.APP_FD
+        status, stdout, stderr = execute_cli(cli_kernel)
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout, "")
+        self.assertNotIn("Released:", stdout)
+        self.assertIn("Release failed: release_state=switched_to_new_release", stderr)
+        self.assertIn("recovery_required=true", stderr)
+
+    def test_post_switch_verification_failure_never_returns_success(self) -> None:
+        kernel = FakeKernel()
+        kernel.replace_current_text_override = str(RELEASES / "unexpected")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "release_state=switched_to_new_release.*"
+            "cause=current link switch could not be verified.*"
+            "required_action=verify_current_and_live_site_then_keep_or_rollback",
+        ) as caught:
+            execute(kernel)
+        self.assertEqual(caught.exception.state, "switched_to_new_release")
+        self.assertEqual(kernel.current_text, str(RELEASES / "unexpected"))
+        self.assertTrue(any(event.startswith("replace:") for event in kernel.events))
 
     def test_invalid_paths_and_name_are_rejected_before_open(self) -> None:
         namespace = embedded_namespace()

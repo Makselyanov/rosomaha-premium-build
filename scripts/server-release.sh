@@ -42,7 +42,7 @@ if [[ -f "$CONTENT_SOURCE" ]]; then
     exit 1
   fi
 
-  python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<'PY'
+  /usr/bin/python3 - "$CONTENT_SOURCE" "$CONTENT_CANDIDATE" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -51,12 +51,12 @@ source_path = Path(sys.argv[1])
 candidate_path = Path(sys.argv[2])
 
 
-def load_slugs(path: Path) -> set[str]:
+def load_slugs(path):
     payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, list):
         raise ValueError(f"{path} must contain a JSON array")
 
-    slugs: list[str] = []
+    slugs = []
     for index, item in enumerate(payload):
         if not isinstance(item, dict) or not isinstance(item.get("slug"), str) or not item["slug"].strip():
             raise ValueError(f"{path}: item {index} has no valid slug")
@@ -143,6 +143,32 @@ def require_safe_application_root(info: os.stat_result) -> None:
         raise RuntimeError(f"{label} is group writable without sticky bit")
 
 
+class ReleaseStateError(RuntimeError):
+    def __init__(self, state, target, temporary_cleanup_status, cause):
+        self.state = state
+        self.target = target
+        self.temporary_cleanup_status = temporary_cleanup_status
+        self.cause = cause
+
+        common = (
+            f"release_state={state}; target={target}; "
+            f"temporary_link_cleanup={temporary_cleanup_status}; "
+            f"cause_type={type(cause).__name__}; cause={cause}"
+        )
+        if state == "switched_to_new_release":
+            message = (
+                f"{common}; current_may_already_be_new=true; "
+                "recovery_required=true; "
+                "required_action=verify_current_and_live_site_then_keep_or_rollback"
+            )
+        else:
+            message = (
+                f"{common}; partial_target=preserved; automatic_retry=forbidden; "
+                "required_action=inspect_exact_target_before_manual_cleanup_or_new_label"
+            )
+        super().__init__(message)
+
+
 def guarded_release(
     app_root: Path,
     releases_dir: Path,
@@ -172,6 +198,9 @@ def guarded_release(
     releases_fd = None
     source_fd = None
     target_fd = None
+    target_created = False
+    current_replaced = False
+    temporary_cleanup_status = "not_created"
     try:
         app_info = os.fstat(app_fd)
         require_safe_application_root(app_info)
@@ -235,6 +264,7 @@ def guarded_release(
         # This is deliberately the first filesystem mutation in the operator.
         revalidate_before_mutation()
         os.mkdir(release_name, mode=0o700, dir_fd=releases_fd)
+        target_created = True
         target_fd = os.open(release_name, flags, dir_fd=releases_fd)
         try:
             created = os.fstat(target_fd)
@@ -334,9 +364,11 @@ def guarded_release(
                 raise RuntimeError("temporary current-link entry already exists")
 
             temporary_created = False
+            temporary_info = None
             try:
                 os.symlink(str(target), temporary_link, dir_fd=app_fd)
                 temporary_created = True
+                temporary_cleanup_status = "pending"
                 temporary_info = os.stat(
                     temporary_link, dir_fd=app_fd, follow_symlinks=False,
                 )
@@ -360,7 +392,9 @@ def guarded_release(
                     src_dir_fd=app_fd,
                     dst_dir_fd=app_fd,
                 )
+                current_replaced = True
                 temporary_created = False
+                temporary_cleanup_status = "consumed_by_switch"
                 os.fsync(app_fd)
                 switched = os.stat("current", dir_fd=app_fd, follow_symlinks=False)
                 if (
@@ -374,11 +408,56 @@ def guarded_release(
             finally:
                 if temporary_created:
                     try:
-                        os.unlink(temporary_link, dir_fd=app_fd)
+                        cleanup_info = os.stat(
+                            temporary_link,
+                            dir_fd=app_fd,
+                            follow_symlinks=False,
+                        )
                     except FileNotFoundError:
-                        pass
+                        temporary_cleanup_status = "already_absent"
+                    except OSError:
+                        temporary_cleanup_status = "preserved_cleanup_check_failed"
+                    else:
+                        cleanup_safe = (
+                            temporary_info is not None
+                            and stat.S_ISLNK(cleanup_info.st_mode)
+                            and cleanup_info.st_uid == 0
+                            and same_inode(cleanup_info, temporary_info)
+                        )
+                        if cleanup_safe:
+                            try:
+                                cleanup_safe = (
+                                    os.readlink(temporary_link, dir_fd=app_fd)
+                                    == str(target)
+                                )
+                            except OSError:
+                                cleanup_safe = False
+                                temporary_cleanup_status = (
+                                    "preserved_cleanup_check_failed"
+                                )
+                        if cleanup_safe:
+                            try:
+                                os.unlink(temporary_link, dir_fd=app_fd)
+                            except OSError:
+                                temporary_cleanup_status = "preserved_cleanup_failed"
+                            else:
+                                temporary_cleanup_status = "removed"
+                        elif temporary_cleanup_status == "pending":
+                            temporary_cleanup_status = "preserved_unverified"
         finally:
             os.close(target_fd)
+    except Exception as exc:
+        if target_created:
+            state = (
+                "switched_to_new_release" if current_replaced else "not_switched"
+            )
+            raise ReleaseStateError(
+                state,
+                target,
+                temporary_cleanup_status,
+                exc,
+            ) from exc
+        raise
     finally:
         if source_fd is not None:
             os.close(source_fd)
@@ -389,13 +468,22 @@ def guarded_release(
     return target
 
 
-released_target = guarded_release(
-    Path(sys.argv[1]),
-    Path(sys.argv[2]),
-    Path(sys.argv[3]),
-    sys.argv[4],
-    Path(sys.argv[5]),
-)
-print(f"Released: {released_target}")
-print(f"Current: {released_target}")
+def release_cli(argv):
+    try:
+        released_target = guarded_release(
+            Path(argv[1]),
+            Path(argv[2]),
+            Path(argv[3]),
+            argv[4],
+            Path(argv[5]),
+        )
+    except Exception as exc:
+        print(f"Release failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Released: {released_target}")
+    print(f"Current: {released_target}")
+    return 0
+
+
+raise SystemExit(release_cli(sys.argv))
 PY
