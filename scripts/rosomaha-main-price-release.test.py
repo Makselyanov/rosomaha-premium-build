@@ -330,6 +330,19 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertIn('baseline.get("operator_sha256") != sha256_bytes(frozen_operator)', upload)
         self.assertNotIn("OPERATOR_PATH", upload)
 
+    def test_apply_operator_timeout_is_1200_and_rollback_remains_360(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-aaaaaaaaaaaaaaaa"
+        client = object()
+        with mock.patch.object(helper, "run_remote", return_value={
+            "exit_code": 0, "stdout": '{"status":"released"}\n', "stderr": "",
+        }) as run:
+            helper.invoke_operator(client, "apply", remote_dir, b"operator")
+            self.assertEqual(run.call_args.args[-1], 1_200)
+            self.assertEqual(helper.APPLY_TIMEOUT_SECONDS, 1_200)
+            run.reset_mock()
+            helper.invoke_operator(client, "rollback", remote_dir, b"operator")
+            self.assertEqual(run.call_args.args[-1], 360)
+
     def test_apply_aborts_if_frozen_operator_hash_differs_from_baseline(self) -> None:
         payload = {
             "schema": helper.SCHEMA, "status": "ready", "account": helper.AUDIT_LOGIN,

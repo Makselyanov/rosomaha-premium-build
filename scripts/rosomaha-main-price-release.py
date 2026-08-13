@@ -69,6 +69,7 @@ MAX_DELTA_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_DELTA_FILES = 1_000
 MAX_CANDIDATE_FILES = 20_000
 MAX_OPERATOR_BYTES = 512 * 1024
+APPLY_TIMEOUT_SECONDS = 1_200
 
 ARTICLES_CZ_ALLOWLIST = (
     "avgustovskiy-marshrut-na-rosomahe-chek-list-osmotra-pered-vyezdom.ts",
@@ -1734,7 +1735,8 @@ def invoke_operator(client: paramiko.SSHClient, mode: str, remote_dir: str, froz
     expected = remote_bundle_path(remote_dir.rsplit("-", 1)[-1].ljust(64, "0"))
     if not remote_dir.startswith(expected.rsplit("-", 1)[0] + "-") or not re.fullmatch(rf"/tmp/rosomaha-main-price-release-{TARGET_COMMIT[:7]}-[0-9a-f]{{16}}", remote_dir):
         raise HelperError("invalid fixed bundle invocation path")
-    result = run_remote(client, f"/bin/bash -s -- {mode} {remote_dir}", frozen_operator, 360)
+    timeout_seconds = APPLY_TIMEOUT_SECONDS if mode == "apply" else 360
+    result = run_remote(client, f"/bin/bash -s -- {mode} {remote_dir}", frozen_operator, timeout_seconds)
     return parse_operator_json(result)
 
 
