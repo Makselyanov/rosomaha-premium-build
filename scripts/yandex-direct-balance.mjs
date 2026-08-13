@@ -21,7 +21,7 @@ export const V5_CLIENT_FIELDS = Object.freeze([
   "OverdraftSumAvailable",
 ]);
 export const OWN_FUNDS_CLI_MESSAGE =
-  "Собственный остаток недоступен: API показал общий баланс кабинета, но не разделил его на внесённые владельцем деньги и отсрочку/кредит; это не ноль, но без подтверждённой суммы нельзя безопасно продолжать или увеличивать расход. Овердрафт не учитывается.";
+  "Собственный остаток недоступен: API не показал, сколько собственных денег реально осталось на рекламном счёте; это не означает нулевой баланс, но без подтверждённой суммы нельзя безопасно продолжать или увеличивать расход. Овердрафт не учитывать никогда.";
 
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
@@ -30,9 +30,26 @@ export const ENV_PATH = path.join(PROJECT_ROOT, ".env.seo.local");
 export const REPORT_DIR = path.join(PROJECT_ROOT, "marketing-audits", "yandex-direct-balance");
 export const REGISTRY_PATH = path.resolve(PROJECT_ROOT, "..", "accounts", "yandex-accounts.yaml");
 const DEFAULT_TIMEOUT_MS = 10_000;
-const MAX_RESPONSE_BYTES = 1_048_576;
+export const MAX_RESPONSE_BYTES = 1_048_576;
 const OWN_FUNDS_REASON =
   "API Яндекс Директа показывает общий баланс счёта, сумму для перевода, овердрафт и ожидающие бонусы отдельными полями, но не показывает, какая часть общего баланса является собственными деньгами владельца. Поэтому собственный остаток по этим методам доказать нельзя; овердрафт и бонусы к нему не прибавляются.";
+const OWN_FUNDS_OFFICIAL_DOCUMENTATION = Object.freeze([
+  Object.freeze({
+    field: "Amount и AmountAvailableForTransfer",
+    url: "https://yandex.com/dev/direct/doc/dg-v4/en/live/AccountManagement_Get",
+    boundary: "Документация описывает общий баланс и доступную для перевода сумму, но не состав денег по источникам.",
+  }),
+  Object.freeze({
+    field: "OverdraftSumAvailable",
+    url: "https://yandex.com/dev/direct/doc/en/clients/get",
+    boundary: "Документация определяет поле как доступный лимит овердрафта, а не текущий долг или использованный овердрафт.",
+  }),
+  Object.freeze({
+    field: "отсроченный платёж",
+    url: "https://yandex.ru/support/direct/ru/payments/deferred-payment",
+    boundary: "Справка подтверждает, что кредитные средства могут быть зачислены на общий счёт и потому положительный общий баланс сам по себе не доказывает собственные деньги.",
+  }),
+]);
 
 function yamlRegistrySyntaxError(message) {
   throw new Error(`Некорректный YAML registry: ${message}`);
@@ -396,25 +413,33 @@ export function resolveProjectRoute({
   };
 }
 
-function parseEnvFile(filePath) {
-  const values = {};
-  if (!fs.existsSync(filePath)) return values;
-
-  for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/u)) {
+export function parseProjectTokenEnv(sourceText) {
+  let token = null;
+  let tokenKeySeen = false;
+  for (const rawLine of String(sourceText ?? "").split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const separatorIndex = line.indexOf("=");
     if (separatorIndex === -1) continue;
     const key = line.slice(0, separatorIndex).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) continue;
-    values[key] = line.slice(separatorIndex + 1).trim();
+    if (key !== "YANDEX_OAUTH_TOKEN") continue;
+    if (tokenKeySeen) {
+      throw new Error("В проектном env-файле обнаружен повторяющийся ключ YANDEX_OAUTH_TOKEN; загрузка остановлена.");
+    }
+    tokenKeySeen = true;
+    const candidate = line.slice(separatorIndex + 1).trim();
+    if (!/^[A-Za-z0-9._~-]+$/u.test(candidate)) {
+      throw new Error("Значение YANDEX_OAUTH_TOKEN пустое или имеет небезопасный формат; загрузка остановлена.");
+    }
+    token = candidate;
   }
-
-  return values;
+  return token;
 }
 
 export function loadProjectToken(filePath = ENV_PATH) {
-  const token = parseEnvFile(filePath).YANDEX_OAUTH_TOKEN?.trim();
+  const token = fs.existsSync(filePath)
+    ? parseProjectTokenEnv(fs.readFileSync(filePath, "utf8"))
+    : null;
   if (!token) {
     throw new Error(`В проектном env-файле ${filePath} отсутствует YANDEX_OAUTH_TOKEN.`);
   }
@@ -541,10 +566,49 @@ async function fetchRequest(url, requestOptions, fetchImpl, timeoutMs) {
       fetchImpl(url, { ...requestOptions, signal: controller.signal }),
       timeout,
     ]);
+    const declaredLength = getHeader(response.headers, "Content-Length");
+    if (/^\d+$/u.test(String(declaredLength ?? "")) && BigInt(declaredLength) > BigInt(MAX_RESPONSE_BYTES)) {
+      controller.abort();
+      try {
+        await response.body?.cancel?.("response size limit exceeded");
+      } catch {
+        // Abort is already set; cancellation errors must not prevent the bounded fallback.
+      }
+      throw new Error(`fetch response exceeds ${MAX_RESPONSE_BYTES} bytes`);
+    }
+
+    let text;
+    if (response.body && typeof response.body.getReader === "function") {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let responseBytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = Buffer.from(value);
+          responseBytes += chunk.length;
+          if (responseBytes > MAX_RESPONSE_BYTES) {
+            await reader.cancel("response size limit exceeded");
+            controller.abort();
+            throw new Error(`fetch response exceeds ${MAX_RESPONSE_BYTES} bytes`);
+          }
+          chunks.push(chunk);
+        }
+      } finally {
+        reader.releaseLock?.();
+      }
+      text = Buffer.concat(chunks, responseBytes).toString("utf8");
+    } else {
+      text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) {
+        throw new Error(`fetch response exceeds ${MAX_RESPONSE_BYTES} bytes`);
+      }
+    }
     return {
       ok: response.ok,
       status: response.status,
-      text: await response.text(),
+      text,
       headers: response.headers,
     };
   } finally {
@@ -857,6 +921,41 @@ function pendingBonus(client) {
   };
 }
 
+function ownFundsUnavailable(currency) {
+  return {
+    status: "not_provable_via_direct_api",
+    amount: null,
+    currency,
+    usableAsOwnFundsProof: false,
+    ownershipComposition: "unknown",
+    reason: OWN_FUNDS_REASON,
+    proofBoundary: {
+      directApiCanProve: [
+        "текущий общий баланс счёта",
+        "сумму, доступную для перевода",
+        "доступный лимит овердрафта",
+        "ожидающие бонусы, если поле возвращено",
+      ],
+      directApiCannotProve: "Какая часть общего баланса внесена владельцем, получена как отсрочка или кредит, уже использована из овердрафта либо относится к бонусам.",
+      officialDocumentation: OWN_FUNDS_OFFICIAL_DOCUMENTATION.map((entry) => ({ ...entry })),
+    },
+    requiredExternalEvidence: {
+      status: "required",
+      source: "официальное подтверждение биллинга или поддержки Яндекса для конкретного рекламного счёта",
+      accountLogin: EXACT_LOGIN,
+      mustBeCurrentAndDated: true,
+      mustSeparate: [
+        "собственные внесённые деньги",
+        "отсрочку и кредит",
+        "текущий долг и использованный овердрафт",
+        "доступный, но не использованный лимит овердрафта",
+        "бонусы",
+      ],
+      safetyRule: OWN_FUNDS_CLI_MESSAGE,
+    },
+  };
+}
+
 export function buildBalanceReport({ v5Response, live4Response, generatedAt, routeEvidence = null }) {
   const client = oneExactClient(v5Response.data);
   const account = oneExactAccount(live4Response.data);
@@ -866,7 +965,7 @@ export function buildBalanceReport({ v5Response, live4Response, generatedAt, rou
 
   const currency = client.Currency;
   return {
-    receiptVersion: 1,
+    receiptVersion: 2,
     generatedAt,
     status: "ok",
     provider: "Yandex Direct API",
@@ -874,7 +973,7 @@ export function buildBalanceReport({ v5Response, live4Response, generatedAt, rou
     accountIdentity: {
       login: EXACT_LOGIN,
       type: "CLIENT",
-      agency: "absent",
+      agency: Object.hasOwn(account, "AgencyName") ? "absent" : "not_returned_by_api",
       sharedAccountEnabled: true,
       currency,
       vatRate: client.VatRate ?? null,
@@ -912,15 +1011,10 @@ export function buildBalanceReport({ v5Response, live4Response, generatedAt, rou
       client.OverdraftSumAvailable,
       currency,
       "v5 Clients.get OverdraftSumAvailable",
-      "Доступный лимит овердрафта. Он никогда не считается деньгами владельца и не используется в бюджете.",
+      "Доступная кредитная возможность (лимит). Это не текущий долг, не уже использованный овердрафт и не деньги владельца; в бюджете не используется.",
     ),
     pendingBonus: pendingBonus(client),
-    ownFunds: {
-      status: "not_provable_via_direct_api",
-      amount: null,
-      currency,
-      reason: OWN_FUNDS_REASON,
-    },
+    ownFunds: ownFundsUnavailable(currency),
     arithmeticPolicy: {
       combinedTotalCalculated: false,
       overdraftCountedAsOwnFunds: false,
@@ -1004,18 +1098,13 @@ export function saveBalanceArtifacts(reportDir, report, secrets = []) {
 
 function failureReport(generatedAt, error, token, routeEvidence = null) {
   return {
-    receiptVersion: 1,
+    receiptVersion: 2,
     generatedAt,
     status: "source_unavailable",
     provider: "Yandex Direct API",
     routingEvidence: routeEvidence,
     accountIdentity: { login: EXACT_LOGIN },
-    ownFunds: {
-      status: "not_provable_via_direct_api",
-      amount: null,
-      currency: null,
-      reason: OWN_FUNDS_REASON,
-    },
+    ownFunds: ownFundsUnavailable(null),
     error: redactSensitive(error?.message || error, token ? [token] : []),
   };
 }

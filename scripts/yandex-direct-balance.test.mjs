@@ -8,6 +8,7 @@ import {
   ENV_PATH,
   EXACT_LOGIN,
   LIVE4_ACCOUNT_URL,
+  MAX_RESPONSE_BYTES,
   OWN_FUNDS_CLI_MESSAGE,
   ROUTE_ACCOUNT_SLUG,
   ROUTE_PROJECT,
@@ -19,8 +20,10 @@ import {
   buildBalanceReport,
   buildReadOnlyRequests,
   executeBalanceAudit,
+  loadProjectToken,
   microsToDecimal,
   normalizeLegacyDecimal,
+  parseProjectTokenEnv,
   parseYandexAccountsRegistry,
   resolveProjectRoute,
   runCli,
@@ -29,13 +32,38 @@ import {
 } from "./yandex-direct-balance.mjs";
 
 const TOKEN = "test-super-secret-token";
+const SECOND_TOKEN = "second-secret-token";
 const GENERATED_AT = "2026-08-13T12:34:56.789Z";
 
 test("owner-facing own-funds warning is fixed and unambiguous", () => {
   assert.equal(
     OWN_FUNDS_CLI_MESSAGE,
-    "Собственный остаток недоступен: API показал общий баланс кабинета, но не разделил его на внесённые владельцем деньги и отсрочку/кредит; это не ноль, но без подтверждённой суммы нельзя безопасно продолжать или увеличивать расход. Овердрафт не учитывается.",
+    "Собственный остаток недоступен: API не показал, сколько собственных денег реально осталось на рекламном счёте; это не означает нулевой баланс, но без подтверждённой суммы нельзя безопасно продолжать или увеличивать расход. Овердрафт не учитывать никогда.",
   );
+});
+
+test("env parser extracts only the exact Yandex OAuth token key", (t) => {
+  const envPath = path.join(temporaryDir(t, "rosomaha-token-env-"), ".env.seo.local");
+  const source = `OTHER_SECRET=must-not-be-parsed
+YANDEX_OAUTH_TOKEN_SUFFIX=wrong-token
+YANDEX_OAUTH_TOKEN=${TOKEN}
+ANOTHER_SECRET=also-must-not-be-parsed
+`;
+  fs.writeFileSync(envPath, source, "utf8");
+
+  assert.equal(parseProjectTokenEnv(source), TOKEN);
+  assert.equal(loadProjectToken(envPath), TOKEN);
+  assert.equal(parseProjectTokenEnv("OTHER_YANDEX_OAUTH_TOKEN=wrong-token"), null);
+  assert.throws(
+    () => parseProjectTokenEnv(`YANDEX_OAUTH_TOKEN=${TOKEN}\nYANDEX_OAUTH_TOKEN=${TOKEN}`),
+    (error) => /повторяющийся ключ YANDEX_OAUTH_TOKEN/u.test(error.message) && !error.message.includes(TOKEN),
+  );
+  for (const unsafeValue of ["", `\"${TOKEN}\"`, `'${TOKEN}'`, `${TOKEN} # comment`]) {
+    assert.throws(
+      () => parseProjectTokenEnv(`YANDEX_OAUTH_TOKEN=${unsafeValue}`),
+      (error) => /небезопасный формат/u.test(error.message) && !error.message.includes(TOKEN),
+    );
+  }
 });
 
 function client(overrides = {}) {
@@ -429,6 +457,7 @@ test("execute sends both requests without putting the token in the report", asyn
   assert.equal(calls.length, 2);
   assert.equal(result.accountIdentity.login, EXACT_LOGIN);
   assert.equal(result.routingEvidence.accountSlug, ROUTE_ACCOUNT_SLUG);
+  assert.equal(result.receiptVersion, 2);
   assert.equal(JSON.stringify(result).includes(TOKEN), false);
 });
 
@@ -473,7 +502,7 @@ test("identity gate rejects a wrong login and non-direct client types", () => {
   delete noAgencyField.AgencyName;
   assert.equal(
     report({ live4Response: live4Response([noAgencyField]) }).accountIdentity.agency,
-    "absent",
+    "not_returned_by_api",
   );
 });
 
@@ -552,6 +581,13 @@ test("report separates all provider amounts and never calculates own funds", () 
   assert.equal(result.pendingBonus.withoutVat, "2.5");
   assert.deepEqual(result.ownFunds.amount, null);
   assert.equal(result.ownFunds.status, "not_provable_via_direct_api");
+  assert.equal(result.ownFunds.usableAsOwnFundsProof, false);
+  assert.equal(result.ownFunds.ownershipComposition, "unknown");
+  assert.equal(result.ownFunds.proofBoundary.officialDocumentation.length, 3);
+  assert.equal(result.ownFunds.requiredExternalEvidence.accountLogin, EXACT_LOGIN);
+  assert.equal(result.ownFunds.requiredExternalEvidence.safetyRule, OWN_FUNDS_CLI_MESSAGE);
+  assert.equal(result.overdraftLimitAvailable.interpretation.includes("не текущий долг"), true);
+  assert.equal(result.overdraftLimitAvailable.interpretation.includes("не уже использованный овердрафт"), true);
   assert.equal(result.arithmeticPolicy.combinedTotalCalculated, false);
   assert.equal(JSON.stringify(result).includes("\"total\""), false);
   assert.equal(result.ownFunds.reason.includes("не прибавляются"), true);
@@ -605,6 +641,78 @@ test("fetch transport failure and timeout use bounded in-process HTTPS fallback"
   );
   assert.equal(timedOutFetch.ok, true);
   assert.equal(calls.length, 2);
+});
+
+test("fetch response body is limited to one MiB before JSON parsing", async () => {
+  let nativeCalls = 0;
+  const result = await safeJsonRequest(
+    V5_CLIENTS_URL,
+    { method: "POST", headers: {}, body: "{}" },
+    {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(MAX_RESPONSE_BYTES + 1));
+            controller.close();
+          },
+        }),
+        headers: {},
+      }),
+      nativeRequest: async () => {
+        nativeCalls += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: "{}",
+          headers: { RequestId: "bounded-fallback" },
+        };
+      },
+    },
+  );
+
+  assert.equal(nativeCalls, 1);
+  assert.equal(result.providerMeta.requestId, "bounded-fallback");
+});
+
+test("oversized declared fetch response is aborted and cancelled before fallback", async () => {
+  let fetchSignal = null;
+  let bodyCancelled = false;
+  let nativeObservedCleanup = false;
+  const result = await safeJsonRequest(
+    V5_CLIENTS_URL,
+    { method: "POST", headers: {}, body: "{}" },
+    {
+      fetchImpl: async (_url, options) => {
+        fetchSignal = options.signal;
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            async cancel() {
+              bodyCancelled = true;
+            },
+          },
+          headers: { "Content-Length": String(MAX_RESPONSE_BYTES + 1) },
+        };
+      },
+      nativeRequest: async () => {
+        nativeObservedCleanup = fetchSignal?.aborted === true && bodyCancelled;
+        return {
+          ok: true,
+          status: 200,
+          text: "{}",
+          headers: { RequestId: "declared-length-fallback" },
+        };
+      },
+    },
+  );
+
+  assert.equal(fetchSignal.aborted, true);
+  assert.equal(bodyCancelled, true);
+  assert.equal(nativeObservedCleanup, true);
+  assert.equal(result.providerMeta.requestId, "declared-length-fallback");
 });
 
 test("provider and transport errors redact the OAuth token and unknown logins", async () => {
@@ -734,6 +842,92 @@ test("cli blocks before token load and API calls when route does not pass", asyn
   assert.equal(loadTokenCalls, 0);
   assert.equal(apiCalls, 0);
   assert.equal(savedReport.status, "source_unavailable");
+  assert.equal(savedReport.receiptVersion, 2);
+});
+
+test("duplicate token blocks CLI before API and never leaks either value", async (t) => {
+  const previousExitCode = process.exitCode;
+  const projectRoot = temporaryDir(t, "rosomaha-duplicate-token-cli-");
+  const apiEnvPath = path.join(projectRoot, ".env.seo.local");
+  fs.writeFileSync(
+    apiEnvPath,
+    `YANDEX_OAUTH_TOKEN=${TOKEN}\nYANDEX_OAUTH_TOKEN=${SECOND_TOKEN}\n`,
+    "utf8",
+  );
+  const route = {
+    ...verifiedRoute(projectRoot),
+    expectedApiEnv: apiEnvPath,
+    apiEnvPath,
+  };
+  let apiCalls = 0;
+  let savedReport = null;
+  const logs = [];
+
+  try {
+    const result = await runCli([], {
+      resolveRoute: () => route,
+      executeAudit: async () => {
+        apiCalls += 1;
+        return report();
+      },
+      saveArtifacts: (_reportDir, currentReport) => {
+        savedReport = currentReport;
+        return { receipt: "C:\\tmp\\receipt.json", latest: "C:\\tmp\\latest.json" };
+      },
+      reportDir: "C:\\tmp",
+      log: (line) => logs.push(line),
+      generatedAt: GENERATED_AT,
+    });
+
+    assert.equal(result.report.status, "source_unavailable");
+    assert.match(result.report.error, /повторяющийся ключ YANDEX_OAUTH_TOKEN/u);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  assert.equal(apiCalls, 0);
+  const observableOutput = JSON.stringify({ savedReport, logs });
+  assert.equal(observableOutput.includes(TOKEN), false);
+  assert.equal(observableOutput.includes(SECOND_TOKEN), false);
+});
+
+test("unsafe token syntax blocks CLI before API without leaking the value", async (t) => {
+  const previousExitCode = process.exitCode;
+  const projectRoot = temporaryDir(t, "rosomaha-unsafe-token-cli-");
+  const apiEnvPath = path.join(projectRoot, ".env.seo.local");
+  fs.writeFileSync(apiEnvPath, `YANDEX_OAUTH_TOKEN=\"${TOKEN}\"\n`, "utf8");
+  const route = {
+    ...verifiedRoute(projectRoot),
+    expectedApiEnv: apiEnvPath,
+    apiEnvPath,
+  };
+  let apiCalls = 0;
+  let savedReport = null;
+  const logs = [];
+
+  try {
+    await runCli([], {
+      resolveRoute: () => route,
+      executeAudit: async () => {
+        apiCalls += 1;
+        return report();
+      },
+      saveArtifacts: (_reportDir, currentReport) => {
+        savedReport = currentReport;
+        return { receipt: "C:\\tmp\\receipt.json", latest: "C:\\tmp\\latest.json" };
+      },
+      reportDir: "C:\\tmp",
+      log: (line) => logs.push(line),
+      generatedAt: GENERATED_AT,
+    });
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  assert.equal(apiCalls, 0);
+  assert.equal(savedReport.receiptVersion, 2);
+  assert.match(savedReport.error, /небезопасный формат/u);
+  assert.equal(JSON.stringify({ savedReport, logs }).includes(TOKEN), false);
 });
 
 test("cli uses resolved env path and writes safe routing evidence into the receipt payload", async () => {
