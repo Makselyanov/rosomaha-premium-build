@@ -131,6 +131,18 @@ def require_safe_root_directory(info: os.stat_result, label: str) -> None:
         raise RuntimeError(f"{label} is group/world writable")
 
 
+def require_safe_application_root(info: os.stat_result) -> None:
+    label = "application root"
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0:
+        raise RuntimeError(f"{label} is not a root-owned directory")
+
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & stat.S_IWOTH:
+        raise RuntimeError(f"{label} is world writable")
+    if mode & stat.S_IWGRP and not mode & stat.S_ISVTX:
+        raise RuntimeError(f"{label} is group writable without sticky bit")
+
+
 def guarded_release(
     app_root: Path,
     releases_dir: Path,
@@ -162,7 +174,7 @@ def guarded_release(
     target_fd = None
     try:
         app_info = os.fstat(app_fd)
-        require_safe_root_directory(app_info, "application root")
+        require_safe_application_root(app_info)
         if not same_inode(app_info, os.lstat(app_root)):
             raise RuntimeError("application root path changed during pinning")
 
@@ -194,7 +206,7 @@ def guarded_release(
             current_app = os.fstat(app_fd)
             current_releases = os.fstat(releases_fd)
             current_source = os.fstat(source_fd)
-            require_safe_root_directory(current_app, "application root")
+            require_safe_application_root(current_app)
             require_safe_root_directory(current_releases, "releases directory")
             require_safe_root_directory(current_source, "release source")
             if not same_inode(current_app, app_info) or not same_inode(

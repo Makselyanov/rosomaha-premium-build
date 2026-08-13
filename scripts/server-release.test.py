@@ -317,6 +317,57 @@ class ReleaseRootOperatorTests(unittest.TestCase):
             index for index, event in enumerate(kernel.events) if event.startswith("replace:")
         ))
 
+    def test_group_writable_sticky_application_root_is_allowed(self) -> None:
+        kernel = FakeKernel()
+        kernel.fd_stats[kernel.APP_FD] = directory_stat(0o3775, ino=101)
+        target = execute(kernel)
+        self.assertEqual(target, RELEASES / RELEASE_NAME)
+        self.assertEqual(len(kernel.rsync_calls), 1)
+        self.assertTrue(any(event.startswith("mkdir:") for event in kernel.events))
+        self.assertTrue(any(event.startswith("replace:") for event in kernel.events))
+
+    def test_group_writable_application_root_without_sticky_fails_before_write(self) -> None:
+        kernel = FakeKernel()
+        kernel.fd_stats[kernel.APP_FD] = directory_stat(0o2775, ino=101)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "application root is group writable without sticky bit",
+        ):
+            execute(kernel)
+        self.assertFalse(any(event.startswith("mkdir:") for event in kernel.events))
+        self.assertEqual(kernel.rsync_calls, [])
+        self.assertFalse(any(event.startswith("symlink:") for event in kernel.events))
+
+    def test_world_writable_application_root_fails_before_write(self) -> None:
+        kernel = FakeKernel()
+        kernel.fd_stats[kernel.APP_FD] = directory_stat(0o3777, ino=101)
+        with self.assertRaisesRegex(RuntimeError, "application root is world writable"):
+            execute(kernel)
+        self.assertFalse(any(event.startswith("mkdir:") for event in kernel.events))
+        self.assertEqual(kernel.rsync_calls, [])
+        self.assertFalse(any(event.startswith("symlink:") for event in kernel.events))
+
+    def test_releases_and_source_remain_strictly_non_writable(self) -> None:
+        cases = (
+            (FakeKernel.RELEASES_FD, 0o2775, "releases directory"),
+            (FakeKernel.SOURCE_FD, 0o770, "release source"),
+        )
+        for fd, mode, label in cases:
+            with self.subTest(label=label, mode=oct(mode)):
+                kernel = FakeKernel()
+                kernel.fd_stats[fd] = directory_stat(
+                    mode,
+                    ino=kernel.fd_stats[fd].st_ino,
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"{label} is group/world writable",
+                ):
+                    execute(kernel)
+                self.assertFalse(any(event.startswith("mkdir:") for event in kernel.events))
+                self.assertEqual(kernel.rsync_calls, [])
+                self.assertFalse(any(event.startswith("symlink:") for event in kernel.events))
+
     def test_releases_parent_is_revalidated_before_first_write(self) -> None:
         kernel = FakeKernel()
         kernel.swap_releases_on_lstat_call = 2
