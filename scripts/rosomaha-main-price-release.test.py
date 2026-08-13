@@ -4,6 +4,7 @@ import importlib.util
 import ast
 import json
 import os
+import stat
 import sys
 import tempfile
 import types
@@ -418,6 +419,96 @@ class MainPriceReleaseV3Test(unittest.TestCase):
         self.assertNotIn(".chmod(", body)
         self.assertIn("stat.S_IMODE(attr.st_mode) & 0o022", body)
         self.assertIn("mode=0o700", body)
+
+    def test_cleanup_bundle_sftp_removes_safe_partial_files(self) -> None:
+        class FakeSFTP:
+            def __init__(self) -> None:
+                self.removed: list[str] = []
+                self.rmdir_calls: list[str] = []
+
+            def listdir(self, remote_dir: str):  # noqa: ANN001
+                self.listdir_remote_dir = remote_dir
+                return ["baseline.json.part", "operator.sh"]
+
+            def lstat(self, path: str):  # noqa: ANN001
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+
+            def remove(self, path: str):  # noqa: ANN001
+                self.removed.append(path)
+
+            def rmdir(self, path: str):  # noqa: ANN001
+                self.rmdir_calls.append(path)
+
+        sftp = FakeSFTP()
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-aaaaaaaaaaaaaaaa"
+        self.assertTrue(helper.cleanup_bundle_sftp(sftp, remote_dir))
+        self.assertEqual(
+            sftp.removed,
+            [f"{remote_dir}/baseline.json.part", f"{remote_dir}/operator.sh"],
+        )
+        self.assertEqual(sftp.rmdir_calls, [remote_dir])
+
+    def test_cleanup_bundle_sftp_preserves_bundle_on_unsafe_topology(self) -> None:
+        class FakeSFTP:
+            def __init__(self) -> None:
+                self.remove_called = False
+                self.rmdir_called = False
+
+            def listdir(self, _remote_dir: str):
+                return ["baseline.json.part"]
+
+            def lstat(self, path: str):
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o666, st_uid=0, st_nlink=2)
+
+            def remove(self, _path: str):
+                self.remove_called = True
+
+            def rmdir(self, _path: str):
+                self.rmdir_called = True
+
+        sftp = FakeSFTP()
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-bbbbbbbbbbbbbbbb"
+        self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir, preserve_on_unknown=True))
+        self.assertFalse(sftp.remove_called)
+        self.assertFalse(sftp.rmdir_called)
+
+    def test_cleanup_bundle_sftp_preserves_unexpected_file_without_deleting_anything(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-cccccccccccccccc"
+
+        class FakeSFTP:
+            def __init__(self) -> None:
+                self.remove_called = False
+
+            def lstat(self, path: str):
+                if path == remote_dir:
+                    return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+
+            def listdir(self, _remote_dir: str):
+                return ["apply-receipt.json.part"]
+
+            def remove(self, _path: str):
+                self.remove_called = True
+
+            def rmdir(self, _path: str):
+                raise AssertionError("unexpected bundle must be preserved")
+
+        sftp = FakeSFTP()
+        self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir))
+        self.assertFalse(sftp.remove_called)
+
+    def test_cleanup_bundle_sftp_treats_missing_fixed_directory_as_clean(self) -> None:
+        remote_dir = "/tmp/rosomaha-main-price-release-64ba304-dddddddddddddddd"
+
+        class FakeSFTP:
+            def lstat(self, _path: str):
+                raise FileNotFoundError(remote_dir)
+
+        self.assertTrue(helper.cleanup_bundle_sftp(FakeSFTP(), remote_dir))
 
     def test_parse_operator_json_accepts_banner_and_exact_json_line(self) -> None:
         payload = helper.parse_operator_json({
@@ -1299,6 +1390,49 @@ Allow: /
             existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-64ba304"],
         )
         self.assertEqual(helper.classify_recovery_state(released, baseline, {"new_release": new_release}), "unexpected")
+
+    def test_recover_apply_not_switched_marks_bundle_preserved_when_cleanup_fails(self) -> None:
+        baseline = {
+            "baseline_token": "a" * 64,
+            "current_release": "/var/www/rosomaha/_releases/original",
+            "current_tree": {"digest": "old-tree"},
+            "candidate": {"tree_digest": "new-tree"},
+            "staging_dist": {"digest": "staging"},
+            "articles_cz": {"digest": "cz", "files": [{"name": "index.ts"}]},
+            "release_scripts": {"server-release.sh": "r", "server-rollback.sh": "b"},
+            "articles": {"canonical": {"sha256": "article"}},
+        }
+        audit_payload = {
+            "schema": helper.SCHEMA, "host": helper.HOST, "account": helper.APPLY_LOGIN,
+            "mode": "root-audit", "roles": helper.ROLES, "root_readiness": {"valid": True},
+            "target_commit": helper.TARGET_COMMIT, "topology": {"valid": True},
+            "current_release": baseline["current_release"],
+            "current_tree": {"valid": True, "digest": "old-tree"},
+            "staging_dist": {"valid": True, "digest": "staging"},
+            "articles_cz": {"valid": True, "digest": "cz", "files": [{"name": "index.ts"}]},
+            "release_scripts": baseline["release_scripts"],
+            "existing_label_releases": [],
+            "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
+        }
+
+        class FakeClient:
+            def close(self):
+                return None
+
+        with mock.patch.object(helper, "bounded_reconnect", return_value=(FakeClient(), {"login": helper.APPLY_LOGIN}, [])), mock.patch.object(
+            helper, "raw_remote_audit", return_value=audit_payload,
+        ), mock.patch.object(helper, "download_apply_receipt", return_value=None), mock.patch.object(
+            helper, "public_verify", return_value={"stage": "old", "valid": True},
+        ), mock.patch.object(helper, "cleanup_bundle", return_value=False):
+            payload, success = helper.recover_ambiguous_apply(
+                "/tmp/rosomaha-main-price-release-64ba304-cccccccccccccccc",
+                baseline,
+                RuntimeError("boom"),
+                b"frozen",
+            )
+        self.assertFalse(success)
+        self.assertEqual(payload["status"], "apply_not_switched_cleanup_required")
+        self.assertTrue(payload["bundle_preserved"])
 
     def test_candidate_archive_members_are_fixed_under_dist(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:

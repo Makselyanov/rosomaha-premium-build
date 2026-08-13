@@ -1578,24 +1578,56 @@ def upload_bundle(
 def cleanup_bundle_sftp(sftp: paramiko.SFTPClient, remote_dir: str, *, preserve_on_unknown: bool = True) -> bool:
     if not re.fullmatch(rf"/tmp/rosomaha-main-price-release-{TARGET_COMMIT[:7]}-[0-9a-f]{{16}}", remote_dir):
         raise HelperError("refusing cleanup outside fixed bundle path")
-    try:
-        names = sorted(sftp.listdir(remote_dir))
-    except FileNotFoundError:
-        return True
-    allowed = {"baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh", "apply-receipt.json"}
-    if not set(names).issubset(allowed):
+
+    def preserve_or_raise(message: str) -> bool:
         if preserve_on_unknown:
             return False
-        raise HelperError("remote bundle has unexpected files")
+        raise HelperError(message)
+
+    try:
+        directory_attr = sftp.lstat(remote_dir)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if getattr(exc, "errno", None) == 2:
+            return True
+        return preserve_or_raise("remote bundle directory could not be inspected")
+    if (
+        not stat.S_ISDIR(directory_attr.st_mode)
+        or stat.S_ISLNK(directory_attr.st_mode)
+        or stat.S_IMODE(directory_attr.st_mode) != 0o700
+        or (getattr(directory_attr, "st_uid", None) is not None and directory_attr.st_uid != 0)
+    ):
+        return preserve_or_raise("remote bundle directory has unsafe topology")
+    try:
+        names = sorted(sftp.listdir(remote_dir))
+    except OSError:
+        return preserve_or_raise("remote bundle directory could not be listed")
+    final_names = {"baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh", "apply-receipt.json"}
+    partial_names = {f"{name}.part" for name in ("baseline.json", "candidate.tar.gz", "candidate-manifest.json", "operator.sh")}
+    if not set(names).issubset(final_names | partial_names):
+        return preserve_or_raise("remote bundle has unexpected files")
     for name in names:
-        attr = sftp.lstat(f"{remote_dir}/{name}")
-        if not sftp_regular(attr):
-            if preserve_on_unknown:
-                return False
-            raise HelperError("remote bundle contains unsafe topology")
-    for name in names:
-        sftp.remove(f"{remote_dir}/{name}")
-    sftp.rmdir(remote_dir)
+        if PurePosixPath(name).name != name:
+            return preserve_or_raise("remote bundle contains unsafe entry name")
+        try:
+            attr = sftp.lstat(f"{remote_dir}/{name}")
+        except OSError:
+            return preserve_or_raise("remote bundle file could not be inspected")
+        if (
+            not stat.S_ISREG(attr.st_mode)
+            or stat.S_ISLNK(attr.st_mode)
+            or (getattr(attr, "st_uid", None) is not None and attr.st_uid != 0)
+            or (getattr(attr, "st_nlink", None) is not None and attr.st_nlink != 1)
+            or stat.S_IMODE(attr.st_mode) & 0o022
+        ):
+            return preserve_or_raise("remote bundle contains unsafe topology")
+    try:
+        for name in names:
+            sftp.remove(f"{remote_dir}/{name}")
+        sftp.rmdir(remote_dir)
+    except OSError:
+        return preserve_or_raise("remote bundle cleanup did not complete")
     return True
 
 
@@ -1818,8 +1850,11 @@ def recover_ambiguous_apply(
                     "baseline_token": baseline["baseline_token"], "apply_receipt": receipt,
                     "public_verify": verified, "attempts": recovery_attempts,
                 }
-                cleanup_bundle(client, remote_dir)
-                return payload, True
+                cleanup_succeeded = cleanup_bundle(client, remote_dir)
+                payload["bundle_preserved"] = not cleanup_succeeded
+                if not cleanup_succeeded:
+                    payload["status"] = "recovered_verified_success_cleanup_required"
+                return payload, cleanup_succeeded
             except Exception as verify_error:
                 rolled_back = rollback_and_verify(client, remote_dir, baseline, frozen_operator)
                 payload = {
@@ -1828,16 +1863,21 @@ def recover_ambiguous_apply(
                     "verification_error_type": type(verify_error).__name__, "rollback": rolled_back,
                     "attempts": recovery_attempts,
                 }
-                cleanup_bundle(client, remote_dir)
+                cleanup_succeeded = cleanup_bundle(client, remote_dir)
+                payload["bundle_preserved"] = not cleanup_succeeded
+                if not cleanup_succeeded:
+                    payload["status"] = "recovered_rolled_back_cleanup_required"
                 return payload, False
         if current == baseline["current_release"]:
             if classification != "original":
                 raise HelperError("recovery audit does not prove the exact original state")
             original_public = public_verify(baseline, stage="old")
-            cleanup_bundle(client, remote_dir)
+            cleanup_succeeded = cleanup_bundle(client, remote_dir)
             return {
-                "schema": SCHEMA, "status": "apply_not_switched", "mode": "apply-recovery", "roles": ROLES,
-                "baseline_token": baseline["baseline_token"], "bundle_preserved": False,
+                "schema": SCHEMA,
+                "status": "apply_not_switched" if cleanup_succeeded else "apply_not_switched_cleanup_required",
+                "mode": "apply-recovery", "roles": ROLES,
+                "baseline_token": baseline["baseline_token"], "bundle_preserved": not cleanup_succeeded,
                 "attempts": recovery_attempts, "public_verify": original_public,
             }, False
         return {
