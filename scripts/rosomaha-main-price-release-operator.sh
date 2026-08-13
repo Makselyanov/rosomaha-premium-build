@@ -10,7 +10,7 @@ BUNDLE_DIR="${2:-}"
 
 case "$MODE" in
   audit|root-audit) ;;
-  apply|rollback|diagnose-recovery)
+  apply|rollback|diagnose-recovery|repair-release-root)
     [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-64ba304-[0-9a-f]{16}$ ]] || {
       echo '{"status":"error","error":"invalid fixed bundle path"}'
       exit 2
@@ -51,6 +51,7 @@ DELTA_SCHEMA = "rosomaha-main-price-delta/v1"
 DELTA_BASE_SOURCE = "current_release"
 PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
 RECOVERY_DIAGNOSTIC_SCHEMA = "rosomaha-main-price-recovery-diagnostic/v1"
+ROOT_REPAIR_SCHEMA = "rosomaha-main-price-root-repair/v1"
 HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
@@ -630,10 +631,12 @@ def identity_for_mode(mode):
     if mode == "audit":
         valid = login == AUDIT_LOGIN and uid != 0 and euid == uid
         role = "read-only-audit"
-    elif mode in {"root-audit", "apply", "rollback", "diagnose-recovery"}:
+    elif mode in {"root-audit", "apply", "rollback", "diagnose-recovery", "repair-release-root"}:
         valid = login == APPLY_LOGIN and uid == 0 and euid == 0
         role = "root-release-preflight" if mode == "root-audit" else (
-            "root-release-diagnostic" if mode == "diagnose-recovery" else "root-release-operator"
+            "root-release-diagnostic" if mode == "diagnose-recovery" else (
+                "root-release-repair" if mode == "repair-release-root" else "root-release-operator"
+            )
         )
     else:
         valid = False
@@ -1361,6 +1364,42 @@ def normalize_fresh_private_directory(path):
             or stat.S_IMODE(relinked.st_mode) != 0o700
         ):
             raise ReleaseError(f"fresh private directory normalization failed: {path}")
+    finally:
+        os.close(fd)
+
+
+def repair_pinned_release_root_mode(path, exact_current):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        linked = os.lstat(path)
+        if (
+            not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
+            or stat.S_ISLNK(linked.st_mode) or opened.st_uid != 0 or linked.st_uid != 0
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+            or stat.S_IMODE(opened.st_mode) != 0o700 or stat.S_IMODE(linked.st_mode) != 0o700
+            or resolved(CURRENT_LINK) != exact_current
+        ):
+            raise ReleaseError("root repair pinned precondition changed")
+        os.fchmod(fd, 0o755)
+        os.fsync(fd)
+        verified = os.fstat(fd)
+        relinked = os.lstat(path)
+        if (
+            not stat.S_ISDIR(verified.st_mode) or not stat.S_ISDIR(relinked.st_mode)
+            or stat.S_ISLNK(relinked.st_mode) or verified.st_uid != 0 or relinked.st_uid != 0
+            or (verified.st_dev, verified.st_ino) != (opened.st_dev, opened.st_ino)
+            or (relinked.st_dev, relinked.st_ino) != (opened.st_dev, opened.st_ino)
+            or stat.S_IMODE(verified.st_mode) != 0o755 or stat.S_IMODE(relinked.st_mode) != 0o755
+            or resolved(CURRENT_LINK) != exact_current
+        ):
+            raise ReleaseError("root repair exact 0755 postcondition failed")
+        return {
+            "previous_mode": "0o700", "new_mode": "0o755", "same_inode": True,
+            "uid": verified.st_uid, "gid": verified.st_gid,
+            "dev": verified.st_dev, "ino": verified.st_ino,
+        }
     finally:
         os.close(fd)
 
@@ -2357,6 +2396,121 @@ def diagnose_recovery(bundle):
     }
 
 
+def repair_release_root(bundle):
+    if not identity_for_mode("repair-release-root")["valid"]:
+        raise ReleaseError("release root repair requires exact root identity")
+    with open_lock(create=False) as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        baseline = validate_bundle(bundle)
+        if baseline.get("operator_sha256") != DIAGNOSTIC_BASELINE_OPERATOR_SHA256:
+            raise ReleaseError("root repair baseline operator pin mismatch")
+        receipt = read_diagnostic_apply_receipt(bundle, baseline)
+        exact_new = receipt["new_release"]
+        release_root = Path(exact_new)
+        expected_sha = baseline["articles"]["canonical"]["sha256"]
+
+        if resolved(CURRENT_LINK) != exact_new or exact_label_releases() != [exact_new]:
+            raise ReleaseError("root repair current release binding mismatch")
+        root_before = diagnostic_release_root(release_root)
+        if (
+            not root_before.get("valid") or not root_before.get("same_inode")
+            or root_before.get("lstat") != root_before.get("fstat")
+            or root_before.get("lstat", {}).get("uid") != 0
+            or root_before.get("lstat", {}).get("mode") != "0o700"
+        ):
+            raise ReleaseError("root repair requires exact root-owned 0700 release root")
+        trust_before = trusted_closed_tree(release_root)
+        release_tree_before = tree_manifest(release_root)
+        staging_before = tree_manifest(DIST_DIR)
+        canonical_before = article_file(CANONICAL_ARTICLES, "canonical-before-root-repair")
+        current_articles_before = article_file(
+            release_root / "api/articles.json", "receipt-release-before-root-repair",
+        )
+        cz_before = articles_cz_manifest()
+        if not trust_before.get("valid"):
+            raise ReleaseError("root repair release tree is not trusted")
+        if not exact_tree_contract(release_tree_before, baseline["candidate"]["target_manifest"]):
+            raise ReleaseError("root repair release tree differs from the applied candidate")
+        if not exact_tree_contract(staging_before, baseline["staging_dist"]):
+            raise ReleaseError("root repair staging tree differs from baseline")
+        if any(
+            not item.get("valid") or item.get("sha256") != expected_sha
+            for item in (canonical_before, current_articles_before)
+        ):
+            raise ReleaseError("root repair article baseline is not exact")
+        if (
+            not cz_before.get("valid")
+            or cz_before.get("digest") != baseline.get("articles_cz", {}).get("digest")
+            or cz_before.get("files") != baseline.get("articles_cz", {}).get("files")
+        ):
+            raise ReleaseError("root repair articles-cz baseline is not exact")
+        read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
+        read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
+
+        mode_repair = repair_pinned_release_root_mode(release_root, exact_new)
+
+        if resolved(CURRENT_LINK) != exact_new or exact_label_releases() != [exact_new]:
+            raise ReleaseError("root repair current release changed after chmod")
+        root_after = diagnostic_release_root(release_root)
+        trust_after = trusted_closed_tree(release_root)
+        release_tree_after = tree_manifest(release_root)
+        staging_after = tree_manifest(DIST_DIR)
+        canonical_after = article_file(CANONICAL_ARTICLES, "canonical-after-root-repair")
+        current_articles_after = article_file(
+            release_root / "api/articles.json", "receipt-release-after-root-repair",
+        )
+        cz_after = articles_cz_manifest()
+        if (
+            not root_after.get("valid") or root_after.get("lstat") != root_after.get("fstat")
+            or root_after.get("lstat", {}).get("mode") != "0o755"
+            or not trust_after.get("valid")
+            or not exact_tree_contract(release_tree_after, baseline["candidate"]["target_manifest"])
+            or not exact_tree_contract(staging_after, baseline["staging_dist"])
+            or not exact_tree_contract(release_tree_before, release_tree_after)
+            or not exact_tree_contract(staging_before, staging_after)
+        ):
+            raise ReleaseError("root repair tree postcondition failed")
+        if any(
+            not item.get("valid") or item.get("sha256") != expected_sha
+            for item in (canonical_after, current_articles_after)
+        ):
+            raise ReleaseError("root repair article postcondition failed")
+        if (
+            canonical_before.get("sha256") != canonical_after.get("sha256")
+            or current_articles_before.get("sha256") != current_articles_after.get("sha256")
+            or not cz_after.get("valid") or cz_before.get("digest") != cz_after.get("digest")
+            or cz_before.get("files") != cz_after.get("files")
+        ):
+            raise ReleaseError("root repair content changed during chmod")
+        read_verified_script(RELEASE_SCRIPT, RELEASE_SCRIPT_SHA256)
+        read_verified_script(ROLLBACK_SCRIPT, ROLLBACK_SCRIPT_SHA256)
+        live = live_articles()
+        if (
+            not live.get("valid") or live.get("http_status") != 200
+            or live.get("final_url") != PUBLIC_ARTICLES_URL or live.get("sha256") != expected_sha
+        ):
+            raise ReleaseError("root repair public article verification failed")
+        return {
+            "schema": ROOT_REPAIR_SCHEMA, "status": "release_root_repaired",
+            "mode": "repair-release-root", "account": APPLY_LOGIN,
+            "role": "root-release-repair", "roles": ROLES,
+            "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
+            "scope": "exact-current-release-root-mode-only",
+            "previous_mode": mode_repair["previous_mode"], "new_mode": mode_repair["new_mode"],
+            "same_inode": mode_repair["same_inode"],
+            "current_matches_receipt": True, "label_set_exact": True,
+            "current_tree_exact": True, "staging_tree_exact": True,
+            "content_unchanged": True,
+            "articles": {
+                "canonical_sha256": canonical_after["sha256"],
+                "current_sha256": current_articles_after["sha256"],
+                "live_sha256": live["sha256"],
+                "count": live["count"], "slug_digest": live["slug_digest"],
+                "http_status": live["http_status"], "exact_public_url": True,
+            },
+        }
+
+
 def rollback_release(bundle):
     if not identity_for_mode("rollback")["valid"]:
         raise ReleaseError("rollback requires exact root identity")
@@ -2438,10 +2592,12 @@ def main():
             result = rollback_release(BUNDLE_DIR)
         elif MODE == "diagnose-recovery" and BUNDLE_DIR is not None:
             result = diagnose_recovery(BUNDLE_DIR)
+        elif MODE == "repair-release-root" and BUNDLE_DIR is not None:
+            result = repair_release_root(BUNDLE_DIR)
         else:
             raise ReleaseError("invalid fixed mode")
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ok", "released", "rolled_back", "diagnosed"} else 3
+        return 0 if result.get("status") in {"ok", "released", "rolled_back", "diagnosed", "release_root_repaired"} else 3
     except Exception as exc:
         print(json.dumps({
             "schema": SCHEMA, "status": "error", "mode": MODE,

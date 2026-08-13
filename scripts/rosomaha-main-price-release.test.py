@@ -650,7 +650,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         rollback_body = text[text.index("def rollback_release") : text.index("def main")]
         self.assertIn('audit|root-audit', text)
         self.assertIn('mode == "audit"', identity)
-        self.assertIn('mode in {"root-audit", "apply", "rollback", "diagnose-recovery"}', identity)
+        self.assertIn('mode in {"root-audit", "apply", "rollback", "diagnose-recovery", "repair-release-root"}', identity)
         self.assertIn('login == APPLY_LOGIN and uid == 0 and euid == 0', identity)
         self.assertIn('identity_for_mode("apply")["valid"]', apply_body)
         self.assertIn('identity_for_mode("rollback")["valid"]', rollback_body)
@@ -1555,9 +1555,26 @@ Allow: /
         apply.assert_not_called()
         recover.assert_not_called()
 
+    def test_repair_release_root_cli_is_isolated_from_apply_and_rollback(self) -> None:
+        payload = {"status": "release_root_repaired"}
+        with mock.patch.object(
+            helper, "repair_release_root", return_value=(payload, Path("root-repair.json")),
+        ) as repair, mock.patch.object(helper, "apply") as apply, mock.patch.object(
+            helper, "recover_from_baseline",
+        ) as recover, mock.patch.object(helper, "diagnose_recovery_from_baseline") as diagnose:
+            code = helper.main([
+                "--repair-release-root", "--commit", helper.TARGET_COMMIT,
+                "--baseline", "baseline.json", "--diagnostic", "diagnostic.json",
+            ])
+        self.assertEqual(code, 0)
+        repair.assert_called_once()
+        apply.assert_not_called()
+        recover.assert_not_called()
+        diagnose.assert_not_called()
+
     def test_diagnose_recovery_operator_has_no_mutation_path(self) -> None:
         source = operator_source()
-        body = source[source.index("def diagnose_recovery(") : source.index("def rollback_release(")]
+        body = source[source.index("def diagnose_recovery(") : source.index("def repair_release_root(")]
         self.assertIn("baseline = validate_bundle(bundle)", body)
         self.assertIn("read_diagnostic_apply_receipt(bundle, baseline)", body)
         self.assertIn("DIAGNOSTIC_BASELINE_OPERATOR_SHA256", body)
@@ -1622,6 +1639,102 @@ Allow: /
         }
         article_after = {**article_before, "sha256": "5" * 64}
         self.assertFalse(namespace["diagnostic_article_pair"](article_before, article_after)["stable"])
+
+    def test_release_root_mode_repair_is_fd_pinned_and_exact(self) -> None:
+        namespace = operator_namespace()
+        directory = namespace["stat"].S_IFDIR
+        before = private_directory_stat(directory | 0o700, ino=21)
+        after = private_directory_stat(directory | 0o755, ino=21)
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-64ba304"
+        with mock.patch.object(namespace["os"], "open", return_value=91) as opened, \
+                mock.patch.object(namespace["os"], "fstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "lstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "fsync", create=True) as fsync, \
+                mock.patch.object(namespace["os"], "close") as close, \
+                mock.patch.dict(namespace, {"resolved": mock.Mock(return_value=exact_current)}):
+            result = namespace["repair_pinned_release_root_mode"](
+                Path(exact_current), exact_current,
+            )
+        flags = opened.call_args.args[1]
+        self.assertEqual(flags & getattr(namespace["os"], "O_DIRECTORY", 0), getattr(namespace["os"], "O_DIRECTORY", 0))
+        self.assertEqual(flags & getattr(namespace["os"], "O_NOFOLLOW", 0), getattr(namespace["os"], "O_NOFOLLOW", 0))
+        fchmod.assert_called_once_with(91, 0o755)
+        fsync.assert_called_once_with(91)
+        close.assert_called_once_with(91)
+        self.assertEqual(result["previous_mode"], "0o700")
+        self.assertEqual(result["new_mode"], "0o755")
+        self.assertTrue(result["same_inode"])
+
+    def test_release_root_mode_repair_rejects_wrong_mode_without_chmod(self) -> None:
+        namespace = operator_namespace()
+        wrong = private_directory_stat(namespace["stat"].S_IFDIR | 0o755, ino=22)
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-64ba304"
+        with mock.patch.object(namespace["os"], "open", return_value=92), \
+                mock.patch.object(namespace["os"], "fstat", return_value=wrong), \
+                mock.patch.object(namespace["os"], "lstat", return_value=wrong), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "close"), \
+                mock.patch.dict(namespace, {"resolved": mock.Mock(return_value=exact_current)}):
+            with self.assertRaisesRegex(namespace["ReleaseError"], "precondition changed"):
+                namespace["repair_pinned_release_root_mode"](Path(exact_current), exact_current)
+        fchmod.assert_not_called()
+
+    def test_release_root_mode_repair_rejects_inode_swap_after_chmod(self) -> None:
+        namespace = operator_namespace()
+        directory = namespace["stat"].S_IFDIR
+        before = private_directory_stat(directory | 0o700, ino=23)
+        after = private_directory_stat(directory | 0o755, ino=24)
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-64ba304"
+        with mock.patch.object(namespace["os"], "open", return_value=93), \
+                mock.patch.object(namespace["os"], "fstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "lstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "fsync", create=True), \
+                mock.patch.object(namespace["os"], "close"), \
+                mock.patch.dict(namespace, {"resolved": mock.Mock(return_value=exact_current)}):
+            with self.assertRaisesRegex(namespace["ReleaseError"], "postcondition failed"):
+                namespace["repair_pinned_release_root_mode"](Path(exact_current), exact_current)
+        fchmod.assert_called_once_with(93, 0o755)
+
+    def test_root_repair_operator_scope_has_no_release_or_content_mutators(self) -> None:
+        source = operator_source()
+        body = source[source.index("def repair_release_root(") : source.index("def rollback_release(")]
+        self.assertIn("with open_lock(create=False) as lock:", body)
+        self.assertIn("repair_pinned_release_root_mode(release_root, exact_new)", body)
+        for forbidden in (
+            "run_fixed(", "os.replace(", "os.rename(", "os.unlink(", "os.remove(",
+            "os.mkdir(", "os.chmod(", "os.fchmod(", "shutil.rmtree(",
+        ):
+            self.assertNotIn(forbidden, body)
+
+    def test_root_repair_result_requires_exact_article_parity(self) -> None:
+        baseline = {
+            "baseline_token": "a" * 64,
+            "articles": {"canonical": {
+                "sha256": "d" * 64, "count": 61, "slug_digest": "e" * 64,
+            }},
+        }
+        result = {
+            "schema": helper.ROOT_REPAIR_SCHEMA, "status": "release_root_repaired",
+            "mode": "repair-release-root", "account": helper.APPLY_LOGIN,
+            "role": "root-release-repair", "roles": helper.ROLES,
+            "target_commit": helper.TARGET_COMMIT, "baseline_token": "a" * 64,
+            "scope": "exact-current-release-root-mode-only",
+            "previous_mode": "0o700", "new_mode": "0o755", "same_inode": True,
+            "current_matches_receipt": True, "label_set_exact": True,
+            "current_tree_exact": True, "staging_tree_exact": True,
+            "content_unchanged": True,
+            "articles": {
+                "canonical_sha256": "d" * 64, "current_sha256": "d" * 64,
+                "live_sha256": "d" * 64, "count": 61, "slug_digest": "e" * 64,
+                "http_status": 200, "exact_public_url": True,
+            },
+        }
+        helper.validate_root_repair_result(result, baseline)
+        result["articles"]["live_sha256"] = "f" * 64
+        with self.assertRaisesRegex(helper.HelperError, "article evidence mismatch"):
+            helper.validate_root_repair_result(result, baseline)
 
     def test_articles_cz_static_sources_may_be_a_canonical_subset(self) -> None:
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / ".codex_tmp") as raw_root:

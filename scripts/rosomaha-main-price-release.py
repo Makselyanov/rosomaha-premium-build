@@ -74,6 +74,9 @@ APPLY_TIMEOUT_SECONDS = 1_200
 PROGRESS_SCHEMA = "rosomaha-main-price-apply-progress/v1"
 RECOVERY_DIAGNOSTIC_SCHEMA = "rosomaha-main-price-recovery-diagnostic/v1"
 DIAGNOSTIC_BASELINE_OPERATOR_SHA256 = "57e364d6f9439244f87b4d0b44ccdc092ff508aca20d8e90092a5d1926094e6c"
+ROOT_REPAIR_SCHEMA = "rosomaha-main-price-root-repair/v1"
+ROOT_REPAIR_DIAGNOSTIC_NAME = "20260813T151627Z-rosomaha-main-price-recovery-diagnostic.json"
+ROOT_REPAIR_DIAGNOSTIC_SHA256 = "f06d728ed011e5327cf9ef749565f023012567b53a22640f990e09f522694ce7"
 MAX_PROGRESS_BYTES = 4 * 1024
 MAX_PROGRESS_ELAPSED_SECONDS = 24 * 60 * 60
 PROGRESS_PHASES = {
@@ -1916,6 +1919,17 @@ def invoke_recovery_diagnostic(
     return parse_operator_json(result)
 
 
+def invoke_release_root_repair(
+    client: paramiko.SSHClient, remote_dir: str, frozen_operator: bytes,
+) -> dict[str, Any]:
+    if not re.fullmatch(rf"/tmp/rosomaha-main-price-release-{TARGET_COMMIT[:7]}-[0-9a-f]{{16}}", remote_dir):
+        raise HelperError("invalid fixed root-repair bundle path")
+    result = run_remote(
+        client, f"/bin/bash -s -- repair-release-root {remote_dir}", frozen_operator, 180,
+    )
+    return parse_operator_json(result)
+
+
 def download_apply_receipt(client: paramiko.SSHClient, remote_dir: str) -> dict[str, Any] | None:
     sftp = client.open_sftp()
     try:
@@ -2649,14 +2663,184 @@ def diagnose_recovery_from_baseline(commit: str, baseline_path: Path) -> tuple[d
     return payload, receipt
 
 
+def load_root_repair_diagnostic(path: Path, baseline: dict[str, Any]) -> dict[str, Any]:
+    resolved = ensure_within(REPORT_ROOT, path)
+    safe_regular_file(resolved, REPORT_ROOT)
+    if resolved.name != ROOT_REPAIR_DIAGNOSTIC_NAME:
+        raise HelperError("root repair requires the exact pinned diagnostic receipt")
+    if sha256_file(resolved) != ROOT_REPAIR_DIAGNOSTIC_SHA256:
+        raise HelperError("root repair diagnostic receipt hash mismatch")
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    extra_keys = {"diagnostic_identity", "wrapper_public_readback"}
+    if not isinstance(payload, dict) or not extra_keys.issubset(payload):
+        raise HelperError("root repair diagnostic receipt shape mismatch")
+    operator_payload = {key: value for key, value in payload.items() if key not in extra_keys}
+    validate_recovery_diagnostic(operator_payload, baseline)
+    identity = payload.get("diagnostic_identity")
+    if (
+        not isinstance(identity, dict) or identity.get("login") != APPLY_LOGIN
+        or identity.get("role_verified") is not True
+        or identity.get("public_key_fingerprint_verified") is not True
+        or identity.get("regular") is not True or identity.get("symlink") is not False
+        or identity.get("nlink") != 1
+    ):
+        raise HelperError("root repair diagnostic identity is unsafe")
+    public = payload.get("wrapper_public_readback")
+    if (
+        not isinstance(public, dict) or set(public) != {
+            "valid", "http_status", "exact_url", "sha256", "bytes", "count", "slug_digest",
+        }
+        or public.get("valid") is not False or public.get("http_status") != 404
+        or public.get("exact_url") is not True
+        or not re.fullmatch(r"[0-9a-f]{64}", str(public.get("sha256") or ""))
+        or isinstance(public.get("bytes"), bool) or not isinstance(public.get("bytes"), int)
+        or public.get("count") is not None or public.get("slug_digest") is not None
+    ):
+        raise HelperError("root repair diagnostic public failure evidence is unsafe")
+    root = operator_payload["release_root"]["after"]
+    if root["lstat"]["mode"] != "0o700" or root["fstat"]["mode"] != "0o700":
+        raise HelperError("root repair diagnostic does not prove exact 0700 mode")
+    if operator_payload["trusted_tree"]["after"].get("valid") is not True:
+        raise HelperError("root repair diagnostic does not prove trusted release contents")
+    comparison = operator_payload["article_comparison"]
+    if not all(
+        comparison.get(key) is True
+        for key in ("canonical_matches_baseline", "current_matches_baseline", "canonical_matches_current")
+    ):
+        raise HelperError("root repair diagnostic article baseline is not exact")
+    return payload
+
+
+def validate_root_repair_result(payload: dict[str, Any], baseline: dict[str, Any]) -> None:
+    expected_keys = {
+        "schema", "status", "mode", "account", "role", "roles", "target_commit",
+        "baseline_token", "scope", "previous_mode", "new_mode", "same_inode",
+        "current_matches_receipt", "label_set_exact", "current_tree_exact",
+        "staging_tree_exact", "content_unchanged", "articles",
+    }
+    if (
+        not isinstance(payload, dict) or set(payload) != expected_keys
+        or payload.get("schema") != ROOT_REPAIR_SCHEMA
+        or payload.get("status") != "release_root_repaired"
+        or payload.get("mode") != "repair-release-root"
+        or payload.get("account") != APPLY_LOGIN or payload.get("role") != "root-release-repair"
+        or payload.get("roles") != ROLES or payload.get("target_commit") != TARGET_COMMIT
+        or payload.get("baseline_token") != baseline.get("baseline_token")
+        or payload.get("scope") != "exact-current-release-root-mode-only"
+        or payload.get("previous_mode") != "0o700" or payload.get("new_mode") != "0o755"
+        or any(payload.get(key) is not True for key in (
+            "same_inode", "current_matches_receipt", "label_set_exact", "current_tree_exact",
+            "staging_tree_exact", "content_unchanged",
+        ))
+    ):
+        raise HelperError("root repair receipt identity/evidence mismatch")
+    articles = payload.get("articles")
+    expected_sha = baseline["articles"]["canonical"]["sha256"]
+    if (
+        not isinstance(articles, dict) or set(articles) != {
+            "canonical_sha256", "current_sha256", "live_sha256", "count",
+            "slug_digest", "http_status", "exact_public_url",
+        }
+        or any(articles.get(key) != expected_sha for key in (
+            "canonical_sha256", "current_sha256", "live_sha256",
+        ))
+        or articles.get("count") != baseline["articles"]["canonical"]["count"]
+        or articles.get("slug_digest") != baseline["articles"]["canonical"]["slug_digest"]
+        or articles.get("http_status") != 200 or articles.get("exact_public_url") is not True
+    ):
+        raise HelperError("root repair article evidence mismatch")
+
+
+def repaired_state_from_diagnostic(payload: dict[str, Any], baseline: dict[str, Any]) -> bool:
+    try:
+        root = payload["release_root"]["after"]
+        comparison = payload["article_comparison"]
+        public = payload["wrapper_public_readback"]
+        return bool(
+            payload.get("snapshot_consistent") is True
+            and root["lstat"]["mode"] == "0o755" and root["fstat"]["mode"] == "0o755"
+            and payload["current_tree"]["after"]["exact_expected"] is True
+            and payload["staging_tree"]["after"]["exact_expected"] is True
+            and all(comparison.get(key) is True for key in (
+                "canonical_matches_baseline", "current_matches_baseline", "live_matches_baseline",
+                "canonical_matches_current", "canonical_matches_live", "current_matches_live",
+            ))
+            and public.get("valid") is True and public.get("http_status") == 200
+            and public.get("sha256") == baseline["articles"]["canonical"]["sha256"]
+        )
+    except (KeyError, TypeError):
+        return False
+
+
+def repair_release_root(
+    commit: str, baseline_path: Path, diagnostic_path: Path,
+) -> tuple[dict[str, Any], Path]:
+    prove_target_commit(commit)
+    frozen_operator = operator_bytes()
+    baseline, _resolved, _archive, _delta, _target = load_baseline_with_operator(
+        baseline_path, frozen_operator,
+        expected_operator_sha256=DIAGNOSTIC_BASELINE_OPERATOR_SHA256,
+    )
+    load_root_repair_diagnostic(diagnostic_path, baseline)
+    remote_dir = remote_bundle_path(baseline["baseline_token"])
+    client: paramiko.SSHClient | None = None
+    try:
+        client, identity = connect(APPLY_LOGIN)
+        result = invoke_release_root_repair(client, remote_dir, frozen_operator)
+        validate_root_repair_result(result, baseline)
+        public = public_verify(baseline, stage="new")
+        payload = {
+            **result, "repair_identity": identity,
+            "pinned_diagnostic_sha256": ROOT_REPAIR_DIAGNOSTIC_SHA256,
+            "public_verify": public,
+        }
+        receipt = atomic_json_receipt("rosomaha-main-price-root-repair", payload)
+        return payload, receipt
+    except Exception as exc:
+        if client is not None:
+            client.close()
+            client = None
+        diagnosed, diagnostic_receipt = diagnose_recovery_from_baseline(commit, baseline_path)
+        if repaired_state_from_diagnostic(diagnosed, baseline):
+            public = public_verify(baseline, stage="new")
+            payload = {
+                "schema": ROOT_REPAIR_SCHEMA, "status": "recovered_root_repaired",
+                "mode": "repair-release-root-recovery", "roles": ROLES,
+                "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
+                "pinned_diagnostic_sha256": ROOT_REPAIR_DIAGNOSTIC_SHA256,
+                "original_error_type": type(exc).__name__,
+                "original_error_summary": sanitized_progress_summary(exc),
+                "recovery_diagnostic_receipt": diagnostic_receipt.name,
+                "public_verify": public,
+            }
+            receipt = atomic_json_receipt("rosomaha-main-price-root-repair", payload)
+            return payload, receipt
+        payload = {
+            "schema": ROOT_REPAIR_SCHEMA, "status": "ambiguous_root_repair_requires_review",
+            "mode": "repair-release-root-recovery", "roles": ROLES,
+            "target_commit": TARGET_COMMIT, "baseline_token": baseline["baseline_token"],
+            "pinned_diagnostic_sha256": ROOT_REPAIR_DIAGNOSTIC_SHA256,
+            "original_error_type": type(exc).__name__,
+            "original_error_summary": sanitized_progress_summary(exc),
+            "recovery_diagnostic_receipt": diagnostic_receipt.name,
+        }
+        receipt = atomic_json_receipt("rosomaha-main-price-root-repair", payload)
+        return payload, receipt
+    finally:
+        if client is not None:
+            client.close()
+
+
 def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fixed main Rosomaha price-release helper")
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument("--apply", action="store_true", help="apply only the exact pinned candidate")
     operation.add_argument("--recover", action="store_true", help="recover a prior ambiguous apply without retrying apply")
     operation.add_argument("--diagnose-recovery", action="store_true", help="read-only diagnosis of a preserved ambiguous release")
+    operation.add_argument("--repair-release-root", action="store_true", help="repair only the exact diagnosed active release root mode")
     parser.add_argument("--commit", help="exact pinned commit required with --apply")
     parser.add_argument("--baseline", type=Path, help="captured baseline receipt required with --apply")
+    parser.add_argument("--diagnostic", type=Path, help="exact pinned read-only diagnostic receipt required for root repair")
     return parser
 
 
@@ -2681,8 +2865,20 @@ def main(argv: list[str] | None = None) -> int:
             payload, receipt = diagnose_recovery_from_baseline(args.commit, args.baseline)
             print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
             return 0
-        if args.commit is not None or args.baseline is not None:
-            raise HelperError("--commit/--baseline are accepted only with --apply, --recover or --diagnose-recovery")
+        if args.repair_release_root:
+            if args.commit != TARGET_COMMIT or args.baseline is None or args.diagnostic is None:
+                raise HelperError(
+                    f"--repair-release-root requires --commit {TARGET_COMMIT}, --baseline <fixed receipt> "
+                    "and --diagnostic <exact pinned diagnostic receipt>"
+                )
+            payload, receipt = repair_release_root(args.commit, args.baseline, args.diagnostic)
+            print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
+            return 0 if payload["status"] in {"release_root_repaired", "recovered_root_repaired"} else 2
+        if args.commit is not None or args.baseline is not None or args.diagnostic is not None:
+            raise HelperError(
+                "--commit/--baseline/--diagnostic are accepted only with --apply, --recover, "
+                "--diagnose-recovery or --repair-release-root"
+            )
         payload, receipt = audit()
         print(json.dumps({"status": payload["status"], "receipt": str(receipt)}, ensure_ascii=False))
         return 0
