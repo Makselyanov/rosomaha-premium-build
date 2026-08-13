@@ -15,6 +15,7 @@
         "seo:gsc:oauth": "node scripts/gsc-oauth-current-tab.mjs",
         "api:doctor": "node scripts/rosomaha-api-doctor.mjs",
         "audit:api-only": "node scripts/rosomaha-api-only-audit.mjs",
+        "audit:direct-balance": "node scripts/yandex-direct-balance.mjs",
         "audit:vk-crm": "node scripts/rosomaha-vk-crm-snapshot.mjs",
         "audit:vk-crm:allow-partial": "node scripts/rosomaha-vk-crm-snapshot.mjs --allow-partial",
         "test:vk-crm": "node --test scripts/rosomaha-vk-crm-snapshot.test.mjs",
