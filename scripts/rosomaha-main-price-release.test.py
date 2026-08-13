@@ -66,6 +66,14 @@ def fixture_tree(digest: str) -> dict:
     }
 
 
+def private_directory_stat(
+    mode: int, *, uid: int = 0, dev: int = 7, ino: int = 11,
+):
+    return types.SimpleNamespace(
+        st_mode=mode, st_uid=uid, st_gid=33, st_dev=dev, st_ino=ino,
+    )
+
+
 def page_html(path: str, price: int | str | float | None = None, *, title: str = "Модель Росомаха", description: str = "Описание") -> bytes:
     url = helper.BASE_URL + ("/" if path == "/" else path)
     visible = ""
@@ -277,6 +285,132 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertIn("exact_label_releases() != []", body[first_swap - 500 : release])
         self.assertIn("exact_label_releases() != [new_release]", body[release:])
         self.assertIn("release_trust = trusted_closed_tree(Path(new_release))", body)
+
+    def test_fresh_private_directory_normalizes_only_inherited_setgid(self) -> None:
+        namespace = operator_namespace()
+        directory = namespace["stat"].S_IFDIR
+        before = private_directory_stat(directory | 0o2700)
+        after = private_directory_stat(directory | 0o700)
+        with mock.patch.object(namespace["os"], "open", return_value=81) as opened, \
+                mock.patch.object(namespace["os"], "fstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "lstat", side_effect=[before, after]), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "close") as close:
+            namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+        flags = opened.call_args.args[1]
+        self.assertTrue(flags & namespace["os"].O_RDONLY == namespace["os"].O_RDONLY)
+        self.assertTrue(flags & getattr(namespace["os"], "O_DIRECTORY", 0) == getattr(namespace["os"], "O_DIRECTORY", 0))
+        self.assertTrue(flags & getattr(namespace["os"], "O_NOFOLLOW", 0) == getattr(namespace["os"], "O_NOFOLLOW", 0))
+        fchmod.assert_called_once_with(81, 0o700)
+        close.assert_called_once_with(81)
+
+    def test_fresh_private_directory_accepts_exact_0700_without_chmod(self) -> None:
+        namespace = operator_namespace()
+        exact = private_directory_stat(namespace["stat"].S_IFDIR | 0o700)
+        with mock.patch.object(namespace["os"], "open", return_value=82), \
+                mock.patch.object(namespace["os"], "fstat", side_effect=[exact, exact]), \
+                mock.patch.object(namespace["os"], "lstat", side_effect=[exact, exact]), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "close"):
+            namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+        fchmod.assert_not_called()
+
+    def test_fresh_private_directory_rejects_all_other_modes(self) -> None:
+        namespace = operator_namespace()
+        for mode in (0o3700, 0o710, 0o720):
+            details = private_directory_stat(namespace["stat"].S_IFDIR | mode)
+            with self.subTest(mode=oct(mode)), mock.patch.object(namespace["os"], "open", return_value=83), \
+                    mock.patch.object(namespace["os"], "fstat", return_value=details), \
+                    mock.patch.object(namespace["os"], "lstat", return_value=details), \
+                    mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                    mock.patch.object(namespace["os"], "close") as close:
+                with self.assertRaisesRegex(namespace["ReleaseError"], "topology is unsafe"):
+                    namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+            fchmod.assert_not_called()
+            close.assert_called_once_with(83)
+
+    def test_fresh_private_directory_rejects_inode_swap_and_nonroot_owner(self) -> None:
+        namespace = operator_namespace()
+        directory = namespace["stat"].S_IFDIR
+        cases = (
+            (private_directory_stat(directory | 0o700), private_directory_stat(directory | 0o700, ino=12)),
+            (private_directory_stat(directory | 0o700, uid=33), private_directory_stat(directory | 0o700, uid=33)),
+        )
+        for opened_info, linked_info in cases:
+            with self.subTest(uid=opened_info.st_uid, inode=linked_info.st_ino), \
+                    mock.patch.object(namespace["os"], "open", return_value=84), \
+                    mock.patch.object(namespace["os"], "fstat", return_value=opened_info), \
+                    mock.patch.object(namespace["os"], "lstat", return_value=linked_info), \
+                    mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                    mock.patch.object(namespace["os"], "close"):
+                with self.assertRaisesRegex(namespace["ReleaseError"], "topology is unsafe"):
+                    namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+            fchmod.assert_not_called()
+
+    def test_fresh_private_directory_rejects_symlink_and_non_directory(self) -> None:
+        namespace = operator_namespace()
+        directory = private_directory_stat(namespace["stat"].S_IFDIR | 0o700)
+        for linked in (
+            private_directory_stat(namespace["stat"].S_IFLNK | 0o700),
+            private_directory_stat(namespace["stat"].S_IFREG | 0o700),
+        ):
+            with self.subTest(kind=linked.st_mode & 0o170000), \
+                    mock.patch.object(namespace["os"], "open", return_value=85), \
+                    mock.patch.object(namespace["os"], "fstat", return_value=directory), \
+                    mock.patch.object(namespace["os"], "lstat", return_value=linked), \
+                    mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                    mock.patch.object(namespace["os"], "close"):
+                with self.assertRaisesRegex(namespace["ReleaseError"], "topology is unsafe"):
+                    namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+            fchmod.assert_not_called()
+
+    def test_fresh_private_directory_rejects_inode_swap_after_normalization(self) -> None:
+        namespace = operator_namespace()
+        directory = namespace["stat"].S_IFDIR
+        before = private_directory_stat(directory | 0o2700, ino=11)
+        verified = private_directory_stat(directory | 0o700, ino=11)
+        replaced = private_directory_stat(directory | 0o700, ino=12)
+        with mock.patch.object(namespace["os"], "open", return_value=86), \
+                mock.patch.object(namespace["os"], "fstat", side_effect=[before, verified]), \
+                mock.patch.object(namespace["os"], "lstat", side_effect=[before, replaced]), \
+                mock.patch.object(namespace["os"], "fchmod", create=True) as fchmod, \
+                mock.patch.object(namespace["os"], "close"):
+            with self.assertRaisesRegex(namespace["ReleaseError"], "normalization failed"):
+                namespace["normalize_fresh_private_directory"](Path("/var/www/rosomaha/.candidate"))
+        fchmod.assert_called_once_with(86, 0o700)
+
+    def test_private_directory_normalization_is_narrow_and_dist_stays_exact(self) -> None:
+        source = operator_source()
+        candidate = source[source.index("def copy_delta_base") : source.index("def remove_empty_candidate_directories")]
+        scripts = source[source.index("def materialize_trusted_scripts") : source.index("def copy_regular_verified")]
+        apply_body = source[source.index("def apply_release") : source.index("def rollback_release")]
+        self.assertIn("normalize_fresh_private_directory(candidate)", candidate)
+        self.assertIn("normalize_fresh_private_directory(root)", scripts)
+        self.assertEqual(source.count("normalize_fresh_private_directory("), 3)
+        self.assertIn("trusted_closed_tree(candidate, require_root_mode=0o700)", apply_body)
+        self.assertIn("trusted_closed_tree(DIST_DIR, require_root_mode=0o700)", apply_body)
+        self.assertIn("trusted_tree_entry_permissions", source)
+
+    def test_moved_dist_trust_still_requires_exact_0700(self) -> None:
+        namespace = operator_namespace()
+        with mock.patch.dict(
+            namespace,
+            {"trusted_root_directory": mock.Mock(return_value={"valid": True, "mode": "0o700"})},
+        ), mock.patch.object(namespace["os"], "walk", return_value=[]):
+            accepted = namespace["trusted_closed_tree"](
+                Path("/var/www/rosomaha/dist"), require_root_mode=0o700,
+            )
+        self.assertTrue(accepted["valid"])
+
+        with mock.patch.dict(
+            namespace,
+            {"trusted_root_directory": mock.Mock(return_value={"valid": True, "mode": "0o2700"})},
+        ):
+            rejected = namespace["trusted_closed_tree"](
+                Path("/var/www/rosomaha/dist"), require_root_mode=0o700,
+            )
+        self.assertFalse(rejected["valid"])
+        self.assertEqual(rejected["error"], "untrusted tree root")
 
     def test_rollback_rechecks_mutation_topology_before_and_after_switch(self) -> None:
         source = operator_source()

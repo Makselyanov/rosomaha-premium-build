@@ -1327,6 +1327,40 @@ def write_new_regular(path, raw, mode):
             os.close(fd)
 
 
+def normalize_fresh_private_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        linked = os.lstat(path)
+        opened_mode = stat.S_IMODE(opened.st_mode)
+        linked_mode = stat.S_IMODE(linked.st_mode)
+        if (
+            not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(linked.st_mode)
+            or stat.S_ISLNK(linked.st_mode)
+            or opened.st_uid != 0 or linked.st_uid != 0
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+            or opened_mode != linked_mode or opened_mode not in {0o700, 0o2700}
+        ):
+            raise ReleaseError(f"fresh private directory topology is unsafe: {path}")
+        if opened_mode == 0o2700:
+            os.fchmod(fd, 0o700)
+        verified = os.fstat(fd)
+        relinked = os.lstat(path)
+        if (
+            not stat.S_ISDIR(verified.st_mode) or not stat.S_ISDIR(relinked.st_mode)
+            or stat.S_ISLNK(relinked.st_mode)
+            or verified.st_uid != 0 or relinked.st_uid != 0
+            or (verified.st_dev, verified.st_ino) != (opened.st_dev, opened.st_ino)
+            or (relinked.st_dev, relinked.st_ino) != (opened.st_dev, opened.st_ino)
+            or stat.S_IMODE(verified.st_mode) != 0o700
+            or stat.S_IMODE(relinked.st_mode) != 0o700
+        ):
+            raise ReleaseError(f"fresh private directory normalization failed: {path}")
+    finally:
+        os.close(fd)
+
+
 def write_apply_progress(
     bundle, baseline_token, phase, started_at, started_monotonic,
     *, release_switched, error=None,
@@ -1409,6 +1443,7 @@ def materialize_trusted_scripts(bundle, token, purpose):
         os.mkdir(root, 0o700)
     finally:
         os.umask(old_umask)
+    normalize_fresh_private_directory(root)
     details = os.lstat(root)
     if (
         not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode)
@@ -1526,6 +1561,7 @@ def copy_delta_base(candidate, baseline):
         os.mkdir(candidate, 0o700)
     finally:
         os.umask(old_umask)
+    normalize_fresh_private_directory(candidate)
     for current, dir_names, file_names in os.walk(source_root, followlinks=False):
         dir_names.sort()
         file_names.sort()
