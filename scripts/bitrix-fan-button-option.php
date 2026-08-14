@@ -56,10 +56,13 @@ const ROSOMAHA_FAN_TEMPLATE_PEER_IDS = [876, 877, 856, 1099];
 
 function rosomahaFanResult(array $payload, int $exitCode = 0): void
 {
-    echo json_encode(
+    $json = json_encode(
         $payload,
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-    ), PHP_EOL;
+    );
+    echo '__ROSOMAHA_FAN_JSON_BYTES__=', strlen($json), PHP_EOL;
+    echo '__ROSOMAHA_FAN_JSON_SHA256__=', hash('sha256', $json), PHP_EOL;
+    echo '__ROSOMAHA_FAN_JSON_BASE64__=', base64_encode($json), PHP_EOL;
     exit($exitCode);
 }
 

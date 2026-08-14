@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -600,6 +602,29 @@ def public_fetcher(
     return fetch
 
 
+def remote_stdout_frame(
+    payload: object,
+    *,
+    script_sha256: str = "a" * 64,
+    php_version: str = "8.2.29",
+) -> str:
+    raw = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return "\n".join(
+        [
+            f"__ROSOMAHA_FAN_PHP_VERSION__={php_version}",
+            f"__ROSOMAHA_FAN_PHP_SHA256__={script_sha256}",
+            "__ROSOMAHA_FAN_PHP_LINT__=ok",
+            f"__ROSOMAHA_FAN_JSON_BYTES__={len(raw)}",
+            f"__ROSOMAHA_FAN_JSON_SHA256__={hashlib.sha256(raw).hexdigest()}",
+            "__ROSOMAHA_FAN_JSON_BASE64__="
+            + base64.b64encode(raw).decode("ascii"),
+            "",
+        ]
+    )
+
+
 class FixedScopeTests(unittest.TestCase):
     def test_exact_identity_and_allowlist_match_repository_constants(self) -> None:
         source = (SCRIPT_PATH.parents[1] / "src" / "data" / "products.ts").read_text(
@@ -656,6 +681,10 @@ class AuditOnlyContractTests(unittest.TestCase):
         self.assertIn("active_and_exactly_one_positive_filter_price", source)
         self.assertIn("element_sort_then_id_desc", source)
         self.assertIn("'ready_for_apply' => false", source)
+        self.assertIn("__ROSOMAHA_FAN_JSON_BYTES__=", source)
+        self.assertIn("__ROSOMAHA_FAN_JSON_SHA256__=", source)
+        self.assertIn("__ROSOMAHA_FAN_JSON_BASE64__=", source)
+        self.assertIn("base64_encode($json)", source)
 
     def test_apply_and_recover_are_blocked_before_dispatch(self) -> None:
         execute = Mock()
@@ -696,6 +725,112 @@ class AuditOnlyContractTests(unittest.TestCase):
             with self.assertRaises(MODULE.RemoteAuditError):
                 MODULE.execute_remote("audit", connect_fn=Mock(return_value=client))
         client.close.assert_called_once_with()
+
+
+class RemoteFrameProtocolTests(unittest.TestCase):
+    def test_unicode_line_separators_survive_ascii_frame_without_splitlines(self) -> None:
+        payload = {
+            "status": "ok",
+            "value": "before\u2028middle\u2029after\u0085tail",
+        }
+        stdout = remote_stdout_frame(payload)
+        # This is the exact old failure mode: str.splitlines sees separators
+        # inside raw Unicode JSON.  The new transport contains ASCII only.
+        self.assertTrue(stdout.isascii())
+        parsed, version = MODULE.parse_remote_stdout_frame(
+            stdout, expected_script_sha256="a" * 64
+        )
+        self.assertEqual(parsed, payload)
+        self.assertEqual(version, "8.2.29")
+
+    def test_missing_duplicate_corrupt_or_contaminated_frame_fails_closed(self) -> None:
+        valid = remote_stdout_frame({"status": "ok"})
+        lines = valid.split("\n")
+        cases = {
+            "missing_payload": "\n".join(lines[:-2] + [""]),
+            "duplicate_frame": "\n".join(lines[:-1] + [lines[-2], ""]),
+            "unexpected_stdout": "unexpected output\n" + valid,
+            "missing_final_newline": valid.rstrip("\n"),
+            "contaminated_version_value": valid.replace(
+                "__ROSOMAHA_FAN_PHP_VERSION__=8.2.29",
+                "__ROSOMAHA_FAN_PHP_VERSION__=8.2.29 unexpected",
+                1,
+            ),
+            "wrong_sha": valid.replace(
+                "__ROSOMAHA_FAN_JSON_SHA256__=",
+                "__ROSOMAHA_FAN_JSON_SHA256__=" + "0" * 64 + "#",
+                1,
+            ),
+            "corrupt_base64": valid.replace(
+                "__ROSOMAHA_FAN_JSON_BASE64__=e",
+                "__ROSOMAHA_FAN_JSON_BASE64__=!",
+                1,
+            ),
+        }
+        for label, stdout in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaises(MODULE.RemoteAuditError):
+                    MODULE.parse_remote_stdout_frame(
+                        stdout, expected_script_sha256="a" * 64
+                    )
+
+    def test_remote_channel_waits_for_full_eof_after_exit_status(self) -> None:
+        complete = remote_stdout_frame({"status": "ok"})
+        split_at = complete.index("__ROSOMAHA_FAN_JSON_BASE64__=") + 35
+        chunks = [complete[:split_at].encode("ascii"), complete[split_at:].encode("ascii")]
+
+        class LateTailChannel:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.index = 0
+                self.eof_received = False
+                self.closed = False
+
+            def recv_ready(self) -> bool:
+                self.calls += 1
+                if self.index == 0:
+                    return self.calls == 1
+                if self.index == 1:
+                    return self.calls >= 4
+                self.eof_received = True
+                return False
+
+            def recv(self, _size: int) -> bytes:
+                chunk = chunks[self.index]
+                self.index += 1
+                return chunk
+
+            def recv_stderr_ready(self) -> bool:
+                return False
+
+            def exit_status_ready(self) -> bool:
+                return True
+
+            def recv_exit_status(self) -> int:
+                return 0
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeStdout:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+        channel = LateTailChannel()
+        client = Mock()
+        client.exec_command.return_value = (None, FakeStdout(channel), None)
+        status, stdout, stderr = MODULE.run_remote_command(
+            client, "fixed-audit", timeout_seconds=1
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout, complete)
+        self.assertEqual(stderr, "")
+        self.assertTrue(channel.eof_received)
+        self.assertTrue(channel.closed)
+        parsed, _ = MODULE.parse_remote_stdout_frame(
+            stdout, expected_script_sha256="a" * 64
+        )
+        self.assertEqual(parsed, {"status": "ok"})
 
 
 class CredentialSafetyTests(unittest.TestCase):

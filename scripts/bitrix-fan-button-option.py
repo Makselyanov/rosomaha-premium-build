@@ -108,7 +108,8 @@ MAX_PUBLIC_PARSE_ERRORS = 32
 MAX_RECEIPT_BYTES = 12_000_000
 
 MAX_PHP_BYTES = 256_000
-MAX_STDOUT_BYTES = 8_000_000
+# The ASCII base64 frame can be 4/3 the bounded JSON size, plus six markers.
+MAX_STDOUT_BYTES = 10_500_000
 MAX_STDERR_BYTES = 32_000
 MAX_REMOTE_SECONDS = 150
 MAX_JSON_BYTES = 7_500_000
@@ -281,6 +282,9 @@ def validate_php_source(script_bytes: bytes) -> str:
         "'price' => 7000",
         "'mode' => 'audit'",
         "'database_mutations' => 0",
+        "__ROSOMAHA_FAN_JSON_BYTES__=",
+        "__ROSOMAHA_FAN_JSON_SHA256__=",
+        "__ROSOMAHA_FAN_JSON_BASE64__=",
     )
     if any(item not in source for item in required):
         raise RuntimeError("Pinned PHP reader identity contract is incomplete")
@@ -346,36 +350,58 @@ def run_remote_command(
         channel = stdout.channel
         deadline = time.monotonic() + timeout_seconds
         while True:
+            progress = False
             while channel.recv_ready():
-                output.extend(channel.recv(65536))
+                if time.monotonic() >= deadline:
+                    channel.close()
+                    raise RemoteAuditError(
+                        "Remote read-only audit timed out before full EOF"
+                    )
+                chunk = channel.recv(65536)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                progress = True
                 if len(output) > MAX_STDOUT_BYTES:
                     channel.close()
                     raise RemoteAuditError("Remote stdout exceeded the fixed limit")
             while channel.recv_stderr_ready():
-                error.extend(channel.recv_stderr(16384))
+                if time.monotonic() >= deadline:
+                    channel.close()
+                    raise RemoteAuditError(
+                        "Remote read-only audit timed out before full EOF"
+                    )
+                chunk = channel.recv_stderr(16384)
+                if not chunk:
+                    break
+                error.extend(chunk)
+                progress = True
                 if len(error) > MAX_STDERR_BYTES:
                     channel.close()
                     raise RemoteAuditError("Remote stderr exceeded the fixed limit")
-            if channel.exit_status_ready():
-                while channel.recv_ready():
-                    output.extend(channel.recv(65536))
-                    if len(output) > MAX_STDOUT_BYTES:
-                        channel.close()
-                        raise RemoteAuditError("Remote stdout exceeded the fixed limit")
-                while channel.recv_stderr_ready():
-                    error.extend(channel.recv_stderr(16384))
-                    if len(error) > MAX_STDERR_BYTES:
-                        channel.close()
-                        raise RemoteAuditError("Remote stderr exceeded the fixed limit")
+            exit_ready = channel.exit_status_ready()
+            eof_or_closed = bool(
+                getattr(channel, "eof_received", False)
+                or getattr(channel, "closed", False)
+            )
+            if (
+                exit_ready
+                and eof_or_closed
+                and not channel.recv_ready()
+                and not channel.recv_stderr_ready()
+            ):
+                status = channel.recv_exit_status()
+                channel.close()
                 return (
-                    channel.recv_exit_status(),
-                    output.decode("utf-8", errors="strict").strip(),
-                    error.decode("utf-8", errors="replace").strip(),
+                    status,
+                    output.decode("utf-8", errors="strict"),
+                    error.decode("utf-8", errors="replace"),
                 )
             if time.monotonic() >= deadline:
                 channel.close()
-                raise RemoteAuditError("Remote read-only audit timed out")
-            time.sleep(0.1)
+                raise RemoteAuditError("Remote read-only audit timed out before full EOF")
+            if not progress:
+                time.sleep(0.01)
     except RemoteAuditError:
         raise
     except Exception as exc:
@@ -1263,6 +1289,73 @@ def normalize_remote_payload(payload: object) -> dict[str, object]:
     return json.loads(json.dumps(remote, ensure_ascii=False))
 
 
+def parse_remote_stdout_frame(
+    stdout: str,
+    *,
+    expected_script_sha256: str,
+) -> tuple[object, str]:
+    """Parse one exact ASCII frame; reject truncation and stdout contamination."""
+    if (
+        not stdout
+        or not stdout.endswith("\n")
+        or "\r" in stdout
+        or len(stdout.encode("utf-8")) > MAX_STDOUT_BYTES
+    ):
+        raise RemoteAuditError("Remote stdout frame boundaries are invalid")
+    lines = stdout[:-1].split("\n")
+    if len(lines) != 6:
+        raise RemoteAuditError("Remote stdout contains missing or unexpected frame lines")
+    expected_prefixes = (
+        "__ROSOMAHA_FAN_PHP_VERSION__=",
+        "__ROSOMAHA_FAN_PHP_SHA256__=",
+        "__ROSOMAHA_FAN_PHP_LINT__=",
+        "__ROSOMAHA_FAN_JSON_BYTES__=",
+        "__ROSOMAHA_FAN_JSON_SHA256__=",
+        "__ROSOMAHA_FAN_JSON_BASE64__=",
+    )
+    if any(not line.startswith(prefix) for line, prefix in zip(lines, expected_prefixes)):
+        raise RemoteAuditError("Remote stdout frame marker order is invalid")
+    values = [line[len(prefix):] for line, prefix in zip(lines, expected_prefixes)]
+    php_version, script_sha256, lint_status, byte_text, payload_sha256, encoded = values
+    if re.fullmatch(
+        re.escape(EXPECTED_PHP_SERIES) + r"\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?",
+        php_version,
+    ) is None:
+        raise RemoteAuditError("Remote PHP version is outside the pinned series")
+    if script_sha256 != expected_script_sha256:
+        raise RemoteAuditError("Remote PHP byte digest does not match")
+    if lint_status != "ok":
+        raise RemoteAuditError("Remote PHP lint marker is invalid")
+    if re.fullmatch(r"[1-9][0-9]*", byte_text) is None:
+        raise RemoteAuditError("Remote JSON byte marker is invalid")
+    payload_bytes_expected = int(byte_text)
+    if payload_bytes_expected > MAX_JSON_BYTES:
+        raise RemoteAuditError("Remote JSON exceeded the fixed limit")
+    if re.fullmatch(r"[a-f0-9]{64}", payload_sha256) is None:
+        raise RemoteAuditError("Remote JSON digest marker is invalid")
+    expected_base64_length = 4 * ((payload_bytes_expected + 2) // 3)
+    if (
+        len(encoded) != expected_base64_length
+        or not encoded.isascii()
+        or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded) is None
+    ):
+        raise RemoteAuditError("Remote JSON base64 frame is invalid")
+    try:
+        payload_bytes = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise RemoteAuditError("Remote JSON base64 frame is invalid") from exc
+    if len(payload_bytes) != payload_bytes_expected:
+        raise RemoteAuditError("Remote JSON byte marker does not match the frame")
+    if hashlib.sha256(payload_bytes).hexdigest() != payload_sha256:
+        raise RemoteAuditError("Remote JSON digest does not match the frame")
+    try:
+        payload_text = payload_bytes.decode("utf-8", errors="strict")
+        parsed = json.loads(payload_text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RemoteAuditError("Remote framed payload is not valid UTF-8 JSON") from exc
+    return parsed, php_version
+
+
 def execute_remote(
     mode: str = "audit",
     *,
@@ -1281,25 +1374,12 @@ def execute_remote(
         client.close()
     if stderr:
         raise RemoteAuditError("Remote read-only audit emitted stderr")
-    lines = stdout.splitlines()
-    markers: dict[str, str] = {}
-    for line in lines[:-1]:
-        if line.startswith("__ROSOMAHA_FAN_") and "=" in line:
-            key, value = line.split("=", 1)
-            markers[key] = value
-    if markers.get("__ROSOMAHA_FAN_PHP_LINT__") != "ok":
-        raise RemoteAuditError("Remote PHP lint marker is missing")
-    if markers.get("__ROSOMAHA_FAN_PHP_SHA256__") != digest:
-        raise RemoteAuditError("Remote PHP byte digest does not match")
-    php_version = markers.get("__ROSOMAHA_FAN_PHP_VERSION__", "")
-    if not php_version.startswith(EXPECTED_PHP_SERIES + "."):
-        raise RemoteAuditError("Remote PHP version is outside the pinned series")
-    if status != 0 or not lines:
+    if status != 0:
         raise RemoteAuditError("Remote read-only helper failed")
-    try:
-        parsed = json.loads(lines[-1])
-    except json.JSONDecodeError as exc:
-        raise RemoteAuditError("Remote helper returned malformed JSON") from exc
+    parsed, php_version = parse_remote_stdout_frame(
+        stdout,
+        expected_script_sha256=digest,
+    )
     normalized = normalize_remote_payload(parsed)
     normalized["runtime"] = {
         "php_version": php_version,
