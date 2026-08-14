@@ -17,6 +17,11 @@ const ROSOMAHA_FAN_MAX_SECTIONS = 16;
 const ROSOMAHA_FAN_MAX_SIBLINGS = 256;
 const ROSOMAHA_FAN_MAX_DUPLICATES = 32;
 const ROSOMAHA_FAN_MAX_STRING_BYTES = 512;
+const ROSOMAHA_FAN_LINK_GOODS_PROPERTY_ID = 1219;
+const ROSOMAHA_FAN_OPTIONS_SECTION_ID = 302;
+const ROSOMAHA_FAN_TARGET_SORT = 506;
+const ROSOMAHA_FAN_MAX_LINKED_OPTIONS = 96;
+const ROSOMAHA_FAN_MAX_NO_CONTENT_SAMPLES = 16;
 
 const ROSOMAHA_FAN_TARGET = [
     'name' => 'Дополнительная кнопка включения вентилятора',
@@ -38,6 +43,16 @@ const ROSOMAHA_FAN_MODEL_CODES = [
     'snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota',
     'snegobolotokhod-rosomakha-komplektatsiya-shestikolyesnik-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota',
 ];
+
+const ROSOMAHA_FAN_EXPECTED_LINKED_OPTION_IDS = [
+    841, 842, 843, 844, 847, 848, 849, 850, 851, 852, 853, 854, 855, 856,
+    859, 860, 862, 865, 867, 868, 869, 870, 871, 872, 873, 874, 875, 876,
+    877, 878, 882, 883, 886, 887, 893, 894, 895, 937, 938, 951, 952, 961,
+    962, 975, 976, 977, 992, 998, 999, 1072, 1073, 1084, 1091, 1093, 1095,
+    1096, 1097, 1098, 1099, 1112, 1113, 1114,
+];
+
+const ROSOMAHA_FAN_TEMPLATE_PEER_IDS = [876, 877, 856, 1099];
 
 function rosomahaFanResult(array $payload, int $exitCode = 0): void
 {
@@ -665,6 +680,428 @@ function rosomahaFanSectionOrder(array $anchorPublic): array
     ];
 }
 
+function rosomahaFanCanonicalValue(mixed $value): mixed
+{
+    if (!is_array($value)) {
+        return $value;
+    }
+    if (array_is_list($value)) {
+        return array_map('rosomahaFanCanonicalValue', $value);
+    }
+    ksort($value, SORT_STRING);
+    foreach ($value as $key => $item) {
+        $value[$key] = rosomahaFanCanonicalValue($item);
+    }
+    return $value;
+}
+
+function rosomahaFanEvidenceHash(mixed $value): string
+{
+    return hash(
+        'sha256',
+        json_encode(
+            rosomahaFanCanonicalValue($value),
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        )
+    );
+}
+
+function rosomahaFanPropertyShapes(array $properties): array
+{
+    $shapes = [];
+    foreach ($properties as $property) {
+        $values = $property['values'] ?? [];
+        if (!is_array($values)) {
+            throw new RuntimeException('Normalized property values are invalid');
+        }
+        $shapes[] = [
+            'id' => (int) ($property['id'] ?? 0),
+            'code' => (string) ($property['code'] ?? ''),
+            'type' => (string) ($property['type'] ?? ''),
+            'multiple' => ($property['multiple'] ?? false) === true,
+            'link_iblock_id' => (int) ($property['link_iblock_id'] ?? 0),
+            'value_count' => count($values),
+            'values_sha256' => rosomahaFanEvidenceHash($values),
+        ];
+    }
+    return $shapes;
+}
+
+function rosomahaFanPropertyValuesById(array $publicElement, int $propertyId): array
+{
+    foreach ($publicElement['properties'] as $property) {
+        if ((int) ($property['id'] ?? 0) === $propertyId) {
+            return is_array($property['values'] ?? null) ? $property['values'] : [];
+        }
+    }
+    throw new RuntimeException("Element property {$propertyId} is absent");
+}
+
+function rosomahaFanOrderedLinkIds(array $publicElement): array
+{
+    $ids = [];
+    foreach (rosomahaFanPropertyValuesById(
+        $publicElement,
+        ROSOMAHA_FAN_LINK_GOODS_PROPERTY_ID
+    ) as $entry) {
+        $value = $entry['value'] ?? null;
+        if (is_int($value) && $value > 0) {
+            $ids[] = $value;
+        } elseif (is_string($value) && preg_match('/^[1-9][0-9]*$/D', $value) === 1) {
+            $ids[] = (int) $value;
+        } else {
+            throw new RuntimeException('LINK_GOODS contains a non-element value');
+        }
+    }
+    if (count($ids) !== count(array_unique($ids))) {
+        throw new RuntimeException('LINK_GOODS contains a duplicate element id');
+    }
+    return $ids;
+}
+
+function rosomahaFanModelLinkEvidence(array $models): array
+{
+    $rows = [];
+    $union = [];
+    foreach ($models as $model) {
+        $public = $model['public'];
+        $orderedIds = rosomahaFanOrderedLinkIds($public);
+        foreach ($orderedIds as $linkedId) {
+            $union[$linkedId] = true;
+        }
+        $gurPositions = [];
+        foreach ($orderedIds as $position => $linkedId) {
+            if ($linkedId === ROSOMAHA_FAN_ANCHOR_ID) {
+                $gurPositions[] = $position;
+            }
+        }
+        $rows[] = [
+            'model_id' => $public['id'],
+            'model_code' => $public['code'],
+            'ordered_ids' => $orderedIds,
+            'ordered_ids_sha256' => rosomahaFanEvidenceHash($orderedIds),
+            'count' => count($orderedIds),
+            'gur_positions_zero_based' => $gurPositions,
+        ];
+    }
+    $unionIds = array_keys($union);
+    sort($unionIds, SORT_NUMERIC);
+    if (count($unionIds) > ROSOMAHA_FAN_MAX_LINKED_OPTIONS) {
+        throw new RuntimeException('Linked option union exceeded the fixed limit');
+    }
+    return [
+        'models' => $rows,
+        'union_ids' => $unionIds,
+        'union_count' => count($unionIds),
+        'union_sha256' => rosomahaFanEvidenceHash($unionIds),
+        'expected_union_ids' => ROSOMAHA_FAN_EXPECTED_LINKED_OPTION_IDS,
+        'matches_pinned_audit_union' => $unionIds === ROSOMAHA_FAN_EXPECTED_LINKED_OPTION_IDS,
+        'gur_model_count' => count(array_filter(
+            $rows,
+            static fn(array $row): bool => count($row['gur_positions_zero_based']) === 1
+        )),
+    ];
+}
+
+function rosomahaFanLinkedOptionSummary(array $publicElement): array
+{
+    return [
+        'id' => $publicElement['id'],
+        'code' => $publicElement['code'],
+        'fields' => $publicElement['fields'],
+        'sections' => $publicElement['sections'],
+        'property_shapes' => rosomahaFanPropertyShapes($publicElement['properties']),
+        'price_values' => rosomahaFanPropertyValuesById($publicElement, 1171),
+        'filter_price_values' => rosomahaFanPropertyValuesById($publicElement, 1177),
+        'full_snapshot_sha256' => rosomahaFanEvidenceHash($publicElement),
+    ];
+}
+
+function rosomahaFanReadLinkedOptions(array $unionIds, array $propertyById): array
+{
+    if (count($unionIds) > ROSOMAHA_FAN_MAX_LINKED_OPTIONS) {
+        throw new RuntimeException('Linked option read exceeded the fixed limit');
+    }
+    $summaries = [];
+    $publicById = [];
+    foreach ($unionIds as $linkedId) {
+        $fields = rosomahaFanReadElementFieldsById((int) $linkedId, "linked option {$linkedId}");
+        $element = rosomahaFanReadElement($fields, $propertyById);
+        $public = $element['public'];
+        if ((int) $public['id'] !== (int) $linkedId || (string) $public['code'] === '') {
+            throw new RuntimeException('Linked option identity is invalid');
+        }
+        $publicById[(int) $linkedId] = $public;
+        $summaries[] = rosomahaFanLinkedOptionSummary($public);
+    }
+    return ['summaries' => $summaries, 'public_by_id' => $publicById];
+}
+
+function rosomahaFanTemplatePeers(array $publicById): array
+{
+    $peers = [];
+    foreach (ROSOMAHA_FAN_TEMPLATE_PEER_IDS as $peerId) {
+        if (!isset($publicById[$peerId])) {
+            throw new RuntimeException("Template peer {$peerId} is outside LINK_GOODS union");
+        }
+        $peers[] = $publicById[$peerId];
+    }
+    return [
+        'peer_ids' => ROSOMAHA_FAN_TEMPLATE_PEER_IDS,
+        'elements' => $peers,
+        'full_snapshot_sha256' => rosomahaFanEvidenceHash($peers),
+    ];
+}
+
+function rosomahaFanRenderItem(array $public): array
+{
+    $filterPriceValues = rosomahaFanPropertyValuesById($public, 1177);
+    $filterPrice = null;
+    $filterPriceNumericCount = 0;
+    foreach ($filterPriceValues as $entry) {
+        $value = $entry['value'] ?? null;
+        if (is_int($value) || is_float($value)) {
+            $filterPriceNumericCount++;
+            $filterPrice = $value;
+        } elseif (is_string($value)
+            && preg_match('/^-?[0-9]+(?:\.[0-9]+)?$/D', $value) === 1) {
+            $filterPriceNumericCount++;
+            $filterPrice = (float) $value;
+        }
+    }
+    $selectable = count($filterPriceValues) === 1
+        && $filterPriceNumericCount === 1
+        && is_numeric($filterPrice)
+        && (float) $filterPrice > 0;
+    return [
+        'id' => (int) $public['id'],
+        'code' => (string) $public['code'],
+        'name' => $public['fields']['name'],
+        'active' => ($public['fields']['active'] ?? false) === true,
+        'sort' => (int) ($public['fields']['sort'] ?? 0),
+        'filter_price_values' => $filterPriceValues,
+        'selectable_contract' => [
+            'rule' => 'active_and_exactly_one_positive_filter_price',
+            'property_value_count' => count($filterPriceValues),
+            'numeric_value_count' => $filterPriceNumericCount,
+            'positive_filter_price' => $selectable ? $filterPrice : null,
+            'eligible' => (($public['fields']['active'] ?? false) === true) && $selectable,
+        ],
+    ];
+}
+
+function rosomahaFanRenderOrderEvidence(array $modelLinks, array $publicById): array
+{
+    $models = [];
+    foreach ($modelLinks['models'] as $modelLink) {
+        $relationItems = [];
+        foreach ($modelLink['ordered_ids'] as $linkedId) {
+            if (!isset($publicById[$linkedId])) {
+                throw new RuntimeException('Render evidence is missing a linked option');
+            }
+            $relationItems[] = rosomahaFanRenderItem($publicById[$linkedId]);
+        }
+        $selectableRelationItems = array_values(array_filter(
+            $relationItems,
+            static fn(array $item): bool => $item['selectable_contract']['eligible'] === true
+        ));
+        $sortItemsAsc = $selectableRelationItems;
+        usort($sortItemsAsc, static function (array $left, array $right): int {
+            $bySort = $left['sort'] <=> $right['sort'];
+            return $bySort !== 0 ? $bySort : $left['id'] <=> $right['id'];
+        });
+        $sortItemsDesc = $selectableRelationItems;
+        usort($sortItemsDesc, static function (array $left, array $right): int {
+            $bySort = $left['sort'] <=> $right['sort'];
+            return $bySort !== 0 ? $bySort : $right['id'] <=> $left['id'];
+        });
+        $below = array_values(array_filter(
+            $sortItemsDesc,
+            static fn(array $item): bool => $item['sort'] < ROSOMAHA_FAN_TARGET_SORT
+        ));
+        $equal = array_values(array_filter(
+            $sortItemsDesc,
+            static fn(array $item): bool => $item['sort'] === ROSOMAHA_FAN_TARGET_SORT
+        ));
+        $above = array_values(array_filter(
+            $sortItemsDesc,
+            static fn(array $item): bool => $item['sort'] > ROSOMAHA_FAN_TARGET_SORT
+        ));
+        $selectableIdsAsSet = array_values(array_unique(array_column(
+            $selectableRelationItems,
+            'id'
+        )));
+        sort($selectableIdsAsSet, SORT_NUMERIC);
+        $models[] = [
+            'model_id' => $modelLink['model_id'],
+            'model_code' => $modelLink['model_code'],
+            'hypotheses' => [
+                'link_goods_order' => array_column($selectableRelationItems, 'id'),
+                'element_sort_then_id_asc' => array_column($sortItemsAsc, 'id'),
+                'element_sort_then_id_desc' => array_column($sortItemsDesc, 'id'),
+            ],
+            'relation_items' => $relationItems,
+            'expected_selectable_count' => count($selectableRelationItems),
+            'expected_selectable_ids_as_set' => $selectableIdsAsSet,
+            'target_hypothesis' => [
+                'target_sort' => ROSOMAHA_FAN_TARGET_SORT,
+                'link_goods_append_position_zero_based' => count($relationItems),
+                'sort_neighbor_before' => $below === [] ? null : $below[count($below) - 1],
+                'same_sort_items' => $equal,
+                'sort_neighbor_after' => $above === [] ? null : $above[0],
+                'tie_break_is_unprovable_before_target_id_exists' => $equal !== [],
+            ],
+        ];
+    }
+    $existingAtTargetSort = [];
+    foreach ($publicById as $public) {
+        if ((int) ($public['fields']['sort'] ?? 0) === ROSOMAHA_FAN_TARGET_SORT) {
+            $existingAtTargetSort[] = rosomahaFanRenderItem($public);
+        }
+    }
+    usort(
+        $existingAtTargetSort,
+        static fn(array $left, array $right): int => $left['id'] <=> $right['id']
+    );
+    return [
+        'candidate_sources' => [
+            'link_goods_order',
+            'element_sort_then_id_asc',
+            'element_sort_then_id_desc',
+        ],
+        'selectable_db_rule' => 'active_and_exactly_one_positive_filter_price',
+        'target_sort_from_section_gap' => ROSOMAHA_FAN_TARGET_SORT,
+        'existing_union_items_at_target_sort' => $existingAtTargetSort,
+        'target_sort_is_unique_in_linked_union' => $existingAtTargetSort === [],
+        'models' => $models,
+        'render_order_source' => null,
+        'requires_public_model_page_evidence' => true,
+    ];
+}
+
+function rosomahaFanNoContentOptionSamples(array $propertyById): array
+{
+    $samples = [];
+    $eligibleCount = 0;
+    $result = CIBlockElement::GetList(
+        ['SORT' => 'ASC', 'ID' => 'ASC'],
+        [
+            'IBLOCK_ID' => ROSOMAHA_FAN_IBLOCK_ID,
+            'SECTION_ID' => ROSOMAHA_FAN_OPTIONS_SECTION_ID,
+            'INCLUDE_SUBSECTIONS' => 'N',
+            'ACTIVE' => 'Y',
+            'CHECK_PERMISSIONS' => 'N',
+        ],
+        false,
+        ['nTopCount' => ROSOMAHA_FAN_MAX_SIBLINGS + 1],
+        [
+            'ID', 'IBLOCK_ID', 'IBLOCK_SECTION_ID', 'NAME', 'CODE', 'XML_ID',
+            'ACTIVE', 'SORT', 'DATE_ACTIVE_FROM', 'DATE_ACTIVE_TO', 'PREVIEW_TEXT',
+            'PREVIEW_TEXT_TYPE', 'DETAIL_TEXT', 'DETAIL_TEXT_TYPE', 'PREVIEW_PICTURE',
+            'DETAIL_PICTURE', 'DETAIL_PAGE_URL', 'DATE_CREATE', 'TIMESTAMP_X',
+        ]
+    );
+    $seen = 0;
+    while ($fields = $result->GetNext()) {
+        $seen++;
+        if ($seen > ROSOMAHA_FAN_MAX_SIBLINGS) {
+            throw new RuntimeException('Options section sample scan exceeded the fixed limit');
+        }
+        $noPictures = (int) ($fields['PREVIEW_PICTURE'] ?? 0) === 0
+            && (int) ($fields['DETAIL_PICTURE'] ?? 0) === 0;
+        $noText = (string) ($fields['PREVIEW_TEXT'] ?? '') === ''
+            && (string) ($fields['DETAIL_TEXT'] ?? '') === '';
+        if (!$noPictures || !$noText) {
+            continue;
+        }
+        $eligibleCount++;
+        if (count($samples) >= ROSOMAHA_FAN_MAX_NO_CONTENT_SAMPLES) {
+            continue;
+        }
+        $element = rosomahaFanReadElement($fields, $propertyById)['public'];
+        $samples[] = [
+            'id' => $element['id'],
+            'code' => $element['code'],
+            'fields' => $element['fields'],
+            'sections' => $element['sections'],
+            'property_shapes' => rosomahaFanPropertyShapes($element['properties']),
+            'full_snapshot_sha256' => rosomahaFanEvidenceHash($element),
+            'public_url' => 'https://' . ROSOMAHA_FAN_DOMAIN
+                . '/product/' . rawurlencode((string) $element['code']) . '/',
+        ];
+    }
+    return [
+        'section_id' => ROSOMAHA_FAN_OPTIONS_SECTION_ID,
+        'active_direct_section_elements_scanned' => $seen,
+        'eligible_count' => $eligibleCount,
+        'samples' => $samples,
+        'samples_truncated' => $eligibleCount > count($samples),
+    ];
+}
+
+function rosomahaFanBoundedTemplateMap(mixed $templates): array
+{
+    if (!is_array($templates) || count($templates) > 64) {
+        throw new RuntimeException('Inherited metadata template map is invalid');
+    }
+    $result = [];
+    foreach ($templates as $key => $value) {
+        if (!is_string($key) || strlen($key) > 128) {
+            throw new RuntimeException('Inherited metadata template key is invalid');
+        }
+        $result[$key] = rosomahaFanNormalizeScalar($value);
+    }
+    ksort($result, SORT_STRING);
+    return $result;
+}
+
+function rosomahaFanMetadataTemplateEvidence(): array
+{
+    $urls = [];
+    foreach (['LIST_PAGE_URL', 'SECTION_PAGE_URL', 'DETAIL_PAGE_URL'] as $field) {
+        $urls[$field] = rosomahaFanNormalizeScalar(
+            (string) CIBlock::GetArrayByID(ROSOMAHA_FAN_IBLOCK_ID, $field)
+        );
+    }
+    $evidence = [
+        'iblock_page_url_templates' => $urls,
+        'iblock_inherited_templates' => ['available' => false, 'templates' => null],
+        'section_inherited_templates' => ['available' => false, 'templates' => null],
+    ];
+    $iblockClass = 'Bitrix\\Iblock\\InheritedProperty\\IblockTemplates';
+    if (class_exists($iblockClass) && method_exists($iblockClass, 'findTemplates')) {
+        try {
+            $reader = new $iblockClass(ROSOMAHA_FAN_IBLOCK_ID);
+            $evidence['iblock_inherited_templates'] = [
+                'available' => true,
+                'templates' => rosomahaFanBoundedTemplateMap($reader->findTemplates()),
+            ];
+        } catch (Throwable $error) {
+            $evidence['iblock_inherited_templates']['reason'] = get_class($error);
+        }
+    } else {
+        $evidence['iblock_inherited_templates']['reason'] = 'api_unavailable';
+    }
+    $sectionClass = 'Bitrix\\Iblock\\InheritedProperty\\SectionTemplates';
+    if (class_exists($sectionClass) && method_exists($sectionClass, 'findTemplates')) {
+        try {
+            $reader = new $sectionClass(
+                ROSOMAHA_FAN_IBLOCK_ID,
+                ROSOMAHA_FAN_OPTIONS_SECTION_ID
+            );
+            $evidence['section_inherited_templates'] = [
+                'available' => true,
+                'templates' => rosomahaFanBoundedTemplateMap($reader->findTemplates()),
+            ];
+        } catch (Throwable $error) {
+            $evidence['section_inherited_templates']['reason'] = get_class($error);
+        }
+    } else {
+        $evidence['section_inherited_templates']['reason'] = 'api_unavailable';
+    }
+    return $evidence;
+}
+
 if (PHP_SAPI !== 'cli') {
     rosomahaFanResult(['status' => 'error', 'error' => 'CLI only'], 2);
 }
@@ -680,7 +1117,7 @@ if ($mode !== 'audit' || count($argv) !== 2) {
 }
 
 ini_set('display_errors', '0');
-set_time_limit(90);
+set_time_limit(110);
 error_reporting(E_ALL);
 
 $_SERVER['DOCUMENT_ROOT'] = ROSOMAHA_FAN_SITE_ROOT;
@@ -783,6 +1220,36 @@ try {
         $comparator
     );
     $sectionOrder = rosomahaFanSectionOrder($anchor['public']);
+    $modelLinkEvidence = rosomahaFanModelLinkEvidence($models);
+    $linkedOptions = rosomahaFanReadLinkedOptions(
+        $modelLinkEvidence['union_ids'],
+        $propertySchema['by_id']
+    );
+    $templatePeers = rosomahaFanTemplatePeers($linkedOptions['public_by_id']);
+    $renderOrderEvidence = rosomahaFanRenderOrderEvidence(
+        $modelLinkEvidence,
+        $linkedOptions['public_by_id']
+    );
+    $noContentSamples = rosomahaFanNoContentOptionSamples($propertySchema['by_id']);
+    $metadataTemplates = rosomahaFanMetadataTemplateEvidence();
+
+    $phase1bBlockers = [];
+    if (!$modelLinkEvidence['matches_pinned_audit_union']) {
+        $phase1bBlockers[] = 'linked_option_union_drifted_from_pinned_audit';
+    }
+    if ($modelLinkEvidence['union_count'] !== 62) {
+        $phase1bBlockers[] = 'linked_option_union_count_is_not_62';
+    }
+    if ($modelLinkEvidence['gur_model_count'] !== 8) {
+        $phase1bBlockers[] = 'gur_coverage_is_not_8_of_12';
+    }
+    if ($noContentSamples['eligible_count'] === 0) {
+        $phase1bBlockers[] = 'no_active_no_picture_no_text_option_baseline';
+    }
+    if (!$renderOrderEvidence['target_sort_is_unique_in_linked_union']) {
+        $phase1bBlockers[] = 'target_sort_506_is_not_unique_in_linked_union';
+    }
+    $phase1bBlockers[] = 'public_render_order_source_not_verified';
 
     $blockers = [];
     if (!$relation['unambiguous']) {
@@ -799,7 +1266,7 @@ try {
     if (!$sectionOrder['global_sort_plan']['unambiguous']) {
         $blockers[] = 'no_safe_sort_gap_after_anchor';
     }
-    $readyForApply = $blockers === [];
+    $baseAuditGatesPassed = $blockers === [];
 
     $publicModels = [];
     foreach ($models as $model) {
@@ -848,7 +1315,51 @@ try {
         'price_analysis' => $price,
         'section_order' => $sectionOrder,
         'target_duplicates' => $duplicates,
-        'ready_for_apply' => $readyForApply,
+        'phase1b_evidence' => [
+            'linked_option_union' => [
+                'ids' => $modelLinkEvidence['union_ids'],
+                'count' => $modelLinkEvidence['union_count'],
+                'sha256' => $modelLinkEvidence['union_sha256'],
+                'expected_ids_from_pinned_audit' => $modelLinkEvidence['expected_union_ids'],
+                'matches_pinned_audit' => $modelLinkEvidence['matches_pinned_audit_union'],
+            ],
+            'model_link_goods' => $modelLinkEvidence['models'],
+            'gur_model_count' => $modelLinkEvidence['gur_model_count'],
+            'linked_options' => $linkedOptions['summaries'],
+            'template_peers' => $templatePeers,
+            'render_order' => $renderOrderEvidence,
+            'active_no_picture_no_text_options' => $noContentSamples,
+            'metadata_templates' => $metadataTemplates,
+            'public_verification_contract' => [
+                'model_urls' => array_map(
+                    static fn(string $code): string => 'https://' . ROSOMAHA_FAN_DOMAIN
+                        . '/product/' . rawurlencode($code) . '/',
+                    ROSOMAHA_FAN_MODEL_CODES
+                ),
+                'required_model_page_fields' => [
+                    'http_status', 'final_url', 'self_canonical', 'robots',
+                    'body_sha256', 'ordered_selectable_option_ids',
+                    'ordered_selectable_option_sums',
+                ],
+                'render_order_source_rule' =>
+                    'exactly_one_database_hypothesis_must_match_all_12_public_pages',
+                'control_selector_contract' => [
+                    'tag' => 'span',
+                    'required_classes' => ['btn', 'bg-theme-target'],
+                    'required_attributes' => [
+                        'data-product-id', 'data-sum', 'data-name', 'data-row-id', 'onclick',
+                    ],
+                    'onclick' => 'priceCalculator.toggleOption(this)',
+                ],
+                'selectable_db_rule' => 'active_and_exactly_one_positive_filter_price',
+                'no_content_policy_baseline_required' => true,
+            ],
+            'blockers' => $phase1bBlockers,
+            'phase1b_evidence_ready' => false,
+            'database_mutations' => 0,
+        ],
+        'base_audit_gates_passed' => $baseAuditGatesPassed,
+        'ready_for_apply' => false,
         'blockers' => $blockers,
     ]);
 } catch (Throwable $error) {
