@@ -804,13 +804,40 @@ def _filter_price_contract(
 ) -> dict[str, object]:
     values = _require_list(values_value, "FILTER_PRICE values", MAX_PROPERTY_VALUES)
     numeric_values: list[int | float] = []
-    for item in values:
+    normalization_evidence: list[dict[str, object]] = []
+    for index, item in enumerate(values):
         entry = _require_dict(item, "FILTER_PRICE value")
         value = entry.get("value")
+        _validate_normalized_value(value, "FILTER_PRICE")
+        evidence: dict[str, object] = {
+            "index": index,
+            "input_kind": "unsupported",
+            "raw_utf8_bytes": None,
+            "raw_sha256": None,
+            "normalized_utf8_bytes": None,
+            "normalized_sha256": None,
+            "ascii_surrounding_whitespace_stripped": False,
+        }
         if isinstance(value, (int, float)) and not isinstance(value, bool):
+            evidence["input_kind"] = "numeric"
             numeric_values.append(value)
-        elif isinstance(value, str) and re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", value):
-            numeric_values.append(float(value))
+        elif isinstance(value, str):
+            normalized = value.strip(" \t\n\r\v\f")
+            raw_bytes = value.encode("utf-8")
+            normalized_bytes = normalized.encode("utf-8")
+            evidence.update(
+                {
+                    "input_kind": "string",
+                    "raw_utf8_bytes": len(raw_bytes),
+                    "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                    "normalized_utf8_bytes": len(normalized_bytes),
+                    "normalized_sha256": hashlib.sha256(normalized_bytes).hexdigest(),
+                    "ascii_surrounding_whitespace_stripped": normalized != value,
+                }
+            )
+            if re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", normalized):
+                numeric_values.append(float(normalized))
+        normalization_evidence.append(evidence)
     positive = (
         numeric_values[0]
         if len(values) == 1 and len(numeric_values) == 1 and numeric_values[0] > 0
@@ -818,6 +845,8 @@ def _filter_price_contract(
     )
     return {
         "rule": "active_and_exactly_one_positive_filter_price",
+        "normalization_rule": "strip_ascii_surrounding_whitespace_once",
+        "normalization_evidence": normalization_evidence,
         "property_value_count": len(values),
         "numeric_value_count": len(numeric_values),
         "positive_filter_price": positive,
@@ -2877,12 +2906,11 @@ def _tie_order_classification(ids: list[int], sorts_by_id: dict[int, int]) -> st
 def _near_control_contract(
     near_controls: list[dict[str, object]],
     *,
-    model_id: object,
     expected_option_ids: set[int],
 ) -> tuple[bool, list[str]]:
     blockers: list[str] = []
-    if len(near_controls) != 1:
-        blockers.append("near_control_count_is_not_exactly_one")
+    if near_controls:
+        blockers.append("near_control_count_is_not_zero")
     parsed_ids = [
         item.get("product_id")
         for item in near_controls
@@ -2900,30 +2928,6 @@ def _near_control_contract(
             blockers.append("near_control_is_hidden_or_disabled")
         if item.get("option_like") is True:
             blockers.append("near_control_is_option_like")
-    if len(near_controls) == 1:
-        item = near_controls[0]
-        exact_base_shape = (
-            isinstance(model_id, int)
-            and item.get("product_id") == model_id
-            and isinstance(item.get("sum"), int)
-            and item["sum"] > 0
-            and item.get("tag") == "div"
-            and item.get("class_tokens") == ["main-product"]
-            and item.get("attribute_names")
-            == ["class", "data-product-id", "data-sum"]
-            and item.get("hidden_or_disabled") is False
-            and item.get("option_like") is False
-            and item.get("onclick_present") is False
-            and item.get("onclick_sha256") is None
-            and isinstance(item.get("ancestor_depth"), int)
-            and item["ancestor_depth"] > 0
-            and re.fullmatch(
-                r"[a-f0-9]{64}", str(item.get("ancestor_fingerprint"))
-            )
-            is not None
-        )
-        if not exact_base_shape:
-            blockers.append("near_control_is_not_exact_pinned_base_product_shape")
     return blockers == [], list(dict.fromkeys(blockers))
 
 
@@ -2988,7 +2992,6 @@ def _analyze_public_model_page(
     )
     near_control_ok, near_control_blockers = _near_control_contract(
         near_controls,
-        model_id=render_model.get("model_id"),
         expected_option_ids=expected_option_ids,
     )
     ids_are_valid = all(isinstance(item, int) for item in ordered_ids)
@@ -3014,14 +3017,26 @@ def _analyze_public_model_page(
         for product_id, price_sum in zip(typed_ids, typed_sums)
         if expected_price_by_id.get(product_id) != price_sum
     ]
-    expected_name_by_id = {
+    expected_raw_name_by_id = {
         item["id"]: item.get("name")
         for item in relation_items
         if isinstance(item, dict) and isinstance(item.get("id"), int)
     }
+    expected_name_by_id = {
+        product_id: html_module.unescape(raw_name)
+        if isinstance(raw_name, str)
+        else raw_name
+        for product_id, raw_name in expected_raw_name_by_id.items()
+    }
     name_mismatches = [
         {
             "id": control.get("product_id"),
+            "normalization_rule": "single_html_unescape",
+            "expected_raw_sha256": hashlib.sha256(
+                str(expected_raw_name_by_id.get(control.get("product_id"), "")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
             "expected_sha256": hashlib.sha256(
                 str(expected_name_by_id.get(control.get("product_id"), "")).encode("utf-8")
             ).hexdigest(),
@@ -3090,11 +3105,18 @@ def _analyze_no_content_baseline(
     sample: dict[str, object] | None,
     fetched: object | None,
 ) -> dict[str, object]:
+    content_publish_blockers = [
+        "target_unique_server_rendered_copy_is_not_proven",
+        "target_element_level_metadata_is_not_proven",
+    ]
     if sample is None:
         return {
             "database_sample": None,
             "policy_baseline_ok": False,
             "blockers": ["database_no_content_sample_is_absent"],
+            "fallback_image_counts_as_owned_content": False,
+            "content_publish_gate": False,
+            "content_publish_blockers": content_publish_blockers,
         }
     requested_url = str(sample.get("public_url"))
     evidence, _ = _parse_public_response(requested_url, fetched)
@@ -3123,6 +3145,9 @@ def _analyze_no_content_baseline(
         ),
         "blockers": blockers,
         "policy_baseline_ok": blockers == [],
+        "fallback_image_counts_as_owned_content": False,
+        "content_publish_gate": False,
+        "content_publish_blockers": content_publish_blockers,
     }
 
 
@@ -3219,6 +3244,8 @@ def collect_public_evidence(
         blockers.append("public_primary_sort_not_proven_on_all_12_models")
     if baseline.get("policy_baseline_ok") is not True:
         blockers.append("public_no_content_policy_baseline_failed")
+    if baseline.get("content_publish_gate") is not True:
+        blockers.append("content_publish_gate_is_blocked")
     blockers = list(dict.fromkeys(blockers))
     phase1b_ready = blockers == [] and render_order_source is not None
     return {
@@ -3258,6 +3285,7 @@ def collect_public_evidence(
             "target_sort_is_unique_in_linked_union"
         ),
         "no_content_policy_baseline": baseline,
+        "content_publish_gate": baseline.get("content_publish_gate", False),
         "blockers": blockers,
         "phase1b_evidence_ready": phase1b_ready,
         "ready_for_apply": False,
@@ -3282,6 +3310,7 @@ def run_audit(
         "apply_supported": False,
         "ready_for_apply": False,
         "phase1b_evidence_ready": public.get("phase1b_evidence_ready", False),
+        "content_publish_gate": public.get("content_publish_gate", False),
         "render_order_source": public.get("render_order_source"),
         "phase1b_blockers": public.get("blockers", []),
         "relation_unambiguous": relation.get("unambiguous", False),

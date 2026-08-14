@@ -965,26 +965,62 @@ function rosomahaFanTemplatePeers(array $publicById): array
     ];
 }
 
-function rosomahaFanRenderItem(array $public): array
+function rosomahaFanFilterPriceContract(array $filterPriceValues, bool $active): array
 {
-    $filterPriceValues = rosomahaFanPropertyValuesById($public, 1177);
     $filterPrice = null;
     $filterPriceNumericCount = 0;
-    foreach ($filterPriceValues as $entry) {
+    $normalizationEvidence = [];
+    foreach ($filterPriceValues as $index => $entry) {
         $value = $entry['value'] ?? null;
+        $evidence = [
+            'index' => $index,
+            'input_kind' => 'unsupported',
+            'raw_utf8_bytes' => null,
+            'raw_sha256' => null,
+            'normalized_utf8_bytes' => null,
+            'normalized_sha256' => null,
+            'ascii_surrounding_whitespace_stripped' => false,
+        ];
         if (is_int($value) || is_float($value)) {
+            $evidence['input_kind'] = 'numeric';
             $filterPriceNumericCount++;
             $filterPrice = $value;
-        } elseif (is_string($value)
-            && preg_match('/^-?[0-9]+(?:\.[0-9]+)?$/D', $value) === 1) {
-            $filterPriceNumericCount++;
-            $filterPrice = (float) $value;
+        } elseif (is_string($value)) {
+            $normalized = trim($value, " \t\n\r\v\f");
+            $evidence = [
+                'index' => $index,
+                'input_kind' => 'string',
+                'raw_utf8_bytes' => strlen($value),
+                'raw_sha256' => hash('sha256', $value),
+                'normalized_utf8_bytes' => strlen($normalized),
+                'normalized_sha256' => hash('sha256', $normalized),
+                'ascii_surrounding_whitespace_stripped' => $normalized !== $value,
+            ];
+            if (preg_match('/^-?[0-9]+(?:\.[0-9]+)?$/D', $normalized) === 1) {
+                $filterPriceNumericCount++;
+                $filterPrice = (float) $normalized;
+            }
         }
+        $normalizationEvidence[] = $evidence;
     }
     $selectable = count($filterPriceValues) === 1
         && $filterPriceNumericCount === 1
         && is_numeric($filterPrice)
         && (float) $filterPrice > 0;
+    return [
+        'rule' => 'active_and_exactly_one_positive_filter_price',
+        'normalization_rule' => 'strip_ascii_surrounding_whitespace_once',
+        'normalization_evidence' => $normalizationEvidence,
+        'property_value_count' => count($filterPriceValues),
+        'numeric_value_count' => $filterPriceNumericCount,
+        'positive_filter_price' => $selectable ? $filterPrice : null,
+        'eligible' => $active && $selectable,
+    ];
+}
+
+function rosomahaFanRenderItem(array $public): array
+{
+    $filterPriceValues = rosomahaFanPropertyValuesById($public, 1177);
     return [
         'id' => (int) $public['id'],
         'code' => (string) $public['code'],
@@ -992,13 +1028,10 @@ function rosomahaFanRenderItem(array $public): array
         'active' => ($public['fields']['active'] ?? false) === true,
         'sort' => (int) ($public['fields']['sort'] ?? 0),
         'filter_price_values' => $filterPriceValues,
-        'selectable_contract' => [
-            'rule' => 'active_and_exactly_one_positive_filter_price',
-            'property_value_count' => count($filterPriceValues),
-            'numeric_value_count' => $filterPriceNumericCount,
-            'positive_filter_price' => $selectable ? $filterPrice : null,
-            'eligible' => (($public['fields']['active'] ?? false) === true) && $selectable,
-        ],
+        'selectable_contract' => rosomahaFanFilterPriceContract(
+            $filterPriceValues,
+            ($public['fields']['active'] ?? false) === true
+        ),
     ];
 }
 

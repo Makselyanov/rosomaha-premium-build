@@ -174,7 +174,13 @@ def add_phase1b(payload: dict[str, object]) -> None:
             }
         ]
         set_property_values(item, 1171, [linked_id * 10])
-        set_property_values(item, 1177, [] if linked_id == 895 else [linked_id * 10])
+        if linked_id == 894:
+            filter_price_values = ["60000 "]
+        elif linked_id == 895:
+            filter_price_values = ["150000 "]
+        else:
+            filter_price_values = [linked_id * 10]
+        set_property_values(item, 1177, filter_price_values)
         linked_full[linked_id] = item
 
     linked_summaries = [
@@ -537,7 +543,7 @@ def public_html(
         f'<title>Fixture</title><link rel="canonical" href="{canonical or url}">'
         f'<meta name="robots" content="{robots}">'
         "</head><body>"
-        f'<div class="main-product" data-product-id="{base_product_id}" data-sum="1"></div>'
+        f'<div class="main-product" data-product-id="{base_product_id}"></div>'
         f'{extra_near_html}<section class="additional-options">{control_html}</section>{image_html}'
         "</body></html>"
     ).encode("utf-8")
@@ -1621,6 +1627,79 @@ class Phase1bPayloadTests(unittest.TestCase):
         with self.assertRaises(MODULE.RemoteAuditError):
             MODULE.normalize_remote_payload(payload)
 
+        payload = valid_payload()
+        contract = payload["phase1b_evidence"]["render_order"]["models"][0][
+            "relation_items"
+        ][0]["selectable_contract"]
+        contract["normalization_evidence"][0]["raw_utf8_bytes"] = 999
+        with self.assertRaises(MODULE.RemoteAuditError):
+            MODULE.normalize_remote_payload(payload)
+
+    def test_filter_price_strips_only_surrounding_ascii_whitespace_once(self) -> None:
+        contract = MODULE._filter_price_contract(
+            [normalized_value(" \t60000\r\n")], active=True
+        )
+        self.assertTrue(contract["eligible"])
+        self.assertEqual(contract["positive_filter_price"], 60000)
+        self.assertEqual(
+            contract["normalization_rule"],
+            "strip_ascii_surrounding_whitespace_once",
+        )
+        evidence = contract["normalization_evidence"]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["input_kind"], "string")
+        self.assertTrue(evidence[0]["ascii_surrounding_whitespace_stripped"])
+        self.assertEqual(evidence[0]["raw_utf8_bytes"], len(" \t60000\r\n"))
+        self.assertEqual(evidence[0]["normalized_utf8_bytes"], 5)
+        self.assertRegex(evidence[0]["raw_sha256"], r"^[a-f0-9]{64}$")
+        self.assertRegex(evidence[0]["normalized_sha256"], r"^[a-f0-9]{64}$")
+        self.assertNotIn("raw_value", evidence[0])
+        self.assertNotIn("normalized_value", evidence[0])
+
+        invalid_values = (
+            "\u00a060000\u00a0",
+            "60 000",
+            "+60000",
+            "60000,0",
+            "60000\u2028",
+        )
+        for value in invalid_values:
+            with self.subTest(value=repr(value)):
+                invalid = MODULE._filter_price_contract(
+                    [normalized_value(value)], active=True
+                )
+                self.assertFalse(invalid["eligible"])
+                self.assertIsNone(invalid["positive_filter_price"])
+
+        multiple = MODULE._filter_price_contract(
+            [normalized_value("60000 "), normalized_value("7000")], active=True
+        )
+        self.assertFalse(multiple["eligible"])
+        self.assertEqual(len(multiple["normalization_evidence"]), 2)
+
+        with self.assertRaises(MODULE.RemoteAuditError):
+            MODULE._filter_price_contract(
+                [normalized_value("7" * 513)], active=True
+            )
+
+    def test_php_and_python_filter_price_normalization_contract_is_symmetric(self) -> None:
+        source = PHP_PATH.read_text(encoding="utf-8")
+        self.assertIn('trim($value, " \\t\\n\\r\\v\\f")', source)
+        self.assertEqual(
+            source.count("'normalization_rule' => "
+                         "'strip_ascii_surrounding_whitespace_once'"),
+            1,
+        )
+        for key in (
+            "normalization_evidence",
+            "raw_utf8_bytes",
+            "raw_sha256",
+            "normalized_utf8_bytes",
+            "normalized_sha256",
+            "ascii_surrounding_whitespace_stripped",
+        ):
+            self.assertIn("'" + key + "'", source)
+
     def test_metadata_and_public_contract_are_exact_and_bounded(self) -> None:
         payload = valid_payload()
         payload["phase1b_evidence"]["metadata_templates"]["unexpected"] = {}
@@ -1636,12 +1715,13 @@ class Phase1bPayloadTests(unittest.TestCase):
 
 
 class PublicEvidenceTests(unittest.TestCase):
-    def test_exact_controls_prove_global_sort_desc_and_no_content_policy(self) -> None:
+    def test_exact_controls_prove_global_sort_while_content_gate_stays_blocked(self) -> None:
         remote = MODULE.normalize_remote_payload(valid_payload())
         public = MODULE.collect_public_evidence(
             remote, fetch_fn=public_fetcher(remote)
         )
-        self.assertTrue(public["phase1b_evidence_ready"])
+        self.assertFalse(public["phase1b_evidence_ready"])
+        self.assertEqual(public["status"], "blocked")
         self.assertEqual(public["render_order_source"], "element_sort_then_id_desc")
         self.assertEqual(public["matching_sources_across_all_12"], [
             "element_sort_then_id_desc"
@@ -1652,25 +1732,31 @@ class PublicEvidenceTests(unittest.TestCase):
         self.assertTrue(
             public["no_content_policy_baseline"]["policy_baseline_ok"]
         )
+        self.assertFalse(public["content_publish_gate"])
+        self.assertFalse(
+            public["no_content_policy_baseline"]["fallback_image_counts_as_owned_content"]
+        )
+        self.assertEqual(
+            public["no_content_policy_baseline"]["content_publish_blockers"],
+            [
+                "target_unique_server_rendered_copy_is_not_proven",
+                "target_element_level_metadata_is_not_proven",
+            ],
+        )
+        self.assertNotIn(
+            "target_owned_product_image_is_not_proven",
+            public["no_content_policy_baseline"]["content_publish_blockers"],
+        )
+        self.assertIn("content_publish_gate_is_blocked", public["blockers"])
         self.assertEqual(
             public["no_content_policy_baseline"]["image_placeholder_structural_state"],
             "placeholder_only_product_image_markup",
         )
         for page in public["model_pages"]:
             self.assertTrue(page["exact_selectable_set"])
-            self.assertEqual(page["near_control_count"], 1)
+            self.assertEqual(page["near_control_count"], 0)
             self.assertTrue(page["near_control_contract_ok"])
-            self.assertEqual(
-                page["near_controls"][0]["product_id"],
-                next(
-                    item["model_id"]
-                    for item in remote["phase1b_evidence"]["render_order"]["models"]
-                    if item["model_code"] == page["model_code"]
-                ),
-            )
-            self.assertRegex(
-                page["near_controls"][0]["ancestor_fingerprint"], r"^[a-f0-9]{64}$"
-            )
+            self.assertEqual(page["near_controls"], [])
             self.assertNotIn("html", page)
 
     def test_duplicate_or_hidden_rendering_never_becomes_order_evidence(self) -> None:
@@ -1685,6 +1771,63 @@ class PublicEvidenceTests(unittest.TestCase):
         self.assertIn(
             "strict_selectable_control_ids_are_duplicated", first["page_blockers"]
         )
+
+    def test_db_name_is_html_unescaped_exactly_once_before_comparison(self) -> None:
+        url = MODULE.PUBLIC_MODEL_URLS[0]
+        cases = (
+            ('Опция &quot;А&quot;', 'Опция "А"'),
+            ('Опция &amp;quot;А&amp;quot;', 'Опция &quot;А&quot;'),
+        )
+        for raw_db_name, parsed_public_name in cases:
+            with self.subTest(raw_db_name=raw_db_name):
+                price_values = [normalized_value("7000")]
+                render_model = {
+                    "model_id": 2000,
+                    "relation_items": [
+                        {
+                            "id": 841,
+                            "code": "option-841",
+                            "name": raw_db_name,
+                            "active": True,
+                            "sort": 100,
+                            "filter_price_values": price_values,
+                            "selectable_contract": MODULE._filter_price_contract(
+                                price_values, active=True
+                            ),
+                        }
+                    ],
+                    "expected_selectable_count": 1,
+                    "expected_selectable_ids_as_set": [841],
+                    "hypotheses": {
+                        "link_goods_order": [841],
+                        "element_sort_then_id_asc": [841],
+                        "element_sort_then_id_desc": [841],
+                    },
+                }
+                body = public_html(
+                    url,
+                    [(841, 7000, raw_db_name)],
+                    base_product_id=2000,
+                )
+                page = MODULE._analyze_public_model_page(
+                    MODULE.MODEL_CODES[0],
+                    url,
+                    {
+                        "http_status": 200,
+                        "final_url": url,
+                        "content_type": "text/html; charset=UTF-8",
+                        "body": body,
+                    },
+                    render_model,
+                )
+                self.assertEqual(
+                    page["strict_controls"][0]["data_name"], parsed_public_name
+                )
+                self.assertEqual(page["name_mismatches"], [])
+                self.assertNotIn(
+                    "public_selectable_names_differ_from_db_contract",
+                    page["page_blockers"],
+                )
 
     def test_global_source_requires_unique_intersection_not_each_page_unique(self) -> None:
         remote = MODULE.normalize_remote_payload(valid_payload())
@@ -1744,6 +1887,7 @@ class PublicEvidenceTests(unittest.TestCase):
         )
         page = public["model_pages"][0]
         self.assertFalse(page["near_control_contract_ok"])
+        self.assertIn("near_control_count_is_not_zero", page["near_control_blockers"])
         self.assertIn("near_control_contains_expected_option_id", page["near_control_blockers"])
         self.assertIn("near_control_is_hidden_or_disabled", page["near_control_blockers"])
         self.assertIn("near_control_is_option_like", page["near_control_blockers"])
@@ -1759,7 +1903,7 @@ class PublicEvidenceTests(unittest.TestCase):
             fetch_fn=public_fetcher(
                 remote,
                 extra_near_code=code,
-                extra_near_html=duplicate_base,
+                extra_near_html=duplicate_base + duplicate_base,
             ),
         )
         duplicate_page = duplicated["model_pages"][0]
@@ -1768,6 +1912,28 @@ class PublicEvidenceTests(unittest.TestCase):
             duplicate_page["near_control_blockers"],
         )
         self.assertFalse(duplicate_page["near_control_contract_ok"])
+
+    def test_any_single_paired_non_option_control_is_still_a_near_control_blocker(self) -> None:
+        remote = MODULE.normalize_remote_payload(valid_payload())
+        code = MODULE.MODEL_CODES[0]
+        model_id = remote["phase1b_evidence"]["render_order"]["models"][0][
+            "model_id"
+        ]
+        public = MODULE.collect_public_evidence(
+            remote,
+            fetch_fn=public_fetcher(
+                remote,
+                extra_near_code=code,
+                extra_near_html=(
+                    f'<div class="main-product" data-product-id="{model_id}" '
+                    'data-sum="1"></div>'
+                ),
+            ),
+        )
+        page = public["model_pages"][0]
+        self.assertEqual(page["near_control_count"], 1)
+        self.assertIn("near_control_count_is_not_zero", page["near_control_blockers"])
+        self.assertFalse(page["near_control_contract_ok"])
 
     def test_no_content_baseline_requires_exact_placeholder_only_state(self) -> None:
         remote = MODULE.normalize_remote_payload(valid_payload())
@@ -1794,6 +1960,15 @@ class PublicEvidenceTests(unittest.TestCase):
                     baseline["blockers"],
                 )
                 self.assertFalse(public["phase1b_evidence_ready"])
+
+        placeholder = MODULE.collect_public_evidence(
+            remote, fetch_fn=public_fetcher(remote, baseline_image_state="placeholder")
+        )
+        self.assertTrue(
+            placeholder["no_content_policy_baseline"]["policy_baseline_ok"]
+        )
+        self.assertFalse(placeholder["content_publish_gate"])
+        self.assertIn("content_publish_gate_is_blocked", placeholder["blockers"])
 
     def test_robots_wrong_sum_and_wrong_name_each_block_public_contract(self) -> None:
         remote = MODULE.normalize_remote_payload(valid_payload())
@@ -1838,8 +2013,10 @@ class PublicEvidenceTests(unittest.TestCase):
             ),
             receipt_fn=receipt,
         )
-        self.assertEqual(exit_code, 0)
-        self.assertTrue(result["phase1b_evidence_ready"])
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["phase1b_evidence_ready"])
+        self.assertFalse(result["content_publish_gate"])
         self.assertFalse(result["ready_for_apply"])
         receipt.assert_called_once()
         self.assertIn("public_evidence", receipt.call_args.kwargs)
