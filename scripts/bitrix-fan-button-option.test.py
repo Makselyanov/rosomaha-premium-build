@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,7 @@ SPEC = importlib.util.spec_from_file_location("bitrix_fan_button_option", SCRIPT
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+GIT_BASH_PATH = Path(r"C:\Program Files\Git\bin\bash.exe")
 
 
 def property_definition(prop_id: int, code: str, prop_type: str = "E") -> dict[str, object]:
@@ -753,7 +755,7 @@ class AuditOnlyContractTests(unittest.TestCase):
         script_bytes = PHP_PATH.read_bytes()
         command, digest = MODULE.build_remote_command(script_bytes)
         self.assertEqual(digest, __import__("hashlib").sha256(script_bytes).hexdigest())
-        self.assertIn(f"[ \"$decoded_sha256\" != '{digest}' ]", command)
+        self.assertIn(f"[ \"$payload_sha256\" != '{digest}' ]", command)
         self.assertIn(f"realpath -- '{MODULE.SITE_ROOT}'", command)
         self.assertIn(
             f"[ ! -f '{MODULE.SITE_ROOT}/bitrix/modules/main/include/prolog_before.php' ]",
@@ -767,7 +769,7 @@ class AuditOnlyContractTests(unittest.TestCase):
         for binary in ("base64", "sha256sum", "awk", "realpath", "timeout"):
             self.assertIn(f"/usr/bin/{binary}", command)
         self.assertNotIn("command -v", command)
-        self.assertNotIn("test \"$decoded_sha256\"", command)
+        self.assertNotIn("test \"$payload_sha256\"", command)
         self.assertNotIn("test -f", command)
         self.assertNotIn("Decoded helper marker is missing", command)
         self.assertNotIn("Pinned PHP series was not found", command)
@@ -780,6 +782,74 @@ class AuditOnlyContractTests(unittest.TestCase):
         self.assertLessEqual(
             len(command.encode("ascii")), MODULE.MAX_REMOTE_COMMAND_BYTES
         )
+        self.assertNotIn("script_payload", command)
+        self.assertNotIn("decoded_script", command)
+        self.assertNotIn("decoded_with_marker", command)
+        self.assertNotIn("<<", command)
+        self.assertNotIn("mktemp", command)
+        self.assertNotIn("/tmp/", command)
+        self.assertEqual(command.count("rosomaha_fan_payload 2>/dev/null"), 3)
+        literal = re.search(
+            r"printf '%s' '([A-Za-z0-9+/]+={0,2})' \| /usr/bin/base64 -d",
+            command,
+        )
+        self.assertIsNotNone(literal)
+        assert literal is not None
+        self.assertEqual(
+            base64.b64decode(literal.group(1), validate=True), script_bytes
+        )
+
+    def test_payload_function_is_repeatable_and_preserves_exact_unicode_bytes(self) -> None:
+        self.assertTrue(GIT_BASH_PATH.is_file())
+        payload = (
+            "<?php\n"
+            "$value = \"before\u2028middle\u2029after\";\n"
+        ).encode("utf-8")
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertIn("\u2028".encode("utf-8"), payload)
+        payload_function = MODULE.build_payload_function(payload)
+        shell = payload_function + "\n" + "\n".join(
+            "rosomaha_fan_payload" for _ in range(3)
+        ) + "\n"
+        result = subprocess.run(
+            [str(GIT_BASH_PATH)],
+            input=shell.encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(result.stdout, payload * 3)
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        for index in range(3):
+            chunk = result.stdout[index * len(payload):(index + 1) * len(payload)]
+            self.assertEqual(hashlib.sha256(chunk).hexdigest(), expected_sha256)
+
+    def test_tampered_streaming_payload_emits_exact_payload_sha_preflight(self) -> None:
+        self.assertTrue(GIT_BASH_PATH.is_file())
+        script_bytes = PHP_PATH.read_bytes()
+        command, digest = MODULE.build_remote_command(script_bytes)
+        encoded = base64.b64encode(script_bytes).decode("ascii")
+        replacement = ("A" if encoded[0] != "A" else "B") + encoded[1:]
+        tampered = command.replace(encoded, replacement, 1)
+        self.assertNotEqual(tampered, command)
+        result = subprocess.run(
+            [str(GIT_BASH_PATH)],
+            input=tampered.encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, b"")
+        error_code = MODULE.parse_remote_preflight_error_frame(
+            result.stdout.decode("ascii", errors="strict"),
+            expected_script_sha256=digest,
+        )
+        self.assertEqual(error_code, "payload_sha")
 
     def test_remote_command_size_cap_blocks_before_connection(self) -> None:
         with patch.object(

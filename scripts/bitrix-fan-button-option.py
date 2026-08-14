@@ -494,11 +494,26 @@ def validate_php_source(script_bytes: bytes) -> str:
     return hashlib.sha256(script_bytes).hexdigest()
 
 
+def build_payload_function(script_bytes: bytes) -> str:
+    encoded = base64.b64encode(script_bytes).decode("ascii")
+    if (
+        not encoded
+        or "'" in encoded
+        or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded) is None
+    ):
+        raise RuntimeError("Pinned PHP base64 literal is invalid")
+    return (
+        "rosomaha_fan_payload() {\n"
+        f"  printf '%s' '{encoded}' | /usr/bin/base64 -d\n"
+        "}\n"
+    )
+
+
 def build_remote_command(script_bytes: bytes) -> tuple[str, str]:
     digest = validate_php_source(script_bytes)
     if not PHP_CANDIDATES or any(not item.startswith("/") for item in PHP_CANDIDATES):
         raise RuntimeError("Pinned PHP candidates must be absolute paths")
-    encoded = base64.b64encode(script_bytes).decode("ascii")
+    payload_function = build_payload_function(script_bytes)
     candidates = " ".join(f"'{item}'" for item in PHP_CANDIDATES)
     command = f"""
 set -u
@@ -523,24 +538,18 @@ rosomaha_fan_on_preflight_exit() {{
 }}
 trap 'rosomaha_fan_on_preflight_exit' EXIT
 set -e
-script_payload='{encoded}'
-if ! decoded_with_marker="$(
-  printf '%s' "$script_payload" | /usr/bin/base64 -d &&
-  printf '__ROSOMAHA_FAN_PAYLOAD_END__'
-)" 2>/dev/null; then
+{payload_function}
+if [ ! -x '/usr/bin/base64' ]; then
   rosomaha_fan_emit_preflight_error 'payload_decode_marker'
 fi
-case "$decoded_with_marker" in
-  *__ROSOMAHA_FAN_PAYLOAD_END__) ;;
-  *) rosomaha_fan_emit_preflight_error 'payload_decode_marker' ;;
-esac
-decoded_script="${{decoded_with_marker%__ROSOMAHA_FAN_PAYLOAD_END__}}"
-if ! decoded_sha256="$(
-  printf '%s' "$decoded_script" | /usr/bin/sha256sum | /usr/bin/awk '{{print $1}}'
+if ! payload_sha256="$(
+  rosomaha_fan_payload 2>/dev/null \
+    | /usr/bin/sha256sum \
+    | /usr/bin/awk '{{print $1}}'
 )" 2>/dev/null; then
   rosomaha_fan_emit_preflight_error 'payload_sha'
 fi
-if [ "$decoded_sha256" != '{digest}' ]; then
+if [ "$payload_sha256" != '{digest}' ]; then
   rosomaha_fan_emit_preflight_error 'payload_sha'
 fi
 if ! resolved_site_root="$(/usr/bin/realpath -- '{SITE_ROOT}' 2>/dev/null)"; then
@@ -572,16 +581,17 @@ done
 if [ -z "$php_binary" ]; then
   rosomaha_fan_emit_preflight_error 'php_series_missing'
 fi
-if ! printf '%s' "$decoded_script" \
+if ! rosomaha_fan_payload 2>/dev/null \
   | /usr/bin/timeout 15s "$php_binary" -l >/dev/null 2>/dev/null; then
   rosomaha_fan_emit_preflight_error 'php_lint_failed'
 fi
 preflight_done=1
 trap - EXIT
 printf '__ROSOMAHA_FAN_PHP_VERSION__=%s\n' "$php_version"
-printf '__ROSOMAHA_FAN_PHP_SHA256__=%s\n' "$decoded_sha256"
+printf '__ROSOMAHA_FAN_PHP_SHA256__=%s\n' "$payload_sha256"
 printf '__ROSOMAHA_FAN_PHP_LINT__=ok\n'
-printf '%s' "$decoded_script" | /usr/bin/timeout 120s "$php_binary" \
+rosomaha_fan_payload 2>/dev/null \
+  | /usr/bin/timeout 120s "$php_binary" \
   -d display_errors=stderr -d log_errors=0 -- 'audit'
 """
     if not command.isascii() or len(command.encode("ascii")) > MAX_REMOTE_COMMAND_BYTES:
