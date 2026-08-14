@@ -113,6 +113,8 @@ MAX_STDOUT_BYTES = 10_500_000
 MAX_STDERR_BYTES = 32_000
 MAX_REMOTE_SECONDS = 150
 MAX_JSON_BYTES = 7_500_000
+MAX_REMOTE_ERROR_MESSAGE_BYTES = 4_096
+MAX_REMOTE_HELPER_LINE = 4_096
 MAX_PROPERTIES = 192
 MAX_ENUMS_PER_PROPERTY = 128
 MAX_PROPERTY_VALUES = 128
@@ -129,6 +131,99 @@ FORBIDDEN_PHP_PATTERNS = (
     r"\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|TRUNCATE)\s+(?:INTO|TABLE|FROM|[A-Za-z_])",
 )
 
+REMOTE_ERROR_STAGES = frozenset(
+    {
+        "bootstrap",
+        "prolog_preflight",
+        "prolog_load",
+        "iblock_module_load",
+        "site_read",
+        "iblock_read",
+        "property_schema_read",
+        "anchor_read",
+        "comparator_read",
+        "models_read",
+        "duplicate_read",
+        "relation_analysis",
+        "price_analysis",
+        "section_order",
+        "model_link_evidence",
+        "linked_options_read",
+        "template_peers",
+        "render_order",
+        "no_content_samples",
+        "metadata_templates",
+        "result_assembly",
+    }
+)
+REMOTE_KNOWN_HELPER_ERROR_CODES = frozenset(
+    {
+        "prolog_not_found",
+        "iblock_module_load_failed",
+        "pinned_site_not_found",
+        "pinned_site_inactive",
+        "pinned_iblock_not_found",
+        "pinned_iblock_inactive",
+        "pinned_iblock_site_mismatch",
+        "anchor_identity_drift",
+        "comparator_identity_drift",
+        "model_identity_collision",
+        "model_scope_collision",
+        "model_scope_incomplete",
+        "link_goods_non_element_value",
+        "link_goods_duplicate_element_id",
+        "render_evidence_missing_linked_option",
+        "template_peer_outside_link_goods_union",
+    }
+)
+REMOTE_HELPER_ERROR_CODES = REMOTE_KNOWN_HELPER_ERROR_CODES | frozenset(
+    {"helper_contract_violation"}
+)
+REMOTE_EXTERNAL_ERROR_CLASS_BY_CODE = {
+    "external_type_error": frozenset({"TypeError"}),
+    "external_php_error": frozenset({"Error"}),
+    "external_runtime_exception": frozenset(
+        {"RuntimeException", "LogicException", "ErrorException"}
+    ),
+    "external_exception": frozenset({"Exception"}),
+    "unknown_error": frozenset({"unknown"}),
+}
+REMOTE_ERROR_CLASSES = frozenset(
+    {
+        "ErrorException",
+        "TypeError",
+        "RuntimeException",
+        "LogicException",
+        "Error",
+        "Exception",
+        "unknown",
+    }
+)
+REMOTE_ERROR_SAFE_SUMMARIES = {
+    "prolog_not_found": "the pinned Bitrix prolog was not found",
+    "iblock_module_load_failed": "the Bitrix iblock module did not load",
+    "pinned_site_not_found": "the pinned Bitrix site was not found",
+    "pinned_site_inactive": "the pinned Bitrix site is inactive",
+    "pinned_iblock_not_found": "the pinned iblock was not found",
+    "pinned_iblock_inactive": "the pinned iblock is inactive",
+    "pinned_iblock_site_mismatch": "the pinned iblock/site binding drifted",
+    "anchor_identity_drift": "the pinned anchor identity drifted",
+    "comparator_identity_drift": "the pinned comparator identity drifted",
+    "model_identity_collision": "two pinned model codes resolved to one element",
+    "model_scope_collision": "a pinned model resolved to an option element",
+    "model_scope_incomplete": "the pinned twelve-model scope is incomplete",
+    "link_goods_non_element_value": "LINK_GOODS contains a non-element value",
+    "link_goods_duplicate_element_id": "LINK_GOODS contains a duplicate element id",
+    "render_evidence_missing_linked_option": "render evidence is missing a linked option",
+    "template_peer_outside_link_goods_union": "a pinned template peer is outside the LINK_GOODS union",
+    "helper_contract_violation": "a bounded helper contract failed",
+    "external_type_error": "an external TypeError interrupted the audit",
+    "external_php_error": "an external PHP Error interrupted the audit",
+    "external_runtime_exception": "an external runtime exception interrupted the audit",
+    "external_exception": "an external exception interrupted the audit",
+    "unknown_error": "an unclassified external Throwable interrupted the audit",
+}
+
 
 class CredentialError(RuntimeError):
     """Credential source is absent, ambiguous, or outside the pinned account."""
@@ -136,6 +231,30 @@ class CredentialError(RuntimeError):
 
 class RemoteAuditError(RuntimeError):
     """The bounded remote read-only audit did not produce trusted evidence."""
+
+
+class RemoteHelperReportedError(RemoteAuditError):
+    """An authenticated helper error was persisted without exposing its message."""
+
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        audit_stage: str,
+        helper_line: int | None,
+        receipt_path: Path,
+    ) -> None:
+        safe_summary = REMOTE_ERROR_SAFE_SUMMARIES[error_code]
+        line_suffix = f"; helper_line={helper_line}" if helper_line is not None else ""
+        super().__init__(
+            "Remote read-only helper reported "
+            f"{safe_summary} (error_code={error_code}; audit_stage={audit_stage}"
+            f"{line_suffix}; receipt={receipt_path.name})"
+        )
+        self.error_code = error_code
+        self.audit_stage = audit_stage
+        self.helper_line = helper_line
+        self.receipt_path = receipt_path
 
 
 class ForbiddenModeError(ValueError):
@@ -285,9 +404,14 @@ def validate_php_source(script_bytes: bytes) -> str:
         "__ROSOMAHA_FAN_JSON_BYTES__=",
         "__ROSOMAHA_FAN_JSON_SHA256__=",
         "__ROSOMAHA_FAN_JSON_BASE64__=",
+        "rosomahaFanErrorEvidence($error, $auditStage)",
+        "'error_code' =>",
+        "'message_sha256' =>",
     )
     if any(item not in source for item in required):
         raise RuntimeError("Pinned PHP reader identity contract is incomplete")
+    if "rosomahaFanSafeError" in source or "'error' =>" in source:
+        raise RuntimeError("Pinned PHP reader contains an unbounded error field")
     return hashlib.sha256(script_bytes).hexdigest()
 
 
@@ -1356,10 +1480,86 @@ def parse_remote_stdout_frame(
     return parsed, php_version
 
 
+def normalize_remote_error_payload(payload: object) -> dict[str, object]:
+    """Accept only the fixed, message-free catch payload for remote exit 1."""
+    remote = _require_dict(payload, "error payload")
+    expected_keys = {
+        "status",
+        "mode",
+        "phase",
+        "apply_supported",
+        "database_mutations",
+        "ready_for_apply",
+        "error_code",
+        "error_class",
+        "audit_stage",
+        "origin_is_helper",
+        "helper_line",
+        "message_bytes",
+        "message_truncated",
+        "message_sha256",
+    }
+    if set(remote) != expected_keys:
+        raise RemoteAuditError("Remote helper error schema is invalid")
+    if (
+        remote.get("status") != "error"
+        or remote.get("mode") != "audit"
+        or remote.get("phase") != "schema_and_relation_discovery"
+        or remote.get("apply_supported") is not False
+        or type(remote.get("database_mutations")) is not int
+        or remote.get("database_mutations") != 0
+        or remote.get("ready_for_apply") is not False
+    ):
+        raise RemoteAuditError("Remote helper error contract is invalid")
+
+    error_code = remote.get("error_code")
+    error_class = remote.get("error_class")
+    audit_stage = remote.get("audit_stage")
+    origin_is_helper = remote.get("origin_is_helper")
+    helper_line = remote.get("helper_line")
+    message_bytes = remote.get("message_bytes")
+    message_truncated = remote.get("message_truncated")
+    message_sha256 = remote.get("message_sha256")
+    if (
+        not isinstance(error_code, str)
+        or error_code not in REMOTE_ERROR_SAFE_SUMMARIES
+        or error_class not in REMOTE_ERROR_CLASSES
+        or audit_stage not in REMOTE_ERROR_STAGES
+        or type(origin_is_helper) is not bool
+        or type(message_bytes) is not int
+        or not 0 <= message_bytes <= MAX_REMOTE_ERROR_MESSAGE_BYTES
+        or type(message_truncated) is not bool
+        or not isinstance(message_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", message_sha256) is None
+    ):
+        raise RemoteAuditError("Remote helper error evidence is invalid")
+    if message_truncated is True and message_bytes != MAX_REMOTE_ERROR_MESSAGE_BYTES:
+        raise RemoteAuditError("Remote helper error byte evidence is inconsistent")
+    if origin_is_helper:
+        if (
+            error_code not in REMOTE_HELPER_ERROR_CODES
+            or type(helper_line) is not int
+            or not 1 <= helper_line <= MAX_REMOTE_HELPER_LINE
+        ):
+            raise RemoteAuditError("Remote helper-origin error evidence is invalid")
+        if (
+            error_code in REMOTE_KNOWN_HELPER_ERROR_CODES
+            and error_class != "RuntimeException"
+        ):
+            raise RemoteAuditError("Remote known helper error class is inconsistent")
+    else:
+        allowed_classes = REMOTE_EXTERNAL_ERROR_CLASS_BY_CODE.get(str(error_code))
+        if helper_line is not None or allowed_classes is None or error_class not in allowed_classes:
+            raise RemoteAuditError("Remote external error evidence is invalid")
+
+    return json.loads(json.dumps(remote, ensure_ascii=False))
+
+
 def execute_remote(
     mode: str = "audit",
     *,
     connect_fn: Callable[[], paramiko.SSHClient] = connect,
+    error_receipt_fn: Callable[..., Path] | None = None,
 ) -> dict[str, object]:
     if mode != "audit":
         raise ForbiddenModeError("This phase-1 helper supports audit only")
@@ -1372,22 +1572,43 @@ def execute_remote(
         status, stdout, stderr = run_remote_command(client, command)
     finally:
         client.close()
-    if stderr:
-        raise RemoteAuditError("Remote read-only audit emitted stderr")
-    if status != 0:
-        raise RemoteAuditError("Remote read-only helper failed")
+    if type(status) is not int or status not in {0, 1}:
+        raise RemoteAuditError("Remote helper returned an unsupported exit status")
     parsed, php_version = parse_remote_stdout_frame(
         stdout,
         expected_script_sha256=digest,
     )
-    normalized = normalize_remote_payload(parsed)
-    normalized["runtime"] = {
+    if stderr:
+        raise RemoteAuditError("Remote read-only audit emitted stderr")
+    runtime = {
         "php_version": php_version,
         "php_series_matches": True,
         "php_lint": "ok",
         "php_script_sha256": digest,
         "remote_exit_status": status,
     }
+    if status == 1:
+        normalized_error = normalize_remote_error_payload(parsed)
+        writer = error_receipt_fn or write_error_receipt
+        try:
+            receipt_path = writer(normalized_error, runtime=runtime)
+        except Exception as exc:
+            raise RemoteAuditError(
+                "Authenticated remote error receipt could not be persisted "
+                f"({type(exc).__name__})"
+            ) from exc
+        raise RemoteHelperReportedError(
+            error_code=str(normalized_error["error_code"]),
+            audit_stage=str(normalized_error["audit_stage"]),
+            helper_line=(
+                int(normalized_error["helper_line"])
+                if normalized_error["helper_line"] is not None
+                else None
+            ),
+            receipt_path=receipt_path,
+        )
+    normalized = normalize_remote_payload(parsed)
+    normalized["runtime"] = runtime
     return normalized
 
 
@@ -1468,6 +1689,64 @@ def write_receipt(
     }
     if public_evidence is not None:
         receipt["public"] = public_evidence
+    _atomic_immutable_json(destination, receipt)
+    return destination
+
+
+def write_error_receipt(
+    remote_error: dict[str, object],
+    *,
+    runtime: dict[str, object],
+    path: Path | None = None,
+) -> Path:
+    normalized_error = normalize_remote_error_payload(remote_error)
+    expected_runtime_keys = {
+        "php_version",
+        "php_series_matches",
+        "php_lint",
+        "php_script_sha256",
+        "remote_exit_status",
+    }
+    if (
+        set(runtime) != expected_runtime_keys
+        or runtime.get("php_series_matches") is not True
+        or runtime.get("php_lint") != "ok"
+        or type(runtime.get("remote_exit_status")) is not int
+        or runtime.get("remote_exit_status") != 1
+        or not isinstance(runtime.get("php_version"), str)
+        or re.fullmatch(
+            re.escape(EXPECTED_PHP_SERIES) + r"\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?",
+            str(runtime.get("php_version")),
+        )
+        is None
+        or not isinstance(runtime.get("php_script_sha256"), str)
+        or re.fullmatch(r"[a-f0-9]{64}", str(runtime.get("php_script_sha256")))
+        is None
+    ):
+        raise RemoteAuditError("Remote error receipt runtime evidence is invalid")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    destination = path or (
+        REPORT_ROOT / f"ROSOMAHA_BITRIX_FAN_BUTTON_{stamp}_ERROR.json"
+    )
+    error_evidence = dict(normalized_error)
+    error_evidence["safe_summary"] = REMOTE_ERROR_SAFE_SUMMARIES[
+        str(normalized_error["error_code"])
+    ]
+    receipt = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "error",
+        "domain": DOMAIN,
+        "mode": "audit",
+        "phase": "schema_and_relation_discovery",
+        "read_only": True,
+        "database_mutations": 0,
+        "apply_supported": False,
+        "ready_for_apply": False,
+        "secrets_exported": False,
+        "pii_exported": False,
+        "remote_error": error_evidence,
+        "runtime": json.loads(json.dumps(runtime, ensure_ascii=False)),
+    }
     _atomic_immutable_json(destination, receipt)
     return destination
 

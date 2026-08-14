@@ -625,6 +625,33 @@ def remote_stdout_frame(
     )
 
 
+def remote_error_payload(
+    *,
+    error_code: str = "helper_contract_violation",
+    error_class: str = "RuntimeException",
+    audit_stage: str = "linked_options_read",
+    origin_is_helper: bool = True,
+    helper_line: int | None = 826,
+) -> dict[str, object]:
+    message = b"fixture diagnostic message"
+    return {
+        "status": "error",
+        "mode": "audit",
+        "phase": "schema_and_relation_discovery",
+        "apply_supported": False,
+        "database_mutations": 0,
+        "ready_for_apply": False,
+        "error_code": error_code,
+        "error_class": error_class,
+        "audit_stage": audit_stage,
+        "origin_is_helper": origin_is_helper,
+        "helper_line": helper_line,
+        "message_bytes": len(message),
+        "message_truncated": False,
+        "message_sha256": hashlib.sha256(message).hexdigest(),
+    }
+
+
 class FixedScopeTests(unittest.TestCase):
     def test_exact_identity_and_allowlist_match_repository_constants(self) -> None:
         source = (SCRIPT_PATH.parents[1] / "src" / "data" / "products.ts").read_text(
@@ -685,6 +712,17 @@ class AuditOnlyContractTests(unittest.TestCase):
         self.assertIn("__ROSOMAHA_FAN_JSON_SHA256__=", source)
         self.assertIn("__ROSOMAHA_FAN_JSON_BASE64__=", source)
         self.assertIn("base64_encode($json)", source)
+        self.assertIn("rosomahaFanErrorEvidence($error, $auditStage)", source)
+        self.assertNotIn("rosomahaFanSafeError", source)
+        self.assertNotIn("'error' =>", source)
+        for error_code in (
+            "template_peer_outside_link_goods_union",
+            "link_goods_non_element_value",
+            "link_goods_duplicate_element_id",
+            "render_evidence_missing_linked_option",
+        ):
+            self.assertIn("'" + error_code + "'", source)
+            self.assertIn(error_code, MODULE.REMOTE_KNOWN_HELPER_ERROR_CODES)
 
     def test_apply_and_recover_are_blocked_before_dispatch(self) -> None:
         execute = Mock()
@@ -831,6 +869,125 @@ class RemoteFrameProtocolTests(unittest.TestCase):
             stdout, expected_script_sha256="a" * 64
         )
         self.assertEqual(parsed, {"status": "ok"})
+
+    def test_status_one_authenticated_error_writes_exact_receipt_before_raising(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        payload = remote_error_payload()
+        client = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "authenticated-error.json"
+
+            def write_error(
+                remote_error: dict[str, object], *, runtime: dict[str, object]
+            ) -> Path:
+                return MODULE.write_error_receipt(
+                    remote_error, runtime=runtime, path=path
+                )
+
+            with patch.object(
+                MODULE,
+                "run_remote_command",
+                return_value=(
+                    1,
+                    remote_stdout_frame(payload, script_sha256=script_sha256),
+                    "",
+                ),
+            ):
+                with self.assertRaises(MODULE.RemoteHelperReportedError) as raised:
+                    MODULE.execute_remote(
+                        "audit",
+                        connect_fn=Mock(return_value=client),
+                        error_receipt_fn=write_error,
+                    )
+
+            self.assertTrue(path.is_file())
+            self.assertFalse(bool(path.stat().st_mode & stat.S_IWUSR))
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            encoded_receipt = path.read_text(encoding="utf-8")
+            self.assertEqual(receipt["status"], "error")
+            self.assertEqual(receipt["database_mutations"], 0)
+            self.assertFalse(receipt["apply_supported"])
+            self.assertFalse(receipt["ready_for_apply"])
+            self.assertEqual(receipt["runtime"]["remote_exit_status"], 1)
+            self.assertEqual(receipt["remote_error"]["error_code"], payload["error_code"])
+            self.assertEqual(
+                receipt["remote_error"]["safe_summary"],
+                MODULE.REMOTE_ERROR_SAFE_SUMMARIES[str(payload["error_code"])],
+            )
+            self.assertEqual(
+                set(receipt["remote_error"]), set(payload) | {"safe_summary"}
+            )
+            self.assertNotIn("fixture diagnostic message", encoded_receipt)
+            self.assertEqual(raised.exception.receipt_path, path)
+            self.assertIn("helper_line=826", str(raised.exception))
+            os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+        client.close.assert_called_once_with()
+
+    def test_status_one_corrupt_or_hostile_frame_never_writes_error_receipt(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        client = Mock()
+        writer = Mock()
+        hostile_marker = "HOSTILE_SENTINEL_MUST_NOT_ECHO"
+        hostile = remote_error_payload()
+        hostile["raw_detail"] = hostile_marker
+        bool_mutation_counter = remote_error_payload()
+        bool_mutation_counter["database_mutations"] = False
+        cases = {
+            "corrupt_frame": "not-a-frame\n",
+            "hostile_extra_field": remote_stdout_frame(
+                hostile, script_sha256=script_sha256
+            ),
+            "boolean_mutation_counter": remote_stdout_frame(
+                bool_mutation_counter, script_sha256=script_sha256
+            ),
+        }
+        for label, stdout in cases.items():
+            with self.subTest(case=label):
+                with patch.object(
+                    MODULE,
+                    "run_remote_command",
+                    return_value=(1, stdout, ""),
+                ):
+                    with self.assertRaises(MODULE.RemoteAuditError) as raised:
+                        MODULE.execute_remote(
+                            "audit",
+                            connect_fn=Mock(return_value=client),
+                            error_receipt_fn=writer,
+                        )
+                self.assertNotIn(hostile_marker, str(raised.exception))
+        writer.assert_not_called()
+
+    def test_exit_status_and_payload_status_must_match_exactly(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        writer = Mock()
+        cases = {
+            "status_one_success_payload": (
+                1,
+                remote_stdout_frame(valid_payload(), script_sha256=script_sha256),
+            ),
+            "status_zero_error_payload": (
+                0,
+                remote_stdout_frame(
+                    remote_error_payload(), script_sha256=script_sha256
+                ),
+            ),
+        }
+        for label, (status, stdout) in cases.items():
+            with self.subTest(case=label):
+                client = Mock()
+                with patch.object(
+                    MODULE,
+                    "run_remote_command",
+                    return_value=(status, stdout, ""),
+                ):
+                    with self.assertRaises(MODULE.RemoteAuditError):
+                        MODULE.execute_remote(
+                            "audit",
+                            connect_fn=Mock(return_value=client),
+                            error_receipt_fn=writer,
+                        )
+                client.close.assert_called_once_with()
+        writer.assert_not_called()
 
 
 class CredentialSafetyTests(unittest.TestCase):

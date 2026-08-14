@@ -22,6 +22,31 @@ const ROSOMAHA_FAN_OPTIONS_SECTION_ID = 302;
 const ROSOMAHA_FAN_TARGET_SORT = 506;
 const ROSOMAHA_FAN_MAX_LINKED_OPTIONS = 96;
 const ROSOMAHA_FAN_MAX_NO_CONTENT_SAMPLES = 16;
+const ROSOMAHA_FAN_MAX_ERROR_MESSAGE_BYTES = 4096;
+
+const ROSOMAHA_FAN_ERROR_STAGES = [
+    'bootstrap',
+    'prolog_preflight',
+    'prolog_load',
+    'iblock_module_load',
+    'site_read',
+    'iblock_read',
+    'property_schema_read',
+    'anchor_read',
+    'comparator_read',
+    'models_read',
+    'duplicate_read',
+    'relation_analysis',
+    'price_analysis',
+    'section_order',
+    'model_link_evidence',
+    'linked_options_read',
+    'template_peers',
+    'render_order',
+    'no_content_samples',
+    'metadata_templates',
+    'result_assembly',
+];
 
 const ROSOMAHA_FAN_TARGET = [
     'name' => 'Дополнительная кнопка включения вентилятора',
@@ -66,15 +91,99 @@ function rosomahaFanResult(array $payload, int $exitCode = 0): void
     exit($exitCode);
 }
 
-function rosomahaFanSafeError(Throwable $error): string
+function rosomahaFanErrorClass(Throwable $error): string
 {
-    $message = $error->getMessage() !== '' ? $error->getMessage() : get_class($error);
-    $message = str_replace(
-        [ROSOMAHA_FAN_SITE_ROOT, 'berkutm4'],
-        ['[pinned-root]', '[pinned-account]'],
-        $message
-    );
-    return substr($message, 0, 500);
+    if ($error instanceof ErrorException) {
+        return 'ErrorException';
+    }
+    if ($error instanceof TypeError) {
+        return 'TypeError';
+    }
+    if ($error instanceof RuntimeException) {
+        return 'RuntimeException';
+    }
+    if ($error instanceof LogicException) {
+        return 'LogicException';
+    }
+    if ($error instanceof Error) {
+        return 'Error';
+    }
+    if ($error instanceof Exception) {
+        return 'Exception';
+    }
+    return 'unknown';
+}
+
+function rosomahaFanErrorCode(Throwable $error, bool $originIsHelper): string
+{
+    $knownMessages = [
+        'Bitrix prolog was not found at the pinned root' => 'prolog_not_found',
+        'Bitrix iblock module could not be loaded' => 'iblock_module_load_failed',
+        'Pinned Bitrix site was not found' => 'pinned_site_not_found',
+        'Pinned Bitrix site is inactive' => 'pinned_site_inactive',
+        'Pinned iblock was not found' => 'pinned_iblock_not_found',
+        'Pinned iblock is inactive' => 'pinned_iblock_inactive',
+        'Pinned iblock is not assigned to the pinned site' => 'pinned_iblock_site_mismatch',
+        'Anchor code drifted from the pinned identity' => 'anchor_identity_drift',
+        'Comparator no longer identifies Bagira' => 'comparator_identity_drift',
+        'Two pinned model codes resolved to one element' => 'model_identity_collision',
+        'Pinned model resolved to an option element' => 'model_scope_collision',
+        'Pinned model scope is incomplete' => 'model_scope_incomplete',
+        'LINK_GOODS contains a non-element value' => 'link_goods_non_element_value',
+        'LINK_GOODS contains a duplicate element id' => 'link_goods_duplicate_element_id',
+        'Render evidence is missing a linked option' =>
+            'render_evidence_missing_linked_option',
+    ];
+    $message = $error->getMessage();
+    if ($originIsHelper && isset($knownMessages[$message])) {
+        return $knownMessages[$message];
+    }
+    if (
+        $originIsHelper
+        && preg_match(
+            '/^Template peer [1-9][0-9]* is outside LINK_GOODS union$/D',
+            $message
+        ) === 1
+    ) {
+        return 'template_peer_outside_link_goods_union';
+    }
+    if ($originIsHelper) {
+        return 'helper_contract_violation';
+    }
+    return match (rosomahaFanErrorClass($error)) {
+        'TypeError' => 'external_type_error',
+        'Error' => 'external_php_error',
+        'RuntimeException', 'LogicException', 'ErrorException' =>
+            'external_runtime_exception',
+        'Exception' => 'external_exception',
+        default => 'unknown_error',
+    };
+}
+
+function rosomahaFanErrorEvidence(Throwable $error, string $auditStage): array
+{
+    $originIsHelper = $error->getFile() === __FILE__;
+    $line = $error->getLine();
+    $message = $error->getMessage();
+    $messageBytes = strlen($message);
+    return [
+        'status' => 'error',
+        'mode' => 'audit',
+        'phase' => 'schema_and_relation_discovery',
+        'apply_supported' => false,
+        'database_mutations' => 0,
+        'ready_for_apply' => false,
+        'error_code' => rosomahaFanErrorCode($error, $originIsHelper),
+        'error_class' => rosomahaFanErrorClass($error),
+        'audit_stage' => in_array($auditStage, ROSOMAHA_FAN_ERROR_STAGES, true)
+            ? $auditStage
+            : 'bootstrap',
+        'origin_is_helper' => $originIsHelper,
+        'helper_line' => $originIsHelper && $line > 0 ? $line : null,
+        'message_bytes' => min($messageBytes, ROSOMAHA_FAN_MAX_ERROR_MESSAGE_BYTES),
+        'message_truncated' => $messageBytes > ROSOMAHA_FAN_MAX_ERROR_MESSAGE_BYTES,
+        'message_sha256' => hash('sha256', $message),
+    ];
 }
 
 function rosomahaFanNormalizeScalar(mixed $value, int $depth = 0): mixed
@@ -1106,7 +1215,14 @@ function rosomahaFanMetadataTemplateEvidence(): array
 }
 
 if (PHP_SAPI !== 'cli') {
-    rosomahaFanResult(['status' => 'error', 'error' => 'CLI only'], 2);
+    rosomahaFanResult([
+        'status' => 'error',
+        'mode' => 'blocked',
+        'apply_supported' => false,
+        'database_mutations' => 0,
+        'ready_for_apply' => false,
+        'error_code' => 'cli_only',
+    ], 2);
 }
 
 $mode = $argv[1] ?? 'audit';
@@ -1114,8 +1230,10 @@ if ($mode !== 'audit' || count($argv) !== 2) {
     rosomahaFanResult([
         'status' => 'error',
         'mode' => 'blocked',
-        'error' => 'This phase-1 helper accepts exactly one audit argument',
+        'apply_supported' => false,
         'database_mutations' => 0,
+        'ready_for_apply' => false,
+        'error_code' => 'audit_argument_contract_failed',
     ], 2);
 }
 
@@ -1134,19 +1252,24 @@ define('NOT_CHECK_PERMISSIONS', true);
 define('BX_NO_ACCELERATOR_RESET', true);
 define('DisableEventsCheck', true);
 
+$auditStage = 'bootstrap';
 try {
+    $auditStage = 'prolog_preflight';
     $prolog = ROSOMAHA_FAN_SITE_ROOT . '/bitrix/modules/main/include/prolog_before.php';
     if (!is_file($prolog)) {
         throw new RuntimeException('Bitrix prolog was not found at the pinned root');
     }
+    $auditStage = 'prolog_load';
     ob_start();
     require $prolog;
     ob_end_clean();
 
+    $auditStage = 'iblock_module_load';
     if (!Bitrix\Main\Loader::includeModule('iblock')) {
         throw new RuntimeException('Bitrix iblock module could not be loaded');
     }
 
+    $auditStage = 'site_read';
     $site = CSite::GetByID(ROSOMAHA_FAN_SITE_ID)->Fetch();
     if (!is_array($site) || (string) ($site['LID'] ?? '') !== ROSOMAHA_FAN_SITE_ID) {
         throw new RuntimeException('Pinned Bitrix site was not found');
@@ -1154,6 +1277,7 @@ try {
     if ((string) ($site['ACTIVE'] ?? 'N') !== 'Y') {
         throw new RuntimeException('Pinned Bitrix site is inactive');
     }
+    $auditStage = 'iblock_read';
     $iblock = CIBlock::GetByID(ROSOMAHA_FAN_IBLOCK_ID)->Fetch();
     if (!is_array($iblock) || (int) ($iblock['ID'] ?? 0) !== ROSOMAHA_FAN_IBLOCK_ID) {
         throw new RuntimeException('Pinned iblock was not found');
@@ -1171,11 +1295,14 @@ try {
         throw new RuntimeException('Pinned iblock is not assigned to the pinned site');
     }
 
+    $auditStage = 'property_schema_read';
     $propertySchema = rosomahaFanReadPropertyDefinitions();
+    $auditStage = 'anchor_read';
     $anchorFields = rosomahaFanReadElementFieldsById(ROSOMAHA_FAN_ANCHOR_ID, 'anchor');
     if ((string) ($anchorFields['CODE'] ?? '') !== ROSOMAHA_FAN_ANCHOR_CODE) {
         throw new RuntimeException('Anchor code drifted from the pinned identity');
     }
+    $auditStage = 'comparator_read';
     $comparatorFields = rosomahaFanReadElementFieldsById(
         ROSOMAHA_FAN_COMPARATOR_ID,
         'comparator'
@@ -1188,6 +1315,7 @@ try {
     $anchor = rosomahaFanReadElement($anchorFields, $propertySchema['by_id']);
     $comparator = rosomahaFanReadElement($comparatorFields, $propertySchema['by_id']);
 
+    $auditStage = 'models_read';
     $models = [];
     $modelIds = [];
     foreach (ROSOMAHA_FAN_MODEL_CODES as $modelCode) {
@@ -1210,32 +1338,43 @@ try {
         throw new RuntimeException('Pinned model scope is incomplete');
     }
 
+    $auditStage = 'duplicate_read';
     $duplicates = rosomahaFanTargetDuplicates();
+    $auditStage = 'relation_analysis';
     $relation = rosomahaFanRelationAnalysis(
         $propertySchema['definitions'],
         $anchor,
         $comparator,
         $models
     );
+    $auditStage = 'price_analysis';
     $price = rosomahaFanPriceAnalysis(
         $propertySchema['definitions'],
         $anchor,
         $comparator
     );
+    $auditStage = 'section_order';
     $sectionOrder = rosomahaFanSectionOrder($anchor['public']);
+    $auditStage = 'model_link_evidence';
     $modelLinkEvidence = rosomahaFanModelLinkEvidence($models);
+    $auditStage = 'linked_options_read';
     $linkedOptions = rosomahaFanReadLinkedOptions(
         $modelLinkEvidence['union_ids'],
         $propertySchema['by_id']
     );
+    $auditStage = 'template_peers';
     $templatePeers = rosomahaFanTemplatePeers($linkedOptions['public_by_id']);
+    $auditStage = 'render_order';
     $renderOrderEvidence = rosomahaFanRenderOrderEvidence(
         $modelLinkEvidence,
         $linkedOptions['public_by_id']
     );
+    $auditStage = 'no_content_samples';
     $noContentSamples = rosomahaFanNoContentOptionSamples($propertySchema['by_id']);
+    $auditStage = 'metadata_templates';
     $metadataTemplates = rosomahaFanMetadataTemplateEvidence();
 
+    $auditStage = 'result_assembly';
     $phase1bBlockers = [];
     if (!$modelLinkEvidence['matches_pinned_audit_union']) {
         $phase1bBlockers[] = 'linked_option_union_drifted_from_pinned_audit';
@@ -1369,11 +1508,5 @@ try {
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
-    rosomahaFanResult([
-        'status' => 'error',
-        'mode' => 'audit',
-        'apply_supported' => false,
-        'database_mutations' => 0,
-        'error' => rosomahaFanSafeError($error),
-    ], 1);
+    rosomahaFanResult(rosomahaFanErrorEvidence($error, $auditStage), 1);
 }
