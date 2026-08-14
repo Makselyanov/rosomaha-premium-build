@@ -115,6 +115,7 @@ MAX_REMOTE_SECONDS = 150
 MAX_JSON_BYTES = 7_500_000
 MAX_REMOTE_ERROR_MESSAGE_BYTES = 4_096
 MAX_REMOTE_HELPER_LINE = 4_096
+MAX_FRAME_DIAGNOSTIC_LINES = 16
 MAX_PROPERTIES = 192
 MAX_ENUMS_PER_PROPERTY = 128
 MAX_PROPERTY_VALUES = 128
@@ -224,6 +225,30 @@ REMOTE_ERROR_SAFE_SUMMARIES = {
     "unknown_error": "an unclassified external Throwable interrupted the audit",
 }
 
+FRAME_MARKER_PREFIXES = (
+    ("php_version", b"__ROSOMAHA_FAN_PHP_VERSION__="),
+    ("php_script_sha256", b"__ROSOMAHA_FAN_PHP_SHA256__="),
+    ("php_lint", b"__ROSOMAHA_FAN_PHP_LINT__="),
+    ("json_bytes", b"__ROSOMAHA_FAN_JSON_BYTES__="),
+    ("json_sha256", b"__ROSOMAHA_FAN_JSON_SHA256__="),
+    ("json_base64", b"__ROSOMAHA_FAN_JSON_BASE64__="),
+)
+FRAME_ERROR_MESSAGES = {
+    "frame_boundaries_invalid": "Remote stdout frame boundaries are invalid",
+    "frame_line_count_invalid": "Remote stdout contains missing or unexpected frame lines",
+    "frame_marker_order_invalid": "Remote stdout frame marker order is invalid",
+    "php_version_invalid": "Remote PHP version is outside the pinned series",
+    "php_script_sha256_mismatch": "Remote PHP byte digest does not match",
+    "php_lint_marker_invalid": "Remote PHP lint marker is invalid",
+    "json_byte_marker_invalid": "Remote JSON byte marker is invalid",
+    "json_size_exceeded": "Remote JSON exceeded the fixed limit",
+    "json_digest_marker_invalid": "Remote JSON digest marker is invalid",
+    "json_base64_invalid": "Remote JSON base64 frame is invalid",
+    "json_byte_count_mismatch": "Remote JSON byte marker does not match the frame",
+    "json_digest_mismatch": "Remote JSON digest does not match the frame",
+    "payload_utf8_json_invalid": "Remote framed payload is not valid UTF-8 JSON",
+}
+
 
 class CredentialError(RuntimeError):
     """Credential source is absent, ambiguous, or outside the pinned account."""
@@ -254,6 +279,30 @@ class RemoteHelperReportedError(RemoteAuditError):
         self.error_code = error_code
         self.audit_stage = audit_stage
         self.helper_line = helper_line
+        self.receipt_path = receipt_path
+
+
+class RemoteFrameError(RemoteAuditError):
+    """The framed stdout failed one fixed parser contract."""
+
+    def __init__(self, error_code: str) -> None:
+        if error_code not in FRAME_ERROR_MESSAGES:
+            raise ValueError("Unknown frame error code")
+        super().__init__(FRAME_ERROR_MESSAGES[error_code])
+        self.error_code = error_code
+
+
+class RemoteFrameReportedError(RemoteAuditError):
+    """A frame failure was persisted as hash-only local telemetry."""
+
+    def __init__(self, *, error_code: str, receipt_path: Path) -> None:
+        if error_code not in FRAME_ERROR_MESSAGES:
+            raise ValueError("Unknown frame error code")
+        super().__init__(
+            "Remote stdout frame validation failed "
+            f"(error_code={error_code}; receipt={receipt_path.name})"
+        )
+        self.error_code = error_code
         self.receipt_path = receipt_path
 
 
@@ -1413,6 +1462,62 @@ def normalize_remote_payload(payload: object) -> dict[str, object]:
     return json.loads(json.dumps(remote, ensure_ascii=False))
 
 
+def _byte_class(value: int | None) -> str:
+    if value is None:
+        return "empty"
+    if value == 10:
+        return "lf"
+    if value == 13:
+        return "cr"
+    if value in {9, 32}:
+        return "ascii_whitespace"
+    if 33 <= value <= 126:
+        return "ascii_printable"
+    if value < 128:
+        return "ascii_control"
+    return "non_ascii"
+
+
+def _frame_marker_class(line: bytes) -> str:
+    matches = [name for name, prefix in FRAME_MARKER_PREFIXES if line.startswith(prefix)]
+    return matches[0] if len(matches) == 1 else "unknown"
+
+
+def build_stdout_frame_diagnostics(stdout: str) -> dict[str, object]:
+    """Return bounded hash-only telemetry without normalizing or storing stdout."""
+    if not isinstance(stdout, str):
+        raise RemoteAuditError("Remote frame diagnostics input is invalid")
+    raw = stdout.encode("utf-8", errors="strict")
+    line_count = stdout.count("\n") + 1
+    diagnostics_complete = line_count <= MAX_FRAME_DIAGNOSTIC_LINES
+    lines: list[dict[str, object]] = []
+    if diagnostics_complete:
+        for index, line in enumerate(stdout.split("\n")):
+            line_bytes = line.encode("utf-8", errors="strict")
+            lines.append(
+                {
+                    "index": index,
+                    "byte_length": len(line_bytes),
+                    "sha256": hashlib.sha256(line_bytes).hexdigest(),
+                    "marker_class": _frame_marker_class(line_bytes),
+                    "ends_with_cr": line_bytes.endswith(b"\r"),
+                }
+            )
+    return {
+        "total_bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "ascii_only": raw.isascii(),
+        "ends_with_lf": raw.endswith(b"\n"),
+        "contains_cr": b"\r" in raw,
+        "first_byte_class": _byte_class(raw[0] if raw else None),
+        "last_byte_class": _byte_class(raw[-1] if raw else None),
+        "split_lf_line_count": line_count,
+        "line_diagnostic_limit": MAX_FRAME_DIAGNOSTIC_LINES,
+        "line_diagnostics_complete": diagnostics_complete,
+        "line_diagnostics": lines,
+    }
+
+
 def parse_remote_stdout_frame(
     stdout: str,
     *,
@@ -1425,10 +1530,10 @@ def parse_remote_stdout_frame(
         or "\r" in stdout
         or len(stdout.encode("utf-8")) > MAX_STDOUT_BYTES
     ):
-        raise RemoteAuditError("Remote stdout frame boundaries are invalid")
+        raise RemoteFrameError("frame_boundaries_invalid")
     lines = stdout[:-1].split("\n")
     if len(lines) != 6:
-        raise RemoteAuditError("Remote stdout contains missing or unexpected frame lines")
+        raise RemoteFrameError("frame_line_count_invalid")
     expected_prefixes = (
         "__ROSOMAHA_FAN_PHP_VERSION__=",
         "__ROSOMAHA_FAN_PHP_SHA256__=",
@@ -1438,45 +1543,45 @@ def parse_remote_stdout_frame(
         "__ROSOMAHA_FAN_JSON_BASE64__=",
     )
     if any(not line.startswith(prefix) for line, prefix in zip(lines, expected_prefixes)):
-        raise RemoteAuditError("Remote stdout frame marker order is invalid")
+        raise RemoteFrameError("frame_marker_order_invalid")
     values = [line[len(prefix):] for line, prefix in zip(lines, expected_prefixes)]
     php_version, script_sha256, lint_status, byte_text, payload_sha256, encoded = values
     if re.fullmatch(
         re.escape(EXPECTED_PHP_SERIES) + r"\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?",
         php_version,
     ) is None:
-        raise RemoteAuditError("Remote PHP version is outside the pinned series")
+        raise RemoteFrameError("php_version_invalid")
     if script_sha256 != expected_script_sha256:
-        raise RemoteAuditError("Remote PHP byte digest does not match")
+        raise RemoteFrameError("php_script_sha256_mismatch")
     if lint_status != "ok":
-        raise RemoteAuditError("Remote PHP lint marker is invalid")
+        raise RemoteFrameError("php_lint_marker_invalid")
     if re.fullmatch(r"[1-9][0-9]*", byte_text) is None:
-        raise RemoteAuditError("Remote JSON byte marker is invalid")
+        raise RemoteFrameError("json_byte_marker_invalid")
     payload_bytes_expected = int(byte_text)
     if payload_bytes_expected > MAX_JSON_BYTES:
-        raise RemoteAuditError("Remote JSON exceeded the fixed limit")
+        raise RemoteFrameError("json_size_exceeded")
     if re.fullmatch(r"[a-f0-9]{64}", payload_sha256) is None:
-        raise RemoteAuditError("Remote JSON digest marker is invalid")
+        raise RemoteFrameError("json_digest_marker_invalid")
     expected_base64_length = 4 * ((payload_bytes_expected + 2) // 3)
     if (
         len(encoded) != expected_base64_length
         or not encoded.isascii()
         or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded) is None
     ):
-        raise RemoteAuditError("Remote JSON base64 frame is invalid")
+        raise RemoteFrameError("json_base64_invalid")
     try:
         payload_bytes = base64.b64decode(encoded, validate=True)
     except Exception as exc:
-        raise RemoteAuditError("Remote JSON base64 frame is invalid") from exc
+        raise RemoteFrameError("json_base64_invalid") from exc
     if len(payload_bytes) != payload_bytes_expected:
-        raise RemoteAuditError("Remote JSON byte marker does not match the frame")
+        raise RemoteFrameError("json_byte_count_mismatch")
     if hashlib.sha256(payload_bytes).hexdigest() != payload_sha256:
-        raise RemoteAuditError("Remote JSON digest does not match the frame")
+        raise RemoteFrameError("json_digest_mismatch")
     try:
         payload_text = payload_bytes.decode("utf-8", errors="strict")
         parsed = json.loads(payload_text)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RemoteAuditError("Remote framed payload is not valid UTF-8 JSON") from exc
+        raise RemoteFrameError("payload_utf8_json_invalid") from exc
     return parsed, php_version
 
 
@@ -1560,6 +1665,7 @@ def execute_remote(
     *,
     connect_fn: Callable[[], paramiko.SSHClient] = connect,
     error_receipt_fn: Callable[..., Path] | None = None,
+    frame_error_receipt_fn: Callable[..., Path] | None = None,
 ) -> dict[str, object]:
     if mode != "audit":
         raise ForbiddenModeError("This phase-1 helper supports audit only")
@@ -1574,10 +1680,30 @@ def execute_remote(
         client.close()
     if type(status) is not int or status not in {0, 1}:
         raise RemoteAuditError("Remote helper returned an unsupported exit status")
-    parsed, php_version = parse_remote_stdout_frame(
-        stdout,
-        expected_script_sha256=digest,
-    )
+    try:
+        parsed, php_version = parse_remote_stdout_frame(
+            stdout,
+            expected_script_sha256=digest,
+        )
+    except RemoteFrameError as exc:
+        frame_writer = frame_error_receipt_fn or write_frame_error_receipt
+        try:
+            receipt_path = frame_writer(
+                stdout,
+                parser_error_code=exc.error_code,
+                remote_exit_status=status,
+                expected_script_sha256=digest,
+                stderr_present=bool(stderr),
+            )
+        except Exception as receipt_exc:
+            raise RemoteAuditError(
+                "Remote frame-error receipt could not be persisted "
+                f"({type(receipt_exc).__name__})"
+            ) from receipt_exc
+        raise RemoteFrameReportedError(
+            error_code=exc.error_code,
+            receipt_path=receipt_path,
+        ) from exc
     if stderr:
         raise RemoteAuditError("Remote read-only audit emitted stderr")
     runtime = {
@@ -1746,6 +1872,55 @@ def write_error_receipt(
         "pii_exported": False,
         "remote_error": error_evidence,
         "runtime": json.loads(json.dumps(runtime, ensure_ascii=False)),
+    }
+    _atomic_immutable_json(destination, receipt)
+    return destination
+
+
+def write_frame_error_receipt(
+    stdout: str,
+    *,
+    parser_error_code: str,
+    remote_exit_status: int,
+    expected_script_sha256: str,
+    stderr_present: bool,
+    path: Path | None = None,
+) -> Path:
+    if (
+        parser_error_code not in FRAME_ERROR_MESSAGES
+        or type(remote_exit_status) is not int
+        or remote_exit_status not in {0, 1}
+        or not isinstance(expected_script_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", expected_script_sha256) is None
+        or type(stderr_present) is not bool
+    ):
+        raise RemoteAuditError("Remote frame-error receipt metadata is invalid")
+    diagnostics = build_stdout_frame_diagnostics(stdout)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    destination = path or (
+        REPORT_ROOT / f"ROSOMAHA_BITRIX_FAN_BUTTON_{stamp}_FRAME_ERROR.json"
+    )
+    receipt = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "error",
+        "error_type": "FRAME_ERROR",
+        "domain": DOMAIN,
+        "mode": "audit",
+        "phase": "stdout_frame_protocol",
+        "read_only": True,
+        "database_mutations": 0,
+        "apply_supported": False,
+        "ready_for_apply": False,
+        "secrets_exported": False,
+        "pii_exported": False,
+        "parser_error_code": parser_error_code,
+        "transport": {
+            "remote_exit_status": remote_exit_status,
+            "stderr_present": stderr_present,
+            "eof_or_closed_drain_gate_passed": True,
+            "expected_php_script_sha256": expected_script_sha256,
+        },
+        "frame": diagnostics,
     }
     _atomic_immutable_json(destination, receipt)
     return destination

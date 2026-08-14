@@ -755,10 +755,17 @@ class AuditOnlyContractTests(unittest.TestCase):
 
     def test_nonempty_remote_stderr_fails_closed(self) -> None:
         client = Mock()
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
         with patch.object(
             MODULE,
             "run_remote_command",
-            return_value=(0, "ignored", "unexpected warning"),
+            return_value=(
+                0,
+                remote_stdout_frame(
+                    valid_payload(), script_sha256=script_sha256
+                ),
+                "unexpected warning",
+            ),
         ):
             with self.assertRaises(MODULE.RemoteAuditError):
                 MODULE.execute_remote("audit", connect_fn=Mock(return_value=client))
@@ -870,6 +877,203 @@ class RemoteFrameProtocolTests(unittest.TestCase):
         )
         self.assertEqual(parsed, {"status": "ok"})
 
+    def test_each_boundary_failure_writes_hash_only_immutable_frame_receipt(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        valid = remote_stdout_frame(
+            {"status": "ok"}, script_sha256=script_sha256
+        )
+        cgi_crlf = (
+            "Content-type: text/html; charset=UTF-8\r\n\r\n"
+            + valid.replace("\n", "\r\n")
+        )
+        cases = {
+            "empty": "",
+            "missing_final_lf": valid.rstrip("\n"),
+            "cgi_crlf_contamination": cgi_crlf,
+            "over_limit": "X" * (MODULE.MAX_STDOUT_BYTES + 1),
+        }
+        expected_edge_classes = {
+            "empty": ("empty", "empty"),
+            "missing_final_lf": ("ascii_printable", "ascii_printable"),
+            "cgi_crlf_contamination": ("ascii_printable", "lf"),
+            "over_limit": ("ascii_printable", "ascii_printable"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for label, stdout in cases.items():
+                with self.subTest(case=label):
+                    path = Path(directory) / f"{label}.json"
+
+                    def write_frame(
+                        raw_stdout: str,
+                        **metadata: object,
+                    ) -> Path:
+                        self.assertEqual(raw_stdout, stdout)
+                        return MODULE.write_frame_error_receipt(
+                            raw_stdout, path=path, **metadata
+                        )
+
+                    client = Mock()
+                    with patch.object(
+                        MODULE,
+                        "run_remote_command",
+                        return_value=(1, stdout, ""),
+                    ):
+                        with self.assertRaises(
+                            MODULE.RemoteFrameReportedError
+                        ) as raised:
+                            MODULE.execute_remote(
+                                "audit",
+                                connect_fn=Mock(return_value=client),
+                                frame_error_receipt_fn=write_frame,
+                            )
+                    self.assertEqual(
+                        raised.exception.error_code, "frame_boundaries_invalid"
+                    )
+                    receipt_text = path.read_text(encoding="utf-8")
+                    receipt = json.loads(receipt_text)
+                    frame = receipt["frame"]
+                    raw_bytes = stdout.encode("utf-8")
+                    self.assertEqual(receipt["error_type"], "FRAME_ERROR")
+                    self.assertEqual(receipt["database_mutations"], 0)
+                    self.assertFalse(receipt["apply_supported"])
+                    self.assertEqual(
+                        receipt["parser_error_code"], "frame_boundaries_invalid"
+                    )
+                    self.assertTrue(
+                        receipt["transport"]["eof_or_closed_drain_gate_passed"]
+                    )
+                    self.assertEqual(frame["total_bytes"], len(raw_bytes))
+                    self.assertEqual(
+                        frame["sha256"], hashlib.sha256(raw_bytes).hexdigest()
+                    )
+                    self.assertEqual(frame["ascii_only"], raw_bytes.isascii())
+                    self.assertEqual(frame["ends_with_lf"], stdout.endswith("\n"))
+                    self.assertEqual(frame["contains_cr"], "\r" in stdout)
+                    self.assertEqual(
+                        (
+                            frame["first_byte_class"],
+                            frame["last_byte_class"],
+                        ),
+                        expected_edge_classes[label],
+                    )
+                    self.assertEqual(
+                        frame["split_lf_line_count"], len(stdout.split("\n"))
+                    )
+                    if frame["line_diagnostics_complete"]:
+                        self.assertEqual(
+                            len(frame["line_diagnostics"]),
+                            frame["split_lf_line_count"],
+                        )
+                        for line in frame["line_diagnostics"]:
+                            self.assertEqual(
+                                set(line),
+                                {
+                                    "index",
+                                    "byte_length",
+                                    "sha256",
+                                    "marker_class",
+                                    "ends_with_cr",
+                                },
+                            )
+                    else:
+                        self.assertEqual(frame["line_diagnostics"], [])
+                    if label == "cgi_crlf_contamination":
+                        self.assertTrue(
+                            any(
+                                line["ends_with_cr"]
+                                for line in frame["line_diagnostics"]
+                            )
+                        )
+                        self.assertEqual(
+                            [
+                                line["marker_class"]
+                                for line in frame["line_diagnostics"]
+                            ],
+                            [
+                                "unknown",
+                                "unknown",
+                                "php_version",
+                                "php_script_sha256",
+                                "php_lint",
+                                "json_bytes",
+                                "json_sha256",
+                                "json_base64",
+                                "unknown",
+                            ],
+                        )
+                    if label == "missing_final_lf":
+                        self.assertEqual(
+                            [
+                                line["marker_class"]
+                                for line in frame["line_diagnostics"]
+                            ],
+                            [
+                                "php_version",
+                                "php_script_sha256",
+                                "php_lint",
+                                "json_bytes",
+                                "json_sha256",
+                                "json_base64",
+                            ],
+                        )
+                    if stdout:
+                        self.assertNotIn(stdout, receipt_text)
+                    self.assertFalse(bool(path.stat().st_mode & stat.S_IWUSR))
+                    os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+
+    def test_unknown_frame_line_is_classified_and_hashed_without_raw_leak(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        sentinel = "HOSTILE_FRAME_SENTINEL_MUST_NOT_ECHO"
+        stdout = sentinel + "\n"
+        client = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frame-error.json"
+
+            def write_frame(raw_stdout: str, **metadata: object) -> Path:
+                return MODULE.write_frame_error_receipt(
+                    raw_stdout, path=path, **metadata
+                )
+
+            with patch.object(
+                MODULE,
+                "run_remote_command",
+                return_value=(1, stdout, ""),
+            ):
+                with self.assertRaises(MODULE.RemoteFrameReportedError) as raised:
+                    MODULE.execute_remote(
+                        "audit",
+                        connect_fn=Mock(return_value=client),
+                        frame_error_receipt_fn=write_frame,
+                    )
+            receipt_text = path.read_text(encoding="utf-8")
+            receipt = json.loads(receipt_text)
+            self.assertEqual(
+                raised.exception.error_code, "frame_line_count_invalid"
+            )
+            self.assertNotIn(sentinel, receipt_text)
+            self.assertEqual(
+                receipt["frame"]["line_diagnostics"][0]["marker_class"],
+                "unknown",
+            )
+            self.assertEqual(
+                receipt["frame"]["line_diagnostics"][0]["byte_length"],
+                len(sentinel.encode("ascii")),
+            )
+            self.assertEqual(
+                receipt["frame"]["line_diagnostics"][0]["sha256"],
+                hashlib.sha256(sentinel.encode("ascii")).hexdigest(),
+            )
+            os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+
+        many_lines = "x\n" * MODULE.MAX_FRAME_DIAGNOSTIC_LINES
+        bounded = MODULE.build_stdout_frame_diagnostics(many_lines)
+        self.assertEqual(
+            bounded["split_lf_line_count"],
+            MODULE.MAX_FRAME_DIAGNOSTIC_LINES + 1,
+        )
+        self.assertFalse(bounded["line_diagnostics_complete"])
+        self.assertEqual(bounded["line_diagnostics"], [])
+
     def test_status_one_authenticated_error_writes_exact_receipt_before_raising(self) -> None:
         script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
         payload = remote_error_payload()
@@ -923,7 +1127,7 @@ class RemoteFrameProtocolTests(unittest.TestCase):
             os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
         client.close.assert_called_once_with()
 
-    def test_status_one_corrupt_or_hostile_frame_never_writes_error_receipt(self) -> None:
+    def test_status_one_hostile_payload_never_writes_any_error_receipt(self) -> None:
         script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
         client = Mock()
         writer = Mock()
@@ -933,7 +1137,6 @@ class RemoteFrameProtocolTests(unittest.TestCase):
         bool_mutation_counter = remote_error_payload()
         bool_mutation_counter["database_mutations"] = False
         cases = {
-            "corrupt_frame": "not-a-frame\n",
             "hostile_extra_field": remote_stdout_frame(
                 hostile, script_sha256=script_sha256
             ),
@@ -953,6 +1156,7 @@ class RemoteFrameProtocolTests(unittest.TestCase):
                             "audit",
                             connect_fn=Mock(return_value=client),
                             error_receipt_fn=writer,
+                            frame_error_receipt_fn=writer,
                         )
                 self.assertNotIn(hostile_marker, str(raised.exception))
         writer.assert_not_called()
