@@ -625,6 +625,17 @@ def remote_stdout_frame(
     )
 
 
+def remote_preflight_error_frame(
+    error_code: str,
+    *,
+    script_sha256: str = "a" * 64,
+) -> str:
+    return (
+        f"{MODULE.PREFLIGHT_ERROR_PREFIX}{error_code}\n"
+        f"{MODULE.PREFLIGHT_SHA_PREFIX}{script_sha256}\n"
+    )
+
+
 def remote_error_payload(
     *,
     error_code: str = "helper_contract_violation",
@@ -742,8 +753,12 @@ class AuditOnlyContractTests(unittest.TestCase):
         script_bytes = PHP_PATH.read_bytes()
         command, digest = MODULE.build_remote_command(script_bytes)
         self.assertEqual(digest, __import__("hashlib").sha256(script_bytes).hexdigest())
-        self.assertIn(f"test \"$decoded_sha256\" = '{digest}'", command)
+        self.assertIn(f"[ \"$decoded_sha256\" != '{digest}' ]", command)
         self.assertIn(f"realpath -- '{MODULE.SITE_ROOT}'", command)
+        self.assertIn(
+            f"[ ! -f '{MODULE.SITE_ROOT}/bitrix/modules/main/include/prolog_before.php' ]",
+            command,
+        )
         self.assertIn("$php_binary\" -l", command)
         self.assertIn("-- 'audit'", command)
         self.assertNotIn("-- 'apply'", command)
@@ -752,6 +767,26 @@ class AuditOnlyContractTests(unittest.TestCase):
         for binary in ("base64", "sha256sum", "awk", "realpath", "timeout"):
             self.assertIn(f"/usr/bin/{binary}", command)
         self.assertNotIn("command -v", command)
+        self.assertNotIn("test \"$decoded_sha256\"", command)
+        self.assertNotIn("test -f", command)
+        self.assertNotIn("Decoded helper marker is missing", command)
+        self.assertNotIn("Pinned PHP series was not found", command)
+        self.assertIn("trap 'rosomaha_fan_on_preflight_exit' EXIT", command)
+        self.assertIn("trap - EXIT", command)
+        self.assertIn("*[!0-9]*", command)
+        for error_code in MODULE.PREFLIGHT_ERROR_CODES:
+            self.assertIn(error_code, command)
+        self.assertTrue(command.isascii())
+        self.assertLessEqual(
+            len(command.encode("ascii")), MODULE.MAX_REMOTE_COMMAND_BYTES
+        )
+
+    def test_remote_command_size_cap_blocks_before_connection(self) -> None:
+        with patch.object(
+            MODULE, "validate_php_source", return_value="a" * 64
+        ):
+            with self.assertRaises(RuntimeError):
+                MODULE.build_remote_command(b"x" * 90_000)
 
     def test_nonempty_remote_stderr_fails_closed(self) -> None:
         client = Mock()
@@ -1192,6 +1227,145 @@ class RemoteFrameProtocolTests(unittest.TestCase):
                         )
                 client.close.assert_called_once_with()
         writer.assert_not_called()
+
+
+class RemotePreflightProtocolTests(unittest.TestCase):
+    def test_every_preflight_enum_writes_exact_immutable_receipt(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            for error_code in sorted(MODULE.PREFLIGHT_ERROR_CODES):
+                with self.subTest(error_code=error_code):
+                    path = Path(directory) / f"{error_code}.json"
+
+                    def write_preflight(
+                        reported_code: str,
+                        **metadata: object,
+                    ) -> Path:
+                        self.assertEqual(reported_code, error_code)
+                        return MODULE.write_preflight_error_receipt(
+                            reported_code, path=path, **metadata
+                        )
+
+                    client = Mock()
+                    frame_writer = Mock()
+                    helper_writer = Mock()
+                    with patch.object(
+                        MODULE,
+                        "run_remote_command",
+                        return_value=(
+                            1,
+                            remote_preflight_error_frame(
+                                error_code, script_sha256=script_sha256
+                            ),
+                            "",
+                        ),
+                    ):
+                        with self.assertRaises(
+                            MODULE.RemotePreflightReportedError
+                        ) as raised:
+                            MODULE.execute_remote(
+                                "audit",
+                                connect_fn=Mock(return_value=client),
+                                error_receipt_fn=helper_writer,
+                                frame_error_receipt_fn=frame_writer,
+                                preflight_error_receipt_fn=write_preflight,
+                            )
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(raised.exception.error_code, error_code)
+                    self.assertEqual(receipt["error_type"], "PREFLIGHT_ERROR")
+                    self.assertEqual(receipt["preflight_error_code"], error_code)
+                    self.assertEqual(receipt["remote_exit_status"], 1)
+                    self.assertEqual(
+                        receipt["expected_php_script_sha256"], script_sha256
+                    )
+                    self.assertEqual(receipt["database_mutations"], 0)
+                    self.assertFalse(receipt["apply_supported"])
+                    self.assertFalse(receipt["ready_for_apply"])
+                    self.assertFalse(bool(path.stat().st_mode & stat.S_IWUSR))
+                    frame_writer.assert_not_called()
+                    helper_writer.assert_not_called()
+                    client.close.assert_called_once_with()
+                    os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+
+    def test_preflight_corruption_or_contamination_falls_back_to_frame_receipt(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        sentinel = "HOSTILE_PREFLIGHT_SENTINEL_MUST_NOT_ECHO"
+        valid = remote_preflight_error_frame(
+            "prolog_missing", script_sha256=script_sha256
+        )
+        cases = {
+            "unknown_enum": remote_preflight_error_frame(
+                sentinel, script_sha256=script_sha256
+            ),
+            "wrong_sha": remote_preflight_error_frame(
+                "prolog_missing", script_sha256="0" * 64
+            ),
+            "extra_line": valid + sentinel + "\n",
+            "crlf": valid.replace("\n", "\r\n"),
+            "missing_lf": valid.rstrip("\n"),
+            "leading_contamination": sentinel + "\n" + valid,
+        }
+        for label, stdout in cases.items():
+            with self.subTest(case=label):
+                client = Mock()
+                frame_writer = Mock(return_value=Path("frame-error.json"))
+                preflight_writer = Mock()
+                with patch.object(
+                    MODULE,
+                    "run_remote_command",
+                    return_value=(1, stdout, ""),
+                ):
+                    with self.assertRaises(
+                        MODULE.RemoteFrameReportedError
+                    ) as raised:
+                        MODULE.execute_remote(
+                            "audit",
+                            connect_fn=Mock(return_value=client),
+                            frame_error_receipt_fn=frame_writer,
+                            preflight_error_receipt_fn=preflight_writer,
+                        )
+                self.assertNotIn(sentinel, str(raised.exception))
+                preflight_writer.assert_not_called()
+                frame_writer.assert_called_once()
+
+    def test_preflight_exit_status_or_stderr_mismatch_is_rejected(self) -> None:
+        script_sha256 = hashlib.sha256(PHP_PATH.read_bytes()).hexdigest()
+        stdout = remote_preflight_error_frame(
+            "prolog_missing", script_sha256=script_sha256
+        )
+        frame_writer = Mock(return_value=Path("frame-error.json"))
+        preflight_writer = Mock()
+        with patch.object(
+            MODULE,
+            "run_remote_command",
+            return_value=(0, stdout, ""),
+        ):
+            with self.assertRaises(MODULE.RemoteFrameReportedError):
+                MODULE.execute_remote(
+                    "audit",
+                    connect_fn=Mock(return_value=Mock()),
+                    frame_error_receipt_fn=frame_writer,
+                    preflight_error_receipt_fn=preflight_writer,
+                )
+        frame_writer.assert_called_once()
+        preflight_writer.assert_not_called()
+
+        frame_writer.reset_mock()
+        with patch.object(
+            MODULE,
+            "run_remote_command",
+            return_value=(1, stdout, "unexpected stderr"),
+        ):
+            with self.assertRaises(MODULE.RemoteAuditError) as raised:
+                MODULE.execute_remote(
+                    "audit",
+                    connect_fn=Mock(return_value=Mock()),
+                    frame_error_receipt_fn=frame_writer,
+                    preflight_error_receipt_fn=preflight_writer,
+                )
+        self.assertNotIn("unexpected stderr", str(raised.exception))
+        frame_writer.assert_not_called()
+        preflight_writer.assert_not_called()
 
 
 class CredentialSafetyTests(unittest.TestCase):

@@ -108,6 +108,7 @@ MAX_PUBLIC_PARSE_ERRORS = 32
 MAX_RECEIPT_BYTES = 12_000_000
 
 MAX_PHP_BYTES = 256_000
+MAX_REMOTE_COMMAND_BYTES = 120_000
 # The ASCII base64 frame can be 4/3 the bounded JSON size, plus six markers.
 MAX_STDOUT_BYTES = 10_500_000
 MAX_STDERR_BYTES = 32_000
@@ -116,6 +117,7 @@ MAX_JSON_BYTES = 7_500_000
 MAX_REMOTE_ERROR_MESSAGE_BYTES = 4_096
 MAX_REMOTE_HELPER_LINE = 4_096
 MAX_FRAME_DIAGNOSTIC_LINES = 16
+MAX_PREFLIGHT_FRAME_BYTES = 512
 MAX_PROPERTIES = 192
 MAX_ENUMS_PER_PROPERTY = 128
 MAX_PROPERTY_VALUES = 128
@@ -247,7 +249,21 @@ FRAME_ERROR_MESSAGES = {
     "json_byte_count_mismatch": "Remote JSON byte marker does not match the frame",
     "json_digest_mismatch": "Remote JSON digest does not match the frame",
     "payload_utf8_json_invalid": "Remote framed payload is not valid UTF-8 JSON",
+    "preflight_error_frame_invalid": "Remote preflight error frame is invalid",
 }
+PREFLIGHT_ERROR_PREFIX = "__ROSOMAHA_FAN_PREFLIGHT_ERROR__="
+PREFLIGHT_SHA_PREFIX = "__ROSOMAHA_FAN_PREFLIGHT_EXPECTED_PHP_SHA256__="
+PREFLIGHT_ERROR_CODES = frozenset(
+    {
+        "payload_decode_marker",
+        "payload_sha",
+        "site_root_realpath",
+        "prolog_missing",
+        "php_series_missing",
+        "php_lint_failed",
+        "unexpected_preflight_exit",
+    }
+)
 
 
 class CredentialError(RuntimeError):
@@ -300,6 +316,20 @@ class RemoteFrameReportedError(RemoteAuditError):
             raise ValueError("Unknown frame error code")
         super().__init__(
             "Remote stdout frame validation failed "
+            f"(error_code={error_code}; receipt={receipt_path.name})"
+        )
+        self.error_code = error_code
+        self.receipt_path = receipt_path
+
+
+class RemotePreflightReportedError(RemoteAuditError):
+    """An exact shell preflight failure was persisted without raw output."""
+
+    def __init__(self, *, error_code: str, receipt_path: Path) -> None:
+        if error_code not in PREFLIGHT_ERROR_CODES:
+            raise ValueError("Unknown preflight error code")
+        super().__init__(
+            "Remote shell preflight failed "
             f"(error_code={error_code}; receipt={receipt_path.name})"
         )
         self.error_code = error_code
@@ -471,42 +501,91 @@ def build_remote_command(script_bytes: bytes) -> tuple[str, str]:
     encoded = base64.b64encode(script_bytes).decode("ascii")
     candidates = " ".join(f"'{item}'" for item in PHP_CANDIDATES)
     command = f"""
-set -eu
+set -u
+preflight_done=0
+preflight_error_emitted=0
+rosomaha_fan_emit_preflight_error() {{
+  preflight_error_emitted=1
+  printf '%s%s\n' '{PREFLIGHT_ERROR_PREFIX}' "$1"
+  printf '%s%s\n' '{PREFLIGHT_SHA_PREFIX}' '{digest}'
+  exit 1
+}}
+rosomaha_fan_on_preflight_exit() {{
+  preflight_status=$?
+  if [ "$preflight_done" -eq 0 ] && [ "$preflight_error_emitted" -eq 0 ]; then
+    preflight_error_emitted=1
+    trap - EXIT
+    printf '%s%s\n' '{PREFLIGHT_ERROR_PREFIX}' 'unexpected_preflight_exit'
+    printf '%s%s\n' '{PREFLIGHT_SHA_PREFIX}' '{digest}'
+    exit 1
+  fi
+  return "$preflight_status"
+}}
+trap 'rosomaha_fan_on_preflight_exit' EXIT
+set -e
 script_payload='{encoded}'
-decoded_with_marker="$(
-  printf '%s' "$script_payload" | /usr/bin/base64 -d
+if ! decoded_with_marker="$(
+  printf '%s' "$script_payload" | /usr/bin/base64 -d &&
   printf '__ROSOMAHA_FAN_PAYLOAD_END__'
-)"
+)" 2>/dev/null; then
+  rosomaha_fan_emit_preflight_error 'payload_decode_marker'
+fi
 case "$decoded_with_marker" in
   *__ROSOMAHA_FAN_PAYLOAD_END__) ;;
-  *) printf 'Decoded helper marker is missing\n' >&2; exit 43 ;;
+  *) rosomaha_fan_emit_preflight_error 'payload_decode_marker' ;;
 esac
 decoded_script="${{decoded_with_marker%__ROSOMAHA_FAN_PAYLOAD_END__}}"
-decoded_sha256="$(printf '%s' "$decoded_script" | /usr/bin/sha256sum | /usr/bin/awk '{{print $1}}')"
-test "$decoded_sha256" = '{digest}'
-test "$(/usr/bin/realpath -- '{SITE_ROOT}')" = '{SITE_ROOT}'
-test -f '{SITE_ROOT}/bitrix/modules/main/include/prolog_before.php'
+if ! decoded_sha256="$(
+  printf '%s' "$decoded_script" | /usr/bin/sha256sum | /usr/bin/awk '{{print $1}}'
+)" 2>/dev/null; then
+  rosomaha_fan_emit_preflight_error 'payload_sha'
+fi
+if [ "$decoded_sha256" != '{digest}' ]; then
+  rosomaha_fan_emit_preflight_error 'payload_sha'
+fi
+if ! resolved_site_root="$(/usr/bin/realpath -- '{SITE_ROOT}' 2>/dev/null)"; then
+  rosomaha_fan_emit_preflight_error 'site_root_realpath'
+fi
+if [ "$resolved_site_root" != '{SITE_ROOT}' ]; then
+  rosomaha_fan_emit_preflight_error 'site_root_realpath'
+fi
+if [ ! -f '{SITE_ROOT}/bitrix/modules/main/include/prolog_before.php' ]; then
+  rosomaha_fan_emit_preflight_error 'prolog_missing'
+fi
 php_binary=''
 php_version=''
 for candidate in {candidates}; do
   if [ -x "$candidate" ]; then
-    version="$("$candidate" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
-    case "$version" in
-      {EXPECTED_PHP_SERIES}.*) php_binary="$candidate"; php_version="$version"; break ;;
-    esac
+    if version="$("$candidate" -r 'echo PHP_VERSION;' 2>/dev/null)"; then
+      case "$version" in
+        {EXPECTED_PHP_SERIES}.*)
+          version_patch="${{version#{EXPECTED_PHP_SERIES}.}}"
+          case "$version_patch" in
+            ''|*[!0-9]*) ;;
+            *) php_binary="$candidate"; php_version="$version"; break ;;
+          esac
+          ;;
+      esac
+    fi
   fi
 done
 if [ -z "$php_binary" ]; then
-  printf 'Pinned PHP series was not found\n' >&2
-  exit 42
+  rosomaha_fan_emit_preflight_error 'php_series_missing'
 fi
-printf '%s' "$decoded_script" | /usr/bin/timeout 15s "$php_binary" -l >/dev/null
+if ! printf '%s' "$decoded_script" \
+  | /usr/bin/timeout 15s "$php_binary" -l >/dev/null 2>/dev/null; then
+  rosomaha_fan_emit_preflight_error 'php_lint_failed'
+fi
+preflight_done=1
+trap - EXIT
 printf '__ROSOMAHA_FAN_PHP_VERSION__=%s\n' "$php_version"
 printf '__ROSOMAHA_FAN_PHP_SHA256__=%s\n' "$decoded_sha256"
 printf '__ROSOMAHA_FAN_PHP_LINT__=ok\n'
 printf '%s' "$decoded_script" | /usr/bin/timeout 120s "$php_binary" \
   -d display_errors=stderr -d log_errors=0 -- 'audit'
 """
+    if not command.isascii() or len(command.encode("ascii")) > MAX_REMOTE_COMMAND_BYTES:
+        raise RuntimeError("Pinned remote command exceeded the fixed byte limit")
     return command, digest
 
 
@@ -1518,6 +1597,33 @@ def build_stdout_frame_diagnostics(stdout: str) -> dict[str, object]:
     }
 
 
+def parse_remote_preflight_error_frame(
+    stdout: str,
+    *,
+    expected_script_sha256: str,
+) -> str:
+    if (
+        not stdout
+        or not stdout.isascii()
+        or not stdout.endswith("\n")
+        or "\r" in stdout
+        or len(stdout.encode("ascii")) > MAX_PREFLIGHT_FRAME_BYTES
+    ):
+        raise RemoteFrameError("preflight_error_frame_invalid")
+    lines = stdout[:-1].split("\n")
+    if (
+        len(lines) != 2
+        or not lines[0].startswith(PREFLIGHT_ERROR_PREFIX)
+        or not lines[1].startswith(PREFLIGHT_SHA_PREFIX)
+    ):
+        raise RemoteFrameError("preflight_error_frame_invalid")
+    error_code = lines[0][len(PREFLIGHT_ERROR_PREFIX):]
+    script_sha256 = lines[1][len(PREFLIGHT_SHA_PREFIX):]
+    if error_code not in PREFLIGHT_ERROR_CODES or script_sha256 != expected_script_sha256:
+        raise RemoteFrameError("preflight_error_frame_invalid")
+    return error_code
+
+
 def parse_remote_stdout_frame(
     stdout: str,
     *,
@@ -1666,6 +1772,7 @@ def execute_remote(
     connect_fn: Callable[[], paramiko.SSHClient] = connect,
     error_receipt_fn: Callable[..., Path] | None = None,
     frame_error_receipt_fn: Callable[..., Path] | None = None,
+    preflight_error_receipt_fn: Callable[..., Path] | None = None,
 ) -> dict[str, object]:
     if mode != "audit":
         raise ForbiddenModeError("This phase-1 helper supports audit only")
@@ -1681,6 +1788,31 @@ def execute_remote(
     if type(status) is not int or status not in {0, 1}:
         raise RemoteAuditError("Remote helper returned an unsupported exit status")
     try:
+        if status == 1 and stdout.startswith(PREFLIGHT_ERROR_PREFIX):
+            preflight_error_code = parse_remote_preflight_error_frame(
+                stdout,
+                expected_script_sha256=digest,
+            )
+            if stderr:
+                raise RemoteAuditError("Remote shell preflight emitted stderr")
+            preflight_writer = (
+                preflight_error_receipt_fn or write_preflight_error_receipt
+            )
+            try:
+                receipt_path = preflight_writer(
+                    preflight_error_code,
+                    remote_exit_status=status,
+                    expected_script_sha256=digest,
+                )
+            except Exception as receipt_exc:
+                raise RemoteAuditError(
+                    "Remote preflight-error receipt could not be persisted "
+                    f"({type(receipt_exc).__name__})"
+                ) from receipt_exc
+            raise RemotePreflightReportedError(
+                error_code=preflight_error_code,
+                receipt_path=receipt_path,
+            )
         parsed, php_version = parse_remote_stdout_frame(
             stdout,
             expected_script_sha256=digest,
@@ -1921,6 +2053,46 @@ def write_frame_error_receipt(
             "expected_php_script_sha256": expected_script_sha256,
         },
         "frame": diagnostics,
+    }
+    _atomic_immutable_json(destination, receipt)
+    return destination
+
+
+def write_preflight_error_receipt(
+    error_code: str,
+    *,
+    remote_exit_status: int,
+    expected_script_sha256: str,
+    path: Path | None = None,
+) -> Path:
+    if (
+        error_code not in PREFLIGHT_ERROR_CODES
+        or type(remote_exit_status) is not int
+        or remote_exit_status != 1
+        or not isinstance(expected_script_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", expected_script_sha256) is None
+    ):
+        raise RemoteAuditError("Remote preflight-error receipt metadata is invalid")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    destination = path or (
+        REPORT_ROOT / f"ROSOMAHA_BITRIX_FAN_BUTTON_{stamp}_PREFLIGHT_ERROR.json"
+    )
+    receipt = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "error",
+        "error_type": "PREFLIGHT_ERROR",
+        "domain": DOMAIN,
+        "mode": "audit",
+        "phase": "remote_shell_preflight",
+        "read_only": True,
+        "database_mutations": 0,
+        "apply_supported": False,
+        "ready_for_apply": False,
+        "secrets_exported": False,
+        "pii_exported": False,
+        "preflight_error_code": error_code,
+        "remote_exit_status": remote_exit_status,
+        "expected_php_script_sha256": expected_script_sha256,
     }
     _atomic_immutable_json(destination, receipt)
     return destination
