@@ -77,6 +77,22 @@ TARGET_META_DESCRIPTION = (
     "«Росомаха». Цена опции — 7 000 ₽."
 )
 TARGET_PAGE_TITLE = TARGET_NAME
+TARGET_IDENTITY = {
+    "name": TARGET_NAME,
+    "code": TARGET_CODE,
+    "price": TARGET_PRICE,
+    "price_display": TARGET_PRICE_DISPLAY,
+    "preview_text": TARGET_PREVIEW_TEXT,
+    "detail_text": TARGET_DETAIL_TEXT,
+    "meta_title": TARGET_META_TITLE,
+    "meta_description": TARGET_META_DESCRIPTION,
+    "page_title": TARGET_PAGE_TITLE,
+}
+BASELINE_TARGET_IDENTITY = {
+    "name": TARGET_NAME,
+    "code": TARGET_CODE,
+    "price": TARGET_PRICE,
+}
 LINK_GOODS_PROPERTY_ID = 1219
 OPTIONS_SECTION_ID = 302
 TARGET_SORT = 506
@@ -1355,7 +1371,11 @@ def _validate_phase1b_evidence(
         raise RemoteAuditError("Remote phase1b evidence cannot be ready before public proof")
 
 
-def normalize_remote_payload(payload: object) -> dict[str, object]:
+def normalize_remote_payload(
+    payload: object,
+    *,
+    expected_target_identity: dict[str, object] = TARGET_IDENTITY,
+) -> dict[str, object]:
     remote = _require_dict(payload, "payload")
     encoded = json.dumps(remote, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_JSON_BYTES:
@@ -1374,7 +1394,7 @@ def normalize_remote_payload(payload: object) -> dict[str, object]:
         "anchor_code": ANCHOR_CODE,
         "comparator_id": COMPARATOR_ID,
         "comparator_role": COMPARATOR_ROLE,
-        "target": {"name": TARGET_NAME, "code": TARGET_CODE, "price": TARGET_PRICE},
+        "target": expected_target_identity,
         "model_codes": list(MODEL_CODES),
         "trailer_included": False,
     }
@@ -2508,7 +2528,9 @@ def load_fixed_baseline() -> dict[str, object]:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("Pinned baseline receipt is malformed") from exc
     root = _require_dict(receipt, "baseline receipt")
-    remote = normalize_remote_payload(root.get("remote"))
+    remote = normalize_remote_payload(
+        root.get("remote"), expected_target_identity=BASELINE_TARGET_IDENTITY
+    )
     public = _require_dict(root.get("public"), "baseline public evidence")
     relation = _require_dict(remote.get("relation_analysis"), "baseline relation")
     candidates = _require_list(

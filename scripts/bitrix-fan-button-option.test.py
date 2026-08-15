@@ -409,11 +409,7 @@ def valid_payload(*, strong_count: int = 1, ready: bool = True) -> dict[str, obj
             "anchor_code": MODULE.ANCHOR_CODE,
             "comparator_id": MODULE.COMPARATOR_ID,
             "comparator_role": MODULE.COMPARATOR_ROLE,
-            "target": {
-                "name": MODULE.TARGET_NAME,
-                "code": MODULE.TARGET_CODE,
-                "price": MODULE.TARGET_PRICE,
-            },
+            "target": dict(MODULE.TARGET_IDENTITY),
             "model_codes": list(MODULE.MODEL_CODES),
             "trailer_included": False,
         },
@@ -715,6 +711,43 @@ class FixedScopeTests(unittest.TestCase):
         for code in MODULE.MODEL_CODES:
             self.assertEqual(source.count("'" + code + "'"), 1)
 
+    def test_php_and_python_target_identity_contracts_are_exact(self) -> None:
+        source = PHP_PATH.read_text(encoding="utf-8")
+        self.assertIn("'target' => ROSOMAHA_FAN_TARGET", source)
+        self.assertEqual(
+            set(MODULE.TARGET_IDENTITY),
+            {
+                "name", "code", "price", "price_display", "preview_text",
+                "detail_text", "meta_title", "meta_description", "page_title",
+            },
+        )
+        for key, value in MODULE.TARGET_IDENTITY.items():
+            php_value = str(value) if isinstance(value, int) else value.replace("'", "\\'")
+            self.assertIn(f"'{key}' => {php_value if isinstance(value, int) else repr(php_value)}", source)
+
+    def test_short_target_identity_is_rejected(self) -> None:
+        payload = valid_payload()
+        payload["identity"]["target"] = {
+            "name": MODULE.TARGET_NAME,
+            "code": MODULE.TARGET_CODE,
+            "price": MODULE.TARGET_PRICE,
+        }
+        with self.assertRaises(MODULE.RemoteAuditError):
+            MODULE.normalize_remote_payload(payload)
+
+    def test_each_target_identity_field_is_required_and_exact(self) -> None:
+        for key in MODULE.TARGET_IDENTITY:
+            with self.subTest(key=key, mutation="missing"):
+                payload = valid_payload()
+                del payload["identity"]["target"][key]
+                with self.assertRaises(MODULE.RemoteAuditError):
+                    MODULE.normalize_remote_payload(payload)
+            with self.subTest(key=key, mutation="changed"):
+                payload = valid_payload()
+                payload["identity"]["target"][key] = "__drift__"
+                with self.assertRaises(MODULE.RemoteAuditError):
+                    MODULE.normalize_remote_payload(payload)
+
 
 class StagedContractTests(unittest.TestCase):
     def test_php_has_only_the_fixed_mutator_surface_and_no_delete_or_shell(self) -> None:
@@ -983,7 +1016,10 @@ class StagedContractTests(unittest.TestCase):
     def test_exact_target_order_passes_all_12_and_wrong_position_fails(self) -> None:
         receipt = json.loads((MODULE.REPORT_ROOT / MODULE.BASELINE_RECEIPT_NAME).read_text(
             encoding="utf-8"))
-        remote = MODULE.normalize_remote_payload(receipt["remote"])
+        remote = MODULE.normalize_remote_payload(
+            receipt["remote"],
+            expected_target_identity=MODULE.BASELINE_TARGET_IDENTITY,
+        )
         models = remote["phase1b_evidence"]["render_order"]["models"]
         target_id = 1200
         for model in models:
