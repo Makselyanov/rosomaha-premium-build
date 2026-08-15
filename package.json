@@ -21,6 +21,11 @@
         "audit:vk-crm:allow-partial": "node scripts/rosomaha-vk-crm-snapshot.mjs --allow-partial",
         "test:vk-crm": "node --test scripts/rosomaha-vk-crm-snapshot.test.mjs",
         "audit:bitrix-category-seo": "node scripts/bitrix-category-seo-baseline.mjs",
+        "audit:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --audit",
+        "dry-run:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --dry-run",
+        "apply:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --apply",
+        "recover:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --recover",
+        "test:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.test.py",
         "test:bitrix-category-seo": "node --test scripts/bitrix-category-seo-baseline.test.mjs",
         "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs",
         "audit:seo-prerender": "node scripts/audit-prerender-seo.mjs"
