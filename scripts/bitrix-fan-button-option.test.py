@@ -671,6 +671,23 @@ def remote_error_payload(
     }
 
 
+def operation_payload(mode: str, classification: str, status: str = "ok") -> dict[str, object]:
+    digest = "a" * 64
+    return {
+        "status": status, "mode": mode, "phase": "fixed_option_operation",
+        "operation_id": MODULE.deterministic_operation_id(), "database_mutations": 15 if mode == "apply" else 0,
+        "classification": classification, "target_id": 1200,
+        "before_scope_sha256": digest, "after_scope_sha256": digest,
+        "target_snapshot_sha256": digest,
+        "models": [{"id": model_id, "code": code, "before_link_sha256": digest,
+            "after_link_sha256": digest, "before_full_sha256": digest,
+            "after_full_sha256": digest, "non_link_equal": True}
+            for model_id, code in zip(MODULE.MODEL_IDS, MODULE.MODEL_CODES)],
+        "verified": status == "ok", "active_last": mode == "apply" and status == "ok",
+        "error_evidence": None,
+    }
+
+
 class FixedScopeTests(unittest.TestCase):
     def test_exact_identity_and_allowlist_match_repository_constants(self) -> None:
         source = (SCRIPT_PATH.parents[1] / "src" / "data" / "products.ts").read_text(
@@ -699,12 +716,12 @@ class FixedScopeTests(unittest.TestCase):
             self.assertEqual(source.count("'" + code + "'"), 1)
 
 
-class AuditOnlyContractTests(unittest.TestCase):
-    def test_php_contains_no_mutator_or_file_write_calls(self) -> None:
+class StagedContractTests(unittest.TestCase):
+    def test_php_has_only_the_fixed_mutator_surface_and_no_delete_or_shell(self) -> None:
         source = PHP_PATH.read_text(encoding="utf-8")
         forbidden = (
-            r"CIBlockElement\s*::\s*(?:Add|Update|Delete|SetPropertyValues(?:Ex)?)\s*\(",
-            r"->\s*(?:Add|Update|Delete|SetPropertyValues(?:Ex)?)\s*\(",
+            r"CIBlockElement\s*::\s*Delete\s*\(",
+            r"->\s*Delete\s*\(",
             r"\b(?:file_put_contents|fopen|fwrite|mkdir|rename|copy|unlink|chmod)\s*\(",
             r"\beval\s*\(",
             r"\b(?:exec|system|shell_exec|passthru|proc_open|popen)\s*\(",
@@ -712,6 +729,10 @@ class AuditOnlyContractTests(unittest.TestCase):
         )
         for pattern in forbidden:
             self.assertIsNone(re.search(pattern, source, flags=re.IGNORECASE), pattern)
+        self.assertEqual(source.count("->Add("), 1)
+        self.assertEqual(source.count("->Update("), 1)
+        self.assertEqual(source.count("CIBlockElement::SetPropertyValuesEx("), 1)
+        self.assertEqual(source.count("->set("), 1)
         for reader in (
             "CIBlockElement::GetList",
             "CIBlockElement::GetProperty",
@@ -743,17 +764,19 @@ class AuditOnlyContractTests(unittest.TestCase):
             self.assertIn("'" + error_code + "'", source)
             self.assertIn(error_code, MODULE.REMOTE_KNOWN_HELPER_ERROR_CODES)
 
-    def test_apply_and_recover_are_blocked_before_dispatch(self) -> None:
-        execute = Mock()
-        with patch.object(MODULE, "run_audit", execute):
-            self.assertEqual(MODULE.main(["--apply"]), 2)
-            self.assertEqual(MODULE.main(["--recover=anything"]), 2)
-            self.assertEqual(MODULE.main(["--rollback=anything"]), 2)
-        execute.assert_not_called()
+    def test_cli_dispatches_each_exact_mode(self) -> None:
+        operation_id = MODULE.deterministic_operation_id()
+        with patch.object(MODULE, "run_apply", return_value=({"mode": "apply"}, 0)) as apply_fn:
+            self.assertEqual(MODULE.main(["--apply"]), 0)
+            apply_fn.assert_called_once_with()
+        for mode in ("recover", "rollback"):
+            with patch.object(MODULE, "run_existing_operation", return_value=({"mode": mode}, 0)) as fn:
+                self.assertEqual(MODULE.main([f"--{mode}", operation_id]), 0)
+                fn.assert_called_once_with(mode, operation_id)
 
-    def test_execute_remote_rejects_non_audit_before_connection(self) -> None:
+    def test_execute_remote_requires_operation_payload_before_connection(self) -> None:
         connector = Mock()
-        with self.assertRaises(MODULE.ForbiddenModeError):
+        with self.assertRaises(ValueError):
             MODULE.execute_remote("apply", connect_fn=connector)
         connector.assert_not_called()
 
@@ -881,6 +904,104 @@ class AuditOnlyContractTests(unittest.TestCase):
             with self.assertRaises(MODULE.RemoteAuditError):
                 MODULE.execute_remote("audit", connect_fn=Mock(return_value=client))
         client.close.assert_called_once_with()
+
+    def test_fixed_baseline_binds_receipt_and_all_twelve_preimages(self) -> None:
+        with patch.object(MODULE, "current_git_head", return_value=MODULE.BASELINE_GIT_HEAD):
+            pending = MODULE.load_fixed_baseline()
+        self.assertEqual(pending["operation_id"], MODULE.deterministic_operation_id())
+        self.assertEqual(pending["baseline"]["receipt_sha256"], MODULE.BASELINE_RECEIPT_SHA256)
+        self.assertEqual([row["id"] for row in pending["models"]], list(MODULE.MODEL_IDS))
+        self.assertIn("current_git_head", SCRIPT_PATH.read_text(encoding="utf-8"))
+
+    def test_current_head_requires_baseline_ancestor_and_scoped_clean(self) -> None:
+        head = "1" * 40
+        with patch.object(MODULE.subprocess, "run", side_effect=[
+            Mock(stdout=head), Mock(returncode=0), Mock(returncode=1)
+        ]) as runner:
+            with self.assertRaisesRegex(RuntimeError, "cleanliness"):
+                MODULE.current_git_head()
+        self.assertEqual(runner.call_args_list[1].args[0],
+            ["git", "merge-base", "--is-ancestor", MODULE.BASELINE_GIT_HEAD, head])
+        self.assertEqual(runner.call_args_list[2].args[0][:5],
+            ["git", "diff", "--quiet", "HEAD", "--"])
+
+    def test_operation_transport_and_safe_terminal_contracts(self) -> None:
+        payload = {"operation_id": MODULE.deterministic_operation_id()}
+        command, _ = MODULE.build_remote_command(PHP_PATH.read_bytes(), "apply", payload)
+        self.assertIn("-- 'apply' '" + MODULE.deterministic_operation_id() + "'", command)
+        MODULE.normalize_operation_payload(operation_payload("apply", "active_complete"),
+            expected_mode="apply", expected_operation_id=MODULE.deterministic_operation_id())
+        unsafe = operation_payload("recover", "inactive_partial")
+        with self.assertRaises(MODULE.RemoteAuditError):
+            MODULE.normalize_operation_payload(unsafe, expected_mode="recover",
+                expected_operation_id=MODULE.deterministic_operation_id())
+        unsafe["status"], unsafe["verified"] = "blocked", False
+        MODULE.normalize_operation_payload(unsafe, expected_mode="recover",
+            expected_operation_id=MODULE.deterministic_operation_id())
+
+    def test_rollback_deactivates_first_and_apply_activates_last(self) -> None:
+        source = PHP_PATH.read_text(encoding="utf-8")
+        python_source = SCRIPT_PATH.read_text(encoding="utf-8")
+        apply_source = source.split("function rosomahaFanApply", 1)[1].split(
+            "function rosomahaFanRecover", 1)[0]
+        rollback_source = source.split("function rosomahaFanRollback", 1)[1].split(
+            "if (PHP_SAPI", 1)[0]
+        self.assertLess(source.index("rosomahaFanSetActive($state['targetId'], false"),
+            source.index("rosomahaFanSetLinks($row['id'], $row['before'])"))
+        self.assertLess(source.index("rosomahaFanSetLinks($row['id'], [...$row['before'], $id])"),
+            source.index("rosomahaFanSetActive($id, true"))
+        self.assertIn("rosomahaFanLinksMatchPayload($state['models'], $payload['models'], $id, true)", source)
+        self.assertIn("throw new RuntimeException('rollback_state_unsafe');", source)
+        self.assertIn("function rosomahaFanNormalizePositiveInt", source)
+        self.assertIn("$id = rosomahaFanNormalizePositiveInt($writer->Add([", source)
+        self.assertLess(apply_source.index("rosomahaFanCurrentLinks("),
+            apply_source.index("rosomahaFanSetLinks("))
+        self.assertLess(rollback_source.index("rosomahaFanCurrentLinks("),
+            rollback_source.index("rosomahaFanSetLinks("))
+        self.assertLess(python_source.index("_atomic_immutable_json(path, pending)"),
+            python_source.index('fresh_remote = execute_fn("audit")'))
+
+    def test_target_property_matrix_is_exact_and_show_on_index_is_absent(self) -> None:
+        source = PHP_PATH.read_text(encoding="utf-8")
+        matrix = ("1164 => 587, 1170 => 591, 1171 => '7 000 #CURRENCY#', 1173 => 592,"
+            "\n    1174 => 594, 1177 => 7000, 1182 => 600, 1218 => '[]',")
+        self.assertIn(matrix, source)
+        self.assertIn("'PROPERTY_VALUES' => ROSOMAHA_FAN_TARGET_PROPERTIES", source)
+        self.assertIn("rosomahaFanPropertyValuesById($public, 1163) !== []", source)
+
+    def test_parser_preserves_description_h1_and_visible_copy(self) -> None:
+        url = MODULE.TARGET_PUBLIC_URL
+        body = (f'<html><head><title>{MODULE.TARGET_META_TITLE}</title>'
+            f'<link rel="canonical" href="{url}"><meta name="description" content="{MODULE.TARGET_META_DESCRIPTION}">'
+            f'</head><body><h1>{MODULE.TARGET_PAGE_TITLE}</h1><p>{MODULE.TARGET_DETAIL_TEXT}</p></body></html>').encode()
+        evidence, parser = MODULE._parse_public_response(url, {"http_status": 200,
+            "final_url": url, "content_type": "text/html; charset=UTF-8", "body": body})
+        self.assertEqual(evidence["meta_descriptions"], [MODULE.TARGET_META_DESCRIPTION])
+        self.assertEqual(evidence["h1"], MODULE.TARGET_PAGE_TITLE)
+        self.assertIn(MODULE.TARGET_DETAIL_TEXT, " ".join(parser.visible_text_parts))
+
+    def test_exact_target_order_passes_all_12_and_wrong_position_fails(self) -> None:
+        receipt = json.loads((MODULE.REPORT_ROOT / MODULE.BASELINE_RECEIPT_NAME).read_text(
+            encoding="utf-8"))
+        remote = MODULE.normalize_remote_payload(receipt["remote"])
+        models = remote["phase1b_evidence"]["render_order"]["models"]
+        target_id = 1200
+        for model in models:
+            baseline = model["hypotheses"]["element_sort_then_id_desc"]
+            index = MODULE._target_insertion_index(model, baseline)
+            correct = list(baseline)
+            correct.insert(index, target_id)
+            self.assertTrue(MODULE._target_order_exact(
+                correct, baseline, index, target_id
+            ))
+            wrong_index = (index + 1) % (len(baseline) + 1)
+            wrong = list(baseline)
+            wrong.insert(wrong_index, target_id)
+            self.assertFalse(MODULE._target_order_exact(
+                wrong, baseline, index, target_id
+            ))
+            if MODULE.ANCHOR_ID in baseline:
+                self.assertEqual(index, baseline.index(MODULE.ANCHOR_ID) + 1)
 
 
 class RemoteFrameProtocolTests(unittest.TestCase):

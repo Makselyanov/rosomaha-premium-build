@@ -23,6 +23,12 @@ const ROSOMAHA_FAN_TARGET_SORT = 506;
 const ROSOMAHA_FAN_MAX_LINKED_OPTIONS = 96;
 const ROSOMAHA_FAN_MAX_NO_CONTENT_SAMPLES = 16;
 const ROSOMAHA_FAN_MAX_ERROR_MESSAGE_BYTES = 4096;
+const ROSOMAHA_FAN_TARGET_PROPERTIES = [
+    1164 => 587, 1170 => 591, 1171 => '7 000 #CURRENCY#', 1173 => 592,
+    1174 => 594, 1177 => 7000, 1182 => 600, 1218 => '[]',
+];
+const ROSOMAHA_FAN_BASELINE_AUDIT_GIT_HEAD = '832b694c79163b64339ae246b7ab80052efe49b1';
+const ROSOMAHA_FAN_BASELINE_RECEIPT_SHA256 = '23dc9aee98da9a40c6b4f4720fe5e3ff11fc04e9b5e8eaf5ebd18afa821bd53c';
 
 const ROSOMAHA_FAN_ERROR_STAGES = [
     'bootstrap',
@@ -52,6 +58,12 @@ const ROSOMAHA_FAN_TARGET = [
     'name' => 'Дополнительная кнопка включения вентилятора',
     'code' => 'dopolnitelnaya-knopka-vklyucheniya-ventilyatora',
     'price' => 7000,
+    'price_display' => '7 000 #CURRENCY#',
+    'preview_text' => 'Дополнительная кнопка включения вентилятора — дополнительная опция стоимостью 7 000 ₽ для всех 12 моторных моделей техники «Росомаха», представленных на сайте.',
+    'detail_text' => 'Дополнительная кнопка включения вентилятора — дополнительная опция для всех 12 моторных моделей техники «Росомаха», представленных на сайте. Стоимость опции — 7 000 ₽. Опцию можно выбрать при комплектации техники.',
+    'meta_title' => 'Дополнительная кнопка включения вентилятора — 7 000 ₽ | Завод Росомаха',
+    'meta_description' => 'Дополнительная кнопка включения вентилятора для 12 моторных моделей техники «Росомаха». Цена опции — 7 000 ₽.',
+    'page_title' => 'Дополнительная кнопка включения вентилятора',
 ];
 
 const ROSOMAHA_FAN_MODEL_CODES = [
@@ -67,6 +79,21 @@ const ROSOMAHA_FAN_MODEL_CODES = [
     'snegobolotokhod-rosomakha-pikap-dvs-1-8-litra-uaz',
     'snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota',
     'snegobolotokhod-rosomakha-komplektatsiya-shestikolyesnik-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota',
+];
+const ROSOMAHA_FAN_MODEL_IDS = [1094, 954, 755, 898, 768, 879, 769, 770, 979, 881, 880, 936];
+const ROSOMAHA_FAN_BASELINE_LINK_HASHES = [
+    'fd9d06d76e7fdb00d6cf5dff9e99b0e5ca46535384c58da7c63ffd270edd034e',
+    '588843ce64125996c167f7f7435556c87220db311c7be781f474ba77fbf90ff2',
+    'b2d6e82663a8ecbc75b38ba0293fd6c9155db1d10f6fe085596cf14d1f70eee0',
+    '73edbf3741fb91169afa6d4c6a67244c512bac9bac65b08dd5b9a663272dcda3',
+    'b49a9ccec2807292f490b6f70bb9daaac4bb05a8ba068e9a80e72afaa6974537',
+    'b49a9ccec2807292f490b6f70bb9daaac4bb05a8ba068e9a80e72afaa6974537',
+    '370faa101bb3b88cb15eb0de9240ff5606b9896c50ac33b8c72c4350d272042f',
+    '2570d0d0dbf4b3bf60c8b47c9c0fa6c50edb07f7e1998257c8b150832f920330',
+    'ac8b9f99e00c6dfe2ef3e52f23cc444be7673988334da6b6f20a68665cde954d',
+    '03c39a0fca9df121f99b1450e65a3fa1312a0a2a36ac40d9328421f3ee7a23c8',
+    '03c39a0fca9df121f99b1450e65a3fa1312a0a2a36ac40d9328421f3ee7a23c8',
+    '3743310f48b161715a5d57f223c4320ffaa4880d849ceb32bc3b2c67406efa7f',
 ];
 
 const ROSOMAHA_FAN_EXPECTED_LINKED_OPTION_IDS = [
@@ -1247,6 +1274,393 @@ function rosomahaFanMetadataTemplateEvidence(): array
     return $evidence;
 }
 
+function rosomahaFanOperationId(): string
+{
+    $seed = implode('|', [
+        ROSOMAHA_FAN_BASELINE_AUDIT_GIT_HEAD, ROSOMAHA_FAN_BASELINE_RECEIPT_SHA256,
+        ROSOMAHA_FAN_TARGET['code'], (string) ROSOMAHA_FAN_TARGET['price'],
+        (string) ROSOMAHA_FAN_TARGET_SORT,
+    ]);
+    return 'bitrix-fan-' . substr(hash('sha256', $seed), 0, 24);
+}
+
+function rosomahaFanOperationPayload(array $argv, string $mode): array
+{
+    if (!in_array($mode, ['apply', 'recover', 'rollback'], true) || count($argv) !== 5) {
+        throw new RuntimeException('operation_contract_failed');
+    }
+    $raw = base64_decode((string) $argv[3], true);
+    if (!is_string($raw) || $raw === '' || strlen($raw) > 32000
+        || preg_match('/^[a-f0-9]{64}$/D', (string) $argv[4]) !== 1
+        || !hash_equals((string) $argv[4], hash('sha256', $raw))) {
+        throw new RuntimeException('operation_contract_failed');
+    }
+    $payload = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
+    $expectedKeys = ['baseline_audit_git_head', 'baseline_receipt_sha256', 'current_git_head', 'models', 'operation_id'];
+    $keys = is_array($payload) ? array_keys($payload) : [];
+    sort($keys, SORT_STRING);
+    if ($keys !== $expectedKeys || ($payload['operation_id'] ?? null) !== rosomahaFanOperationId()
+        || ($payload['operation_id'] ?? null) !== ($argv[2] ?? null)
+        || ($payload['baseline_audit_git_head'] ?? null) !== ROSOMAHA_FAN_BASELINE_AUDIT_GIT_HEAD
+        || ($payload['baseline_receipt_sha256'] ?? null) !== ROSOMAHA_FAN_BASELINE_RECEIPT_SHA256
+        || preg_match('/^[a-f0-9]{40}$/D', (string) ($payload['current_git_head'] ?? '')) !== 1
+        || !is_array($payload['models'] ?? null) || count($payload['models']) !== 12) {
+        throw new RuntimeException('operation_contract_failed');
+    }
+    foreach ($payload['models'] as $i => $row) {
+        $rowKeys = is_array($row) ? array_keys($row) : [];
+        sort($rowKeys, SORT_STRING);
+        $before = $row['before'] ?? null;
+        if ($rowKeys !== ['before', 'before_sha256', 'code', 'id']
+            || ($row['id'] ?? null) !== ROSOMAHA_FAN_MODEL_IDS[$i]
+            || ($row['code'] ?? null) !== ROSOMAHA_FAN_MODEL_CODES[$i]
+            || ($row['before_sha256'] ?? null) !== ROSOMAHA_FAN_BASELINE_LINK_HASHES[$i]
+            || !is_array($before) || $before === [] || count($before) > ROSOMAHA_FAN_MAX_LINKED_OPTIONS
+            || count($before) !== count(array_unique($before))
+            || array_filter($before, static fn(mixed $id): bool => !is_int($id) || $id <= 0) !== []
+            || rosomahaFanEvidenceHash($before) !== ROSOMAHA_FAN_BASELINE_LINK_HASHES[$i]) {
+            throw new RuntimeException('operation_contract_failed');
+        }
+    }
+    return $payload;
+}
+
+function rosomahaFanElementTemplates(int $elementId): array
+{
+    $reader = new Bitrix\Iblock\InheritedProperty\ElementTemplates(
+        ROSOMAHA_FAN_IBLOCK_ID, $elementId
+    );
+    return $reader->findTemplates();
+}
+
+function rosomahaFanNormalizePositiveInt(mixed $value, string $errorCode): int
+{
+    if (is_int($value) && $value > 0) {
+        return $value;
+    }
+    if (is_string($value) && preg_match('/^[1-9][0-9]*$/D', $value) === 1) {
+        return (int) $value;
+    }
+    throw new RuntimeException($errorCode);
+}
+
+function rosomahaFanTargetExact(array $public): bool
+{
+    $fields = $public['fields'];
+    $sections = $public['sections'];
+    foreach (ROSOMAHA_FAN_TARGET_PROPERTIES as $propertyId => $expectedValue) {
+        $values = rosomahaFanPropertyValuesById($public, $propertyId);
+        if (count($values) !== 1
+            || (string) ($values[0]['value'] ?? '') !== (string) $expectedValue) {
+            return false;
+        }
+    }
+    if (rosomahaFanPropertyValuesById($public, 1163) !== []) {
+        return false;
+    }
+    $templates = rosomahaFanElementTemplates((int) $public['id']);
+    $expectedTemplates = [
+        'ELEMENT_META_TITLE' => ROSOMAHA_FAN_TARGET['meta_title'],
+        'ELEMENT_META_DESCRIPTION' => ROSOMAHA_FAN_TARGET['meta_description'],
+        'ELEMENT_PAGE_TITLE' => ROSOMAHA_FAN_TARGET['page_title'],
+    ];
+    foreach ($expectedTemplates as $key => $value) {
+        $row = $templates[$key] ?? null;
+        if (!is_array($row) || ($row['TEMPLATE'] ?? null) !== $value
+            || ($row['INHERITED'] ?? null) !== 'N' || ($row['ENTITY_TYPE'] ?? null) !== 'E'
+            || (int) ($row['ENTITY_ID'] ?? 0) !== (int) $public['id']) {
+            return false;
+        }
+    }
+    return $public['code'] === ROSOMAHA_FAN_TARGET['code']
+        && $fields['name'] === ROSOMAHA_FAN_TARGET['name']
+        && $fields['primary_section_id'] === ROSOMAHA_FAN_OPTIONS_SECTION_ID
+        && $fields['sort'] === ROSOMAHA_FAN_TARGET_SORT
+        && $fields['preview_text_type'] === 'text'
+        && $fields['preview_text'] === rosomahaFanTextShape(ROSOMAHA_FAN_TARGET['preview_text'])
+        && $fields['detail_text_type'] === 'text'
+        && $fields['detail_text'] === rosomahaFanTextShape(ROSOMAHA_FAN_TARGET['detail_text'])
+        && $fields['preview_picture_id'] === 0 && $fields['detail_picture_id'] === 0
+        && count($sections) === 1 && (int) $sections[0]['id'] === ROSOMAHA_FAN_OPTIONS_SECTION_ID;
+}
+
+function rosomahaFanOperationModels(array $propertyById): array
+{
+    $result = [];
+    foreach (ROSOMAHA_FAN_MODEL_IDS as $i => $id) {
+        $fields = rosomahaFanReadElementFieldsById($id, "operation model {$id}");
+        if ((string) ($fields['CODE'] ?? '') !== ROSOMAHA_FAN_MODEL_CODES[$i]) {
+            throw new RuntimeException('operation_contract_failed');
+        }
+        $result[] = rosomahaFanReadElement($fields, $propertyById)['public'];
+    }
+    return $result;
+}
+
+function rosomahaFanOperationState(array $payload, array $propertyById): array
+{
+    $models = rosomahaFanOperationModels($propertyById);
+    $duplicates = rosomahaFanTargetDuplicates()['union'];
+    $target = null;
+    $targetId = count($duplicates) === 1 ? (int) $duplicates[0]['id'] : null;
+    if ($targetId !== null) {
+        $target = rosomahaFanReadElement(
+            rosomahaFanReadElementFieldsById($targetId, 'operation target'), $propertyById
+        )['public'];
+    }
+    $baseline = $appended = [];
+    foreach ($models as $i => $model) {
+        $ids = rosomahaFanOrderedLinkIds($model);
+        $before = $payload['models'][$i]['before'];
+        $baseline[] = $ids === $before;
+        $appended[] = $targetId !== null && $ids === [...$before, $targetId];
+    }
+    if ($duplicates === [] && !in_array(false, $baseline, true)) {
+        $classification = 'not_started';
+    } elseif (count($duplicates) !== 1 || $target === null || !rosomahaFanTargetExact($target)
+        || in_array(false, array_map(static fn(bool $a, bool $b): bool => $a || $b, $baseline, $appended), true)) {
+        $classification = 'indeterminate';
+    } elseif (!in_array(false, $appended, true) && $target['fields']['active'] === true) {
+        $classification = 'active_complete';
+    } elseif (!in_array(false, $baseline, true) && $target['fields']['active'] === false) {
+        $classification = 'rolled_back_inactive';
+    } elseif ($target['fields']['active'] === true) {
+        $classification = 'rollback_required';
+    } else {
+        $classification = 'inactive_partial';
+    }
+    return compact('classification', 'targetId', 'target', 'models');
+}
+
+function rosomahaFanWithoutLink(array $model): array
+{
+    foreach ($model['properties'] as &$property) {
+        if ((int) $property['id'] === ROSOMAHA_FAN_LINK_GOODS_PROPERTY_ID) {
+            $property['values'] = [];
+        }
+    }
+    unset($property);
+    return $model;
+}
+
+function rosomahaFanLinksMatchPayload(
+    array $models,
+    array $payloadModels,
+    ?int $targetId,
+    bool $requireAppended
+): bool {
+    if ($targetId === null) {
+        return !$requireAppended;
+    }
+    foreach ($models as $i => $model) {
+        $before = $payloadModels[$i]['before'] ?? null;
+        if (!is_array($before)) {
+            return false;
+        }
+        $ids = rosomahaFanOrderedLinkIds($model);
+        $baseline = $ids === $before;
+        $appended = $ids === [...$before, $targetId];
+        if ($requireAppended ? !$appended : (!$baseline && !$appended)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function rosomahaFanOperationResponse(
+    string $mode, array $payload, array $before, array $state, int $mutations,
+    string $status, bool $verified, bool $activeLast, ?array $error = null
+): array {
+    $rows = [];
+    foreach ($state['models'] as $i => $after) {
+        $prior = $before[$i] ?? $after;
+        $rows[] = [
+            'id' => ROSOMAHA_FAN_MODEL_IDS[$i], 'code' => ROSOMAHA_FAN_MODEL_CODES[$i],
+            'before_link_sha256' => rosomahaFanEvidenceHash(rosomahaFanOrderedLinkIds($prior)),
+            'after_link_sha256' => rosomahaFanEvidenceHash(rosomahaFanOrderedLinkIds($after)),
+            'before_full_sha256' => rosomahaFanEvidenceHash($prior),
+            'after_full_sha256' => rosomahaFanEvidenceHash($after),
+            'non_link_equal' => rosomahaFanEvidenceHash(rosomahaFanWithoutLink($prior))
+                === rosomahaFanEvidenceHash(rosomahaFanWithoutLink($after)),
+        ];
+    }
+    return [
+        'status' => $status, 'mode' => $mode, 'phase' => 'fixed_option_operation',
+        'operation_id' => $payload['operation_id'], 'database_mutations' => $mutations,
+        'classification' => $state['classification'], 'target_id' => $state['targetId'],
+        'before_scope_sha256' => rosomahaFanEvidenceHash($before),
+        'after_scope_sha256' => rosomahaFanEvidenceHash($state['models']),
+        'target_snapshot_sha256' => $state['target'] === null ? null : rosomahaFanEvidenceHash($state['target']),
+        'models' => $rows, 'verified' => $verified, 'active_last' => $activeLast,
+        'error_evidence' => $error,
+    ];
+}
+
+function rosomahaFanOperationError(Throwable $error): array
+{
+    $allowed = ['operation_contract_failed', 'target_add_failed', 'metadata_write_failed',
+        'model_write_failed', 'target_activation_failed', 'rollback_state_unsafe',
+        'target_deactivation_failed', 'state_verification_failed'];
+    $class = rosomahaFanErrorClass($error);
+    if (!in_array($class, ['RuntimeException', 'LogicException', 'TypeError', 'Error', 'Exception'], true)) {
+        $class = 'Exception';
+    }
+    return [
+        'error_code' => in_array($error->getMessage(), $allowed, true)
+            ? $error->getMessage() : 'operation_exception',
+        'error_class' => $class, 'origin_is_helper' => $error->getFile() === __FILE__,
+        'helper_line' => $error->getFile() === __FILE__ ? $error->getLine() : null,
+        'message_sha256' => hash('sha256', $error->getMessage()),
+    ];
+}
+
+function rosomahaFanSetLinks(int $id, array $values): void
+{
+    CIBlockElement::SetPropertyValuesEx(
+        $id, ROSOMAHA_FAN_IBLOCK_ID, [ROSOMAHA_FAN_LINK_GOODS_PROPERTY_ID => $values]
+    );
+}
+
+function rosomahaFanCurrentLinks(
+    int $id, string $code, array $propertyById, array $allowed, string $errorCode
+): array {
+    $fields = rosomahaFanReadElementFieldsById($id, "write guard model {$id}");
+    if ((string) ($fields['CODE'] ?? '') !== $code) {
+        throw new RuntimeException($errorCode);
+    }
+    $ids = rosomahaFanOrderedLinkIds(
+        rosomahaFanReadElement($fields, $propertyById)['public']
+    );
+    foreach ($allowed as $candidate) {
+        if ($ids === $candidate) { return $ids; }
+    }
+    throw new RuntimeException($errorCode);
+}
+
+function rosomahaFanSetActive(int $id, bool $active, string $errorCode): void
+{
+    $writer = new CIBlockElement();
+    if (!$writer->Update($id, ['ACTIVE' => $active ? 'Y' : 'N'])) {
+        throw new RuntimeException($errorCode);
+    }
+}
+
+function rosomahaFanApply(array $payload, array $propertyById): array
+{
+    $state = rosomahaFanOperationState($payload, $propertyById);
+    $before = $state['models'];
+    if ($state['classification'] !== 'not_started') {
+        return rosomahaFanOperationResponse('apply', $payload, $before, $state, 0, 'blocked', false, false);
+    }
+    $mutations = 0;
+    try {
+        $writer = new CIBlockElement();
+        $id = rosomahaFanNormalizePositiveInt($writer->Add([
+            'IBLOCK_ID' => ROSOMAHA_FAN_IBLOCK_ID, 'IBLOCK_SECTION_ID' => ROSOMAHA_FAN_OPTIONS_SECTION_ID,
+            'ACTIVE' => 'N', 'SORT' => ROSOMAHA_FAN_TARGET_SORT, 'NAME' => ROSOMAHA_FAN_TARGET['name'],
+            'CODE' => ROSOMAHA_FAN_TARGET['code'], 'PREVIEW_TEXT' => ROSOMAHA_FAN_TARGET['preview_text'],
+            'PREVIEW_TEXT_TYPE' => 'text', 'DETAIL_TEXT' => ROSOMAHA_FAN_TARGET['detail_text'],
+            'DETAIL_TEXT_TYPE' => 'text',
+            'PROPERTY_VALUES' => ROSOMAHA_FAN_TARGET_PROPERTIES,
+        ]), 'target_add_failed');
+        $mutations++;
+        $templates = new Bitrix\Iblock\InheritedProperty\ElementTemplates(ROSOMAHA_FAN_IBLOCK_ID, $id);
+        $templates->set([
+            'ELEMENT_META_TITLE' => ROSOMAHA_FAN_TARGET['meta_title'],
+            'ELEMENT_META_DESCRIPTION' => ROSOMAHA_FAN_TARGET['meta_description'],
+            'ELEMENT_PAGE_TITLE' => ROSOMAHA_FAN_TARGET['page_title'],
+        ]);
+        $mutations++;
+        $state = rosomahaFanOperationState($payload, $propertyById);
+        if ($state['classification'] !== 'rolled_back_inactive' || $state['targetId'] !== $id) {
+            throw new RuntimeException('metadata_write_failed');
+        }
+        foreach ($payload['models'] as $row) {
+            rosomahaFanCurrentLinks(
+                $row['id'], $row['code'], $propertyById, [$row['before']], 'model_write_failed'
+            );
+            rosomahaFanSetLinks($row['id'], [...$row['before'], $id]);
+            $mutations++;
+        }
+        $state = rosomahaFanOperationState($payload, $propertyById);
+        if ($state['classification'] !== 'inactive_partial'
+            || !rosomahaFanLinksMatchPayload($state['models'], $payload['models'], $id, true)) {
+            throw new RuntimeException('model_write_failed');
+        }
+        rosomahaFanSetActive($id, true, 'target_activation_failed');
+        $mutations++;
+        CIBlock::clearIblockTagCache(ROSOMAHA_FAN_IBLOCK_ID);
+        $state = rosomahaFanOperationState($payload, $propertyById);
+        $parity = !in_array(false, array_map(
+            static fn(array $a, array $b): bool => rosomahaFanEvidenceHash(rosomahaFanWithoutLink($a))
+                === rosomahaFanEvidenceHash(rosomahaFanWithoutLink($b)), $before, $state['models']
+        ), true);
+        if ($state['classification'] !== 'active_complete' || !$parity) {
+            throw new RuntimeException('state_verification_failed');
+        }
+        return rosomahaFanOperationResponse('apply', $payload, $before, $state, $mutations, 'ok', true, true);
+    } catch (Throwable $error) {
+        try { $state = rosomahaFanOperationState($payload, $propertyById); } catch (Throwable) {}
+        return rosomahaFanOperationResponse('apply', $payload, $before, $state, $mutations, 'error', false, false, rosomahaFanOperationError($error));
+    }
+}
+
+function rosomahaFanRecover(array $payload, array $propertyById): array
+{
+    $state = rosomahaFanOperationState($payload, $propertyById);
+    $safe = in_array($state['classification'], ['not_started', 'active_complete', 'rolled_back_inactive'], true);
+    return rosomahaFanOperationResponse('recover', $payload, $state['models'], $state, 0,
+        $safe ? 'ok' : 'blocked', $safe, false);
+}
+
+function rosomahaFanRollback(array $payload, array $propertyById): array
+{
+    $state = rosomahaFanOperationState($payload, $propertyById);
+    $before = $state['models'];
+    if (!in_array($state['classification'], ['active_complete', 'rollback_required', 'inactive_partial', 'rolled_back_inactive'], true)) {
+        return rosomahaFanOperationResponse('rollback', $payload, $before, $state, 0, 'blocked', false, false);
+    }
+    $mutations = 0;
+    try {
+        if (!rosomahaFanLinksMatchPayload(
+            $state['models'],
+            $payload['models'],
+            $state['targetId'],
+            false
+        )) {
+            throw new RuntimeException('rollback_state_unsafe');
+        }
+        if ($state['target']['fields']['active'] === true) {
+            rosomahaFanSetActive($state['targetId'], false, 'target_deactivation_failed');
+            $mutations++;
+        }
+        foreach ($payload['models'] as $i => $row) {
+            $current = rosomahaFanCurrentLinks(
+                $row['id'], $row['code'], $propertyById,
+                [$row['before'], [...$row['before'], $state['targetId']]],
+                'rollback_state_unsafe'
+            );
+            if ($current !== $row['before']) {
+                rosomahaFanSetLinks($row['id'], $row['before']);
+                $mutations++;
+            }
+        }
+        CIBlock::clearIblockTagCache(ROSOMAHA_FAN_IBLOCK_ID);
+        $state = rosomahaFanOperationState($payload, $propertyById);
+        $parity = !in_array(false, array_map(
+            static fn(array $a, array $b): bool => rosomahaFanEvidenceHash(rosomahaFanWithoutLink($a))
+                === rosomahaFanEvidenceHash(rosomahaFanWithoutLink($b)), $before, $state['models']
+        ), true);
+        if ($state['classification'] !== 'rolled_back_inactive' || !$parity) {
+            throw new RuntimeException('state_verification_failed');
+        }
+        return rosomahaFanOperationResponse('rollback', $payload, $before, $state, $mutations, 'ok', true, false);
+    } catch (Throwable $error) {
+        try { $state = rosomahaFanOperationState($payload, $propertyById); } catch (Throwable) {}
+        return rosomahaFanOperationResponse('rollback', $payload, $before, $state, $mutations, 'error', false, false, rosomahaFanOperationError($error));
+    }
+}
+
 if (PHP_SAPI !== 'cli') {
     rosomahaFanResult([
         'status' => 'error',
@@ -1259,7 +1673,8 @@ if (PHP_SAPI !== 'cli') {
 }
 
 $mode = $argv[1] ?? 'audit';
-if ($mode !== 'audit' || count($argv) !== 2) {
+if (($mode === 'audit' && count($argv) !== 2)
+    || ($mode !== 'audit' && (!in_array($mode, ['apply', 'recover', 'rollback'], true) || count($argv) !== 5))) {
     rosomahaFanResult([
         'status' => 'error',
         'mode' => 'blocked',
@@ -1369,6 +1784,15 @@ try {
     }
     if (count($models) !== 12) {
         throw new RuntimeException('Pinned model scope is incomplete');
+    }
+    if ($mode !== 'audit') {
+        $operationPayload = rosomahaFanOperationPayload($argv, $mode);
+        $operation = match ($mode) {
+            'apply' => rosomahaFanApply($operationPayload, $propertySchema['by_id']),
+            'recover' => rosomahaFanRecover($operationPayload, $propertySchema['by_id']),
+            'rollback' => rosomahaFanRollback($operationPayload, $propertySchema['by_id']),
+        };
+        rosomahaFanResult($operation);
     }
 
     $auditStage = 'duplicate_read';

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only phase-1 audit for a future Bitrix fan-button option.
-
-The helper is deliberately incapable of applying or recovering changes.  It
-streams the pinned PHP reader to the pinned Beget account, validates the
-returned schema, and writes one immutable, ignored JSON receipt.
-"""
+"""Fixed, receipt-bound Bitrix workflow for one fan-button option."""
 
 from __future__ import annotations
 
@@ -16,6 +11,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -63,6 +59,24 @@ COMPARATOR_ROLE = "bagira"
 TARGET_NAME = "Дополнительная кнопка включения вентилятора"
 TARGET_CODE = "dopolnitelnaya-knopka-vklyucheniya-ventilyatora"
 TARGET_PRICE = 7_000
+TARGET_PRICE_DISPLAY = "7 000 #CURRENCY#"
+TARGET_PREVIEW_TEXT = (
+    "Дополнительная кнопка включения вентилятора — дополнительная опция стоимостью "
+    "7 000 ₽ для всех 12 моторных моделей техники «Росомаха», представленных на сайте."
+)
+TARGET_DETAIL_TEXT = (
+    "Дополнительная кнопка включения вентилятора — дополнительная опция для всех 12 "
+    "моторных моделей техники «Росомаха», представленных на сайте. Стоимость опции — "
+    "7 000 ₽. Опцию можно выбрать при комплектации техники."
+)
+TARGET_META_TITLE = (
+    "Дополнительная кнопка включения вентилятора — 7 000 ₽ | Завод Росомаха"
+)
+TARGET_META_DESCRIPTION = (
+    "Дополнительная кнопка включения вентилятора для 12 моторных моделей техники "
+    "«Росомаха». Цена опции — 7 000 ₽."
+)
+TARGET_PAGE_TITLE = TARGET_NAME
 LINK_GOODS_PROPERTY_ID = 1219
 OPTIONS_SECTION_ID = 302
 TARGET_SORT = 506
@@ -84,6 +98,29 @@ MODEL_CODES = (
     "snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota",
     "snegobolotokhod-rosomakha-komplektatsiya-shestikolyesnik-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota",
 )
+MODEL_IDS = (1094, 954, 755, 898, 768, 879, 769, 770, 979, 881, 880, 936)
+TRAILER_CODE = "pritsep-k-kvadrotsiklu-plavayushchiy-na-obdiryshakh"
+BASELINE_GIT_HEAD = "832b694c79163b64339ae246b7ab80052efe49b1"
+BASELINE_RECEIPT_NAME = (
+    "ROSOMAHA_BITRIX_FAN_BUTTON_2026-08-14T08-32-00-565288Z_AUDIT.json"
+)
+BASELINE_RECEIPT_SHA256 = (
+    "23dc9aee98da9a40c6b4f4720fe5e3ff11fc04e9b5e8eaf5ebd18afa821bd53c"
+)
+BASELINE_LINK_HASHES = (
+    "fd9d06d76e7fdb00d6cf5dff9e99b0e5ca46535384c58da7c63ffd270edd034e",
+    "588843ce64125996c167f7f7435556c87220db311c7be781f474ba77fbf90ff2",
+    "b2d6e82663a8ecbc75b38ba0293fd6c9155db1d10f6fe085596cf14d1f70eee0",
+    "73edbf3741fb91169afa6d4c6a67244c512bac9bac65b08dd5b9a663272dcda3",
+    "b49a9ccec2807292f490b6f70bb9daaac4bb05a8ba068e9a80e72afaa6974537",
+    "b49a9ccec2807292f490b6f70bb9daaac4bb05a8ba068e9a80e72afaa6974537",
+    "370faa101bb3b88cb15eb0de9240ff5606b9896c50ac33b8c72c4350d272042f",
+    "2570d0d0dbf4b3bf60c8b47c9c0fa6c50edb07f7e1998257c8b150832f920330",
+    "ac8b9f99e00c6dfe2ef3e52f23cc444be7673988334da6b6f20a68665cde954d",
+    "03c39a0fca9df121f99b1450e65a3fa1312a0a2a36ac40d9328421f3ee7a23c8",
+    "03c39a0fca9df121f99b1450e65a3fa1312a0a2a36ac40d9328421f3ee7a23c8",
+    "3743310f48b161715a5d57f223c4320ffaa4880d849ceb32bc3b2c67406efa7f",
+)
 
 EXPECTED_LINKED_OPTION_IDS = (
     841, 842, 843, 844, 847, 848, 849, 850, 851, 852, 853, 854, 855, 856,
@@ -95,6 +132,8 @@ EXPECTED_LINKED_OPTION_IDS = (
 
 PUBLIC_ORIGIN = "https://rosomaha-rus.ru"
 PUBLIC_MODEL_URLS = tuple(f"{PUBLIC_ORIGIN}/product/{code}/" for code in MODEL_CODES)
+TARGET_PUBLIC_URL = f"{PUBLIC_ORIGIN}/product/{TARGET_CODE}/"
+TRAILER_PUBLIC_URL = f"{PUBLIC_ORIGIN}/product/{TRAILER_CODE}/"
 PUBLIC_USER_AGENT = "RosomahaFanOptionPhase1bAudit/1.0"
 MAX_PUBLIC_BODY_BYTES = 2_000_000
 MAX_PUBLIC_WORKERS = 4
@@ -104,6 +143,7 @@ MAX_PUBLIC_HTML_NODES = 50_000
 MAX_PUBLIC_HTML_DEPTH = 128
 MAX_PUBLIC_ATTRIBUTE_BYTES = 2_048
 MAX_PUBLIC_TITLE_BYTES = 2_048
+MAX_PUBLIC_VISIBLE_TEXT_BYTES = 512_000
 MAX_PUBLIC_PARSE_ERRORS = 32
 MAX_RECEIPT_BYTES = 12_000_000
 
@@ -124,13 +164,38 @@ MAX_PROPERTY_VALUES = 128
 MAX_SECTION_SIBLINGS = 256
 MAX_LINKED_OPTIONS = 96
 
-FORBIDDEN_MODE_PREFIXES = ("--apply", "--recover", "--rollback")
+OPERATION_MODES = frozenset({"apply", "recover", "rollback"})
+OPERATION_CLASSIFICATIONS = frozenset(
+    {
+        "not_started",
+        "inactive_partial",
+        "active_complete",
+        "rolled_back_inactive",
+        "rollback_required",
+        "indeterminate",
+    }
+)
+OPERATION_ERROR_CODES = frozenset(
+    {
+        "operation_contract_failed",
+        "state_not_not_started",
+        "target_add_failed",
+        "metadata_write_failed",
+        "model_write_failed",
+        "target_activation_failed",
+        "rollback_state_unsafe",
+        "target_deactivation_failed",
+        "state_verification_failed",
+        "operation_exception",
+    }
+)
 FORBIDDEN_PHP_PATTERNS = (
-    r"CIBlockElement\s*::\s*(?:Add|Update|Delete|SetPropertyValues(?:Ex)?)\s*\(",
-    r"->\s*(?:Add|Update|Delete|SetPropertyValues(?:Ex)?)\s*\(",
+    r"CIBlockElement\s*::\s*Delete\s*\(",
+    r"->\s*Delete\s*\(",
     r"\b(?:file_put_contents|fopen|fwrite|mkdir|rename|copy|unlink|chmod)\s*\(",
     r"\beval\s*\(",
     r"\b(?:exec|system|shell_exec|passthru|proc_open|popen)\s*\(",
+    r"\$DB\s*->",
     r"\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|TRUNCATE)\s+(?:INTO|TABLE|FROM|[A-Za-z_])",
 )
 
@@ -486,11 +551,23 @@ def validate_php_source(script_bytes: bytes) -> str:
         "rosomahaFanErrorEvidence($error, $auditStage)",
         "'error_code' =>",
         "'message_sha256' =>",
+        "rosomahaFanApply(",
+        "rosomahaFanRecover(",
+        "rosomahaFanRollback(",
+        "CIBlockElement::SetPropertyValuesEx(",
+        "Bitrix\\Iblock\\InheritedProperty\\ElementTemplates",
     )
     if any(item not in source for item in required):
         raise RuntimeError("Pinned PHP reader identity contract is incomplete")
     if "rosomahaFanSafeError" in source or "'error' =>" in source:
         raise RuntimeError("Pinned PHP reader contains an unbounded error field")
+    if (
+        source.count("->Add(") != 1
+        or source.count("->Update(") != 1
+        or source.count("CIBlockElement::SetPropertyValuesEx(") != 1
+        or source.count("->set(") != 1
+    ):
+        raise RuntimeError("Pinned PHP writer call surface is not exact")
     return hashlib.sha256(script_bytes).hexdigest()
 
 
@@ -509,8 +586,39 @@ def build_payload_function(script_bytes: bytes) -> str:
     )
 
 
-def build_remote_command(script_bytes: bytes) -> tuple[str, str]:
+def _canonical_operation_bytes(payload: Mapping[str, object]) -> bytes:
+    data = json.dumps(
+        dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if not data or len(data) > 32_000:
+        raise RuntimeError("Operation payload size is invalid")
+    return data
+
+
+def build_remote_command(
+    script_bytes: bytes,
+    mode: str = "audit",
+    operation_payload: Mapping[str, object] | None = None,
+) -> tuple[str, str]:
     digest = validate_php_source(script_bytes)
+    if mode == "audit":
+        if operation_payload is not None:
+            raise ValueError("Audit mode cannot carry an operation payload")
+        remote_args = "'audit'"
+    elif mode in OPERATION_MODES:
+        if operation_payload is None:
+            raise ValueError("Operation mode requires the fixed payload")
+        operation_id = operation_payload.get("operation_id")
+        if not isinstance(operation_id, str) or re.fullmatch(
+            r"bitrix-fan-[a-f0-9]{24}", operation_id
+        ) is None:
+            raise ValueError("Operation id is invalid")
+        operation_bytes = _canonical_operation_bytes(operation_payload)
+        operation_b64 = base64.b64encode(operation_bytes).decode("ascii")
+        operation_sha = hashlib.sha256(operation_bytes).hexdigest()
+        remote_args = f"'{mode}' '{operation_id}' '{operation_b64}' '{operation_sha}'"
+    else:
+        raise ValueError("Remote mode is outside the fixed allowlist")
     if not PHP_CANDIDATES or any(not item.startswith("/") for item in PHP_CANDIDATES):
         raise RuntimeError("Pinned PHP candidates must be absolute paths")
     payload_function = build_payload_function(script_bytes)
@@ -592,7 +700,7 @@ printf '__ROSOMAHA_FAN_PHP_SHA256__=%s\n' "$payload_sha256"
 printf '__ROSOMAHA_FAN_PHP_LINT__=ok\n'
 rosomaha_fan_payload 2>/dev/null \
   | /usr/bin/timeout 120s "$php_binary" \
-  -d display_errors=stderr -d log_errors=0 -- 'audit'
+  -d display_errors=stderr -d log_errors=0 -- {remote_args}
 """
     if not command.isascii() or len(command.encode("ascii")) > MAX_REMOTE_COMMAND_BYTES:
         raise RuntimeError("Pinned remote command exceeded the fixed byte limit")
@@ -1580,6 +1688,136 @@ def normalize_remote_payload(payload: object) -> dict[str, object]:
     return json.loads(json.dumps(remote, ensure_ascii=False))
 
 
+def normalize_operation_payload(
+    payload: object,
+    *,
+    expected_mode: str,
+    expected_operation_id: str,
+) -> dict[str, object]:
+    remote = _require_dict(payload, "operation payload")
+    expected_keys = {
+        "status",
+        "mode",
+        "phase",
+        "operation_id",
+        "database_mutations",
+        "classification",
+        "target_id",
+        "before_scope_sha256",
+        "after_scope_sha256",
+        "target_snapshot_sha256",
+        "models",
+        "verified",
+        "active_last",
+        "error_evidence",
+    }
+    if set(remote) != expected_keys:
+        raise RemoteAuditError("Remote operation schema is not exact")
+    if (
+        expected_mode not in OPERATION_MODES
+        or remote.get("mode") != expected_mode
+        or remote.get("phase") != "fixed_option_operation"
+        or remote.get("operation_id") != expected_operation_id
+        or remote.get("status") not in {"ok", "blocked", "error"}
+        or remote.get("classification") not in OPERATION_CLASSIFICATIONS
+        or type(remote.get("database_mutations")) is not int
+        or not 0 <= int(remote["database_mutations"]) <= 16
+        or type(remote.get("verified")) is not bool
+        or type(remote.get("active_last")) is not bool
+    ):
+        raise RemoteAuditError("Remote operation identity is inconsistent")
+    target_id = remote.get("target_id")
+    if target_id is not None and (type(target_id) is not int or target_id <= 0):
+        raise RemoteAuditError("Remote operation target id is invalid")
+    for key in (
+        "before_scope_sha256",
+        "after_scope_sha256",
+        "target_snapshot_sha256",
+    ):
+        value = remote.get(key)
+        if value is not None and (
+            not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{64}", value) is None
+        ):
+            raise RemoteAuditError("Remote operation hash evidence is invalid")
+    rows = _require_list(remote.get("models"), "operation models", len(MODEL_IDS))
+    if len(rows) != len(MODEL_IDS):
+        raise RemoteAuditError("Remote operation model scope is incomplete")
+    for position, (item, model_id, model_code) in enumerate(
+        zip(rows, MODEL_IDS, MODEL_CODES)
+    ):
+        row = _require_dict(item, f"operation model {position}")
+        if set(row) != {
+            "id",
+            "code",
+            "before_link_sha256",
+            "after_link_sha256",
+            "before_full_sha256",
+            "after_full_sha256",
+            "non_link_equal",
+        } or row.get("id") != model_id or row.get("code") != model_code:
+            raise RemoteAuditError("Remote operation model identity drifted")
+        for key in (
+            "before_link_sha256",
+            "after_link_sha256",
+            "before_full_sha256",
+            "after_full_sha256",
+        ):
+            value = row.get(key)
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(r"[a-f0-9]{64}", value) is None
+            ):
+                raise RemoteAuditError("Remote operation model hash is invalid")
+        if row.get("non_link_equal") not in {True, False, None}:
+            raise RemoteAuditError("Remote operation non-link parity is invalid")
+    evidence = remote.get("error_evidence")
+    if remote["status"] == "error":
+        error = _require_dict(evidence, "operation error evidence")
+        if set(error) != {
+            "error_code",
+            "error_class",
+            "origin_is_helper",
+            "helper_line",
+            "message_sha256",
+        } or error.get("error_code") not in OPERATION_ERROR_CODES:
+            raise RemoteAuditError("Remote operation error evidence is invalid")
+        if (
+            error.get("error_class")
+            not in {"RuntimeException", "LogicException", "TypeError", "Error", "Exception"}
+            or type(error.get("origin_is_helper")) is not bool
+            or (
+                error.get("helper_line") is not None
+                and (type(error.get("helper_line")) is not int or error["helper_line"] <= 0)
+            )
+            or not isinstance(error.get("message_sha256"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", str(error.get("message_sha256"))) is None
+        ):
+            raise RemoteAuditError("Remote operation error shape is invalid")
+    elif evidence is not None:
+        raise RemoteAuditError("Successful operation contains error evidence")
+    expected_success = (
+        (expected_mode == "apply" and remote["classification"] == "active_complete")
+        or (
+            expected_mode == "rollback"
+            and remote["classification"] == "rolled_back_inactive"
+        )
+        or (
+            expected_mode == "recover"
+            and remote["classification"]
+            in {"not_started", "active_complete", "rolled_back_inactive"}
+        )
+    )
+    if remote["status"] == "ok" and (
+        remote["verified"] is not True
+        or not expected_success
+        or (expected_mode == "apply" and remote["active_last"] is not True)
+        or (expected_mode != "apply" and remote["active_last"] is not False)
+        or (expected_mode == "recover" and remote["database_mutations"] != 0)
+    ):
+        raise RemoteAuditError("Remote operation success is inconsistent")
+    return json.loads(json.dumps(remote, ensure_ascii=False))
+
+
 def _byte_class(value: int | None) -> str:
     if value is None:
         return "empty"
@@ -1808,17 +2046,18 @@ def normalize_remote_error_payload(payload: object) -> dict[str, object]:
 def execute_remote(
     mode: str = "audit",
     *,
+    operation_payload: Mapping[str, object] | None = None,
     connect_fn: Callable[[], paramiko.SSHClient] = connect,
     error_receipt_fn: Callable[..., Path] | None = None,
     frame_error_receipt_fn: Callable[..., Path] | None = None,
     preflight_error_receipt_fn: Callable[..., Path] | None = None,
 ) -> dict[str, object]:
-    if mode != "audit":
-        raise ForbiddenModeError("This phase-1 helper supports audit only")
+    if mode != "audit" and mode not in OPERATION_MODES:
+        raise ForbiddenModeError("Remote mode is outside the fixed allowlist")
     if not PHP_SCRIPT.is_file():
         raise RuntimeError("Pinned PHP reader is missing")
     script_bytes = PHP_SCRIPT.read_bytes()
-    command, digest = build_remote_command(script_bytes)
+    command, digest = build_remote_command(script_bytes, mode, operation_payload)
     client = connect_fn()
     try:
         status, stdout, stderr = run_remote_command(client, command)
@@ -1904,7 +2143,15 @@ def execute_remote(
             ),
             receipt_path=receipt_path,
         )
-    normalized = normalize_remote_payload(parsed)
+    normalized = (
+        normalize_remote_payload(parsed)
+        if mode == "audit"
+        else normalize_operation_payload(
+            parsed,
+            expected_mode=mode,
+            expected_operation_id=str((operation_payload or {}).get("operation_id", "")),
+        )
+    )
     normalized["runtime"] = runtime
     return normalized
 
@@ -2137,30 +2384,302 @@ def write_preflight_error_receipt(
     return destination
 
 
-def reject_forbidden_modes(argv: Sequence[str]) -> None:
-    for argument in argv:
-        lowered = argument.lower()
-        if any(
-            lowered == prefix or lowered.startswith(prefix + "=")
-            for prefix in FORBIDDEN_MODE_PREFIXES
+def deterministic_operation_id() -> str:
+    seed = "|".join(
+        (
+            BASELINE_GIT_HEAD,
+            BASELINE_RECEIPT_SHA256,
+            TARGET_CODE,
+            str(TARGET_PRICE),
+            str(TARGET_SORT),
+        )
+    )
+    return "bitrix-fan-" + hashlib.sha256(seed.encode("ascii")).hexdigest()[:24]
+
+
+def current_git_head() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        head = result.stdout.strip()
+        if re.fullmatch(r"[a-f0-9]{40}", head) is None:
+            raise RuntimeError("Current git HEAD is invalid")
+        checks = (
+            ["git", "merge-base", "--is-ancestor", BASELINE_GIT_HEAD, head],
+            ["git", "diff", "--quiet", "HEAD", "--", "scripts/bitrix-fan-button-option.py",
+             "scripts/bitrix-fan-button-option.php", "scripts/bitrix-fan-button-option.test.py"],
+        )
+        if any(subprocess.run(command, cwd=PROJECT_ROOT, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode
+            != 0 for command in checks):
+            raise RuntimeError("Baseline ancestry or helper-file cleanliness is invalid")
+        return head
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Current git HEAD could not be read") from exc
+
+
+def _validate_operation_id(value: object) -> str:
+    if value != deterministic_operation_id() or not isinstance(value, str):
+        raise RuntimeError("Operation id is not the fixed deterministic id")
+    return value
+
+
+def pending_receipt_path(operation_id: str) -> Path:
+    _validate_operation_id(operation_id)
+    return REPORT_ROOT / f"ROSOMAHA_BITRIX_FAN_BUTTON_{operation_id}_PENDING.json"
+
+
+def _public_head(page: object, expected_url: str) -> dict[str, object]:
+    item = _require_dict(page, "baseline public model page")
+    result = {
+        "requested_url": item.get("requested_url"),
+        "final_url": item.get("final_url"),
+        "canonical_urls": item.get("canonical_urls"),
+        "robots": item.get("robots"),
+        "robots_indexable": item.get("robots_indexable"),
+        "title": item.get("title"),
+    }
+    if (
+        result["requested_url"] != expected_url
+        or result["final_url"] != expected_url
+        or result["canonical_urls"] != [expected_url]
+        or result["robots_indexable"] is not True
+        or not isinstance(result["robots"], list)
+        or not isinstance(result["title"], str)
+        or not result["title"]
+    ):
+        raise RuntimeError("Pinned baseline public head is invalid")
+    return json.loads(json.dumps(result, ensure_ascii=False))
+
+
+def _extract_model_preimage(remote: dict[str, object]) -> list[dict[str, object]]:
+    phase = _require_dict(remote.get("phase1b_evidence"), "phase1b evidence")
+    rows = _require_list(phase.get("model_link_goods"), "model link goods", 12)
+    if len(rows) != 12:
+        raise RuntimeError("Pinned model preimage count is invalid")
+    result: list[dict[str, object]] = []
+    for index, (raw, model_id, model_code, expected_hash) in enumerate(
+        zip(rows, MODEL_IDS, MODEL_CODES, BASELINE_LINK_HASHES)
+    ):
+        row = _require_dict(raw, f"model preimage {index}")
+        ids = row.get("ordered_ids")
+        if (
+            row.get("model_id") != model_id
+            or row.get("model_code") != model_code
+            or not isinstance(ids, list)
+            or not ids
+            or len(ids) > MAX_LINKED_OPTIONS
+            or any(type(item) is not int or item <= 0 for item in ids)
+            or len(ids) != len(set(ids))
+            or row.get("ordered_ids_sha256") != expected_hash
+            or _evidence_sha256(ids) != expected_hash
         ):
-            raise ForbiddenModeError(
-                "This phase-1 helper has no apply or recovery capability"
-            )
+            raise RuntimeError("Pinned model LINK_GOODS preimage drifted")
+        result.append(
+            {
+                "id": model_id,
+                "code": model_code,
+                "before": ids,
+                "before_sha256": expected_hash,
+            }
+        )
+    return result
+
+
+def load_fixed_baseline() -> dict[str, object]:
+    path = REPORT_ROOT / BASELINE_RECEIPT_NAME
+    current_head = current_git_head()
+    data = path.read_bytes()
+    if (
+        not data
+        or len(data) > MAX_RECEIPT_BYTES
+        or hashlib.sha256(data).hexdigest() != BASELINE_RECEIPT_SHA256
+    ):
+        raise RuntimeError("Pinned baseline receipt digest is invalid")
+    try:
+        receipt = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Pinned baseline receipt is malformed") from exc
+    root = _require_dict(receipt, "baseline receipt")
+    remote = normalize_remote_payload(root.get("remote"))
+    public = _require_dict(root.get("public"), "baseline public evidence")
+    relation = _require_dict(remote.get("relation_analysis"), "baseline relation")
+    candidates = _require_list(
+        relation.get("candidate_relations"), "baseline relation candidates", 4
+    )
+    candidate = _require_dict(candidates[0], "baseline relation candidate") if len(candidates) == 1 else {}
+    relation_property = _require_dict(
+        candidate.get("property"), "baseline relation property"
+    ) if candidate else {}
+    if (
+        root.get("mode") != "audit"
+        or remote.get("database_mutations") != 0
+        or len(candidates) != 1
+        or candidate.get("direction") != "models_to_option"
+        or relation_property.get("id") != LINK_GOODS_PROPERTY_ID
+        or relation_property.get("multiple") is not True
+        or relation_property.get("link_iblock_id") != IBLOCK_ID
+        or _require_dict(remote.get("target_duplicates"), "target duplicates").get("union") != []
+        or public.get("all_12_model_pages_contract_ok") is not True
+        or public.get("render_order_source") != "element_sort_then_id_desc"
+        or public.get("primary_sort_proven_on_all_12") is not True
+        or public.get("target_sort_unique_in_linked_union") is not True
+        or public.get("content_publish_gate") is not False
+        or public.get("blockers")
+        != [
+            "public_no_content_policy_baseline_failed",
+            "content_publish_gate_is_blocked",
+        ]
+    ):
+        raise RuntimeError("Pinned baseline gates are inconsistent")
+    pages = _require_list(public.get("model_pages"), "baseline model pages", 12)
+    if len(pages) != 12:
+        raise RuntimeError("Pinned baseline public model scope is incomplete")
+    models = _extract_model_preimage(remote)
+    for model, page, url in zip(models, pages, PUBLIC_MODEL_URLS):
+        model["public_head"] = _public_head(page, url)
+        page_item = _require_dict(page, "baseline public model page")
+        controls = _require_list(
+            page_item.get("strict_controls"), "baseline strict controls", 256
+        )
+        model["public_options_sha256"] = _evidence_sha256(controls)
+    operation_id = deterministic_operation_id()
+    return {
+        "schema_version": 1,
+        "status": "PENDING",
+        "mode": "apply",
+        "operation_id": operation_id,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "baseline": {
+            "audit_git_head": BASELINE_GIT_HEAD,
+            "current_git_head": current_head,
+            "receipt_name": BASELINE_RECEIPT_NAME,
+            "receipt_sha256": BASELINE_RECEIPT_SHA256,
+        },
+        "target": {
+            "name": TARGET_NAME,
+            "code": TARGET_CODE,
+            "price": TARGET_PRICE,
+            "price_display": TARGET_PRICE_DISPLAY,
+            "section_id": OPTIONS_SECTION_ID,
+            "sort": TARGET_SORT,
+            "preview_text": TARGET_PREVIEW_TEXT,
+            "detail_text": TARGET_DETAIL_TEXT,
+            "meta_title": TARGET_META_TITLE,
+            "meta_description": TARGET_META_DESCRIPTION,
+            "page_title": TARGET_PAGE_TITLE,
+        },
+        "models": models,
+        "trailer_code": TRAILER_CODE,
+        "database_mutations": 0,
+        "secrets_exported": False,
+        "pii_exported": False,
+    }
+
+
+def _validate_pending(payload: object) -> dict[str, object]:
+    pending = _require_dict(payload, "pending receipt")
+    if (
+        set(pending)
+        != {
+            "schema_version", "status", "mode", "operation_id", "created_at_utc",
+            "baseline", "target", "models", "trailer_code", "database_mutations",
+            "secrets_exported", "pii_exported",
+        }
+        or pending.get("schema_version") != 1
+        or pending.get("status") != "PENDING"
+        or pending.get("mode") != "apply"
+        or pending.get("database_mutations") != 0
+        or pending.get("secrets_exported") is not False
+        or pending.get("pii_exported") is not False
+        or pending.get("trailer_code") != TRAILER_CODE
+    ):
+        raise RuntimeError("Pending receipt contract is invalid")
+    _validate_operation_id(pending.get("operation_id"))
+    baseline = _require_dict(pending.get("baseline"), "pending baseline")
+    if baseline != {
+        "audit_git_head": BASELINE_GIT_HEAD,
+        "current_git_head": current_git_head(),
+        "receipt_name": BASELINE_RECEIPT_NAME,
+        "receipt_sha256": BASELINE_RECEIPT_SHA256,
+    }:
+        raise RuntimeError("Pending baseline binding is invalid")
+    target = _require_dict(pending.get("target"), "pending target")
+    expected_target = load_fixed_baseline()["target"]
+    if target != expected_target:
+        raise RuntimeError("Pending target contract is invalid")
+    rows = _require_list(pending.get("models"), "pending models", 12)
+    if len(rows) != 12:
+        raise RuntimeError("Pending model scope is incomplete")
+    for row, model_id, code, digest in zip(rows, MODEL_IDS, MODEL_CODES, BASELINE_LINK_HASHES):
+        item = _require_dict(row, "pending model")
+        if (
+            set(item)
+            != {
+                "id", "code", "before", "before_sha256", "public_head",
+                "public_options_sha256",
+            }
+            or
+            item.get("id") != model_id
+            or item.get("code") != code
+            or item.get("before_sha256") != digest
+            or _evidence_sha256(item.get("before")) != digest
+            or not isinstance(item.get("public_options_sha256"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", str(item.get("public_options_sha256"))) is None
+            or _public_head(item.get("public_head"), PUBLIC_MODEL_URLS[MODEL_IDS.index(model_id)])
+            != item.get("public_head")
+        ):
+            raise RuntimeError("Pending model preimage is invalid")
+    return json.loads(json.dumps(pending, ensure_ascii=False))
+
+
+def read_pending(operation_id: str) -> tuple[dict[str, object], Path, str]:
+    path = pending_receipt_path(operation_id)
+    data = path.read_bytes()
+    if not data or len(data) > MAX_RECEIPT_BYTES:
+        raise RuntimeError("Pending receipt size is invalid")
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Pending receipt is malformed") from exc
+    return _validate_pending(payload), path, hashlib.sha256(data).hexdigest()
+
+
+def _remote_operation_payload(pending: dict[str, object]) -> dict[str, object]:
+    return {
+        "operation_id": pending["operation_id"],
+        "baseline_audit_git_head": BASELINE_GIT_HEAD,
+        "current_git_head": pending["baseline"]["current_git_head"],
+        "baseline_receipt_sha256": BASELINE_RECEIPT_SHA256,
+        "models": [
+            {
+                "id": row["id"],
+                "code": row["code"],
+                "before": row["before"],
+                "before_sha256": row["before_sha256"],
+            }
+            for row in pending["models"]
+        ],
+    }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    raw = list(sys.argv[1:] if argv is None else argv)
-    reject_forbidden_modes(raw)
     parser = argparse.ArgumentParser(
-        description="Audit the pinned Bitrix schema for one future fan-button option."
+        description="Audit or run the one fixed receipt-bound Bitrix option change."
     )
-    parser.add_argument(
-        "--audit",
-        action="store_true",
-        help="Explicitly select the default read-only audit mode.",
-    )
-    return parser.parse_args(raw)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--audit", action="store_true")
+    group.add_argument("--apply", action="store_true")
+    group.add_argument("--recover", metavar="OPERATION_ID")
+    group.add_argument("--rollback", metavar="OPERATION_ID")
+    return parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
 
 def _safe_error(error: BaseException) -> str:
@@ -2304,6 +2823,7 @@ class PublicPageParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.canonicals: list[str] = []
         self.robots: list[str] = []
+        self.descriptions: list[str] = []
         self.strict_controls: list[dict[str, object]] = []
         self.near_controls: list[dict[str, object]] = []
         self.images: list[dict[str, object]] = []
@@ -2314,6 +2834,10 @@ class PublicPageParser(HTMLParser):
         self.control_errors: list[str] = []
         self.title_parts: list[str] = []
         self.title_bytes = 0
+        self.h1_parts: list[str] = []
+        self.h1_count = 0
+        self.visible_text_parts: list[str] = []
+        self.visible_text_bytes = 0
         self._stack: list[dict[str, object]] = []
         self._node_count = 0
 
@@ -2556,6 +3080,17 @@ class PublicPageParser(HTMLParser):
                     self._error(self.structural_errors, "robots_count_exceeded_limit")
                 else:
                     self.robots.append(content)
+        if tag == "meta" and attributes.get("name", "").casefold() == "description":
+            content = self._bounded_attribute(
+                attributes.get("content", ""),
+                error_target=self.structural_errors,
+                error_code="description_content_too_long",
+            )
+            if content is not None:
+                if len(self.descriptions) >= 4:
+                    self._error(self.structural_errors, "description_count_exceeded_limit")
+                else:
+                    self.descriptions.append(content)
         if (
             tag == "meta"
             and attributes.get("property", "").casefold() == "og:image"
@@ -2654,6 +3189,8 @@ class PublicPageParser(HTMLParser):
         self._record_page_metadata(tag, attributes, duplicates)
         self._record_control(tag, attributes, duplicates, class_tokens, hidden)
         self._record_image(tag, attributes, class_tokens)
+        if tag == "h1":
+            self.h1_count += 1
         if push and tag not in _VOID_HTML_TAGS:
             if len(self._stack) >= MAX_PUBLIC_HTML_DEPTH:
                 raise RemoteAuditError("Public HTML depth exceeded the fixed limit")
@@ -2683,14 +3220,31 @@ class PublicPageParser(HTMLParser):
                 return
 
     def handle_data(self, data: str) -> None:
-        if not self._stack or self._stack[-1]["tag"] != "title":
+        if not self._stack:
             return
+        tags = {str(item["tag"]) for item in self._stack}
         encoded = data.encode("utf-8")
-        if self.title_bytes + len(encoded) > MAX_PUBLIC_TITLE_BYTES:
-            self._error(self.structural_errors, "title_text_exceeded_limit")
+        if self._stack[-1]["tag"] == "title":
+            if self.title_bytes + len(encoded) > MAX_PUBLIC_TITLE_BYTES:
+                self._error(self.structural_errors, "title_text_exceeded_limit")
+                return
+            self.title_parts.append(data)
+            self.title_bytes += len(encoded)
             return
-        self.title_parts.append(data)
-        self.title_bytes += len(encoded)
+        if tags.intersection({"script", "style", "noscript", "template"}) or any(
+            item["hidden"] is True for item in self._stack
+        ):
+            return
+        if "h1" in tags:
+            if sum(len(item.encode("utf-8")) for item in self.h1_parts) + len(encoded) <= MAX_PUBLIC_TITLE_BYTES:
+                self.h1_parts.append(data)
+            else:
+                self._error(self.structural_errors, "h1_text_exceeded_limit")
+        if self.visible_text_bytes + len(encoded) <= MAX_PUBLIC_VISIBLE_TEXT_BYTES:
+            self.visible_text_parts.append(data)
+            self.visible_text_bytes += len(encoded)
+        else:
+            self._error(self.structural_errors, "visible_text_exceeded_limit")
 
 
 def _decode_public_html(body: bytes, content_type: str) -> tuple[str, str]:
@@ -2851,6 +3405,11 @@ def _parse_public_response(
             if token
         }
         title = re.sub(r"\s+", " ", "".join(parser.title_parts)).strip()
+        descriptions = [re.sub(r"\s+", " ", item).strip() for item in parser.descriptions]
+        h1 = re.sub(r"\s+", " ", "".join(parser.h1_parts)).strip()
+        visible_text = re.sub(
+            r"\s+", " ", " ".join(parser.visible_text_parts)
+        ).strip()
         evidence.update(
             {
                 "charset": charset,
@@ -2860,6 +3419,12 @@ def _parse_public_response(
                 "robots_indexable": "noindex" not in robot_tokens,
                 "title": title,
                 "title_sha256": hashlib.sha256(title.encode("utf-8")).hexdigest(),
+                "meta_descriptions": descriptions,
+                "h1_count": parser.h1_count,
+                "h1": h1,
+                "visible_text_sha256": hashlib.sha256(
+                    visible_text.encode("utf-8")
+                ).hexdigest(),
                 "structural_errors": parser.structural_errors,
                 "image_structure": _image_structure(parser, requested_url),
             }
@@ -3292,6 +3857,416 @@ def collect_public_evidence(
     }
 
 
+def _target_insertion_index(
+    render_model: object, baseline_ids: list[int]
+) -> int:
+    model = _require_dict(render_model, "fresh render-order model")
+    relations = _require_list(
+        model.get("relation_items"), "fresh render relation items", MAX_LINKED_OPTIONS
+    )
+    eligible: list[tuple[int, int]] = []
+    for raw in relations:
+        item = _require_dict(raw, "fresh render relation item")
+        selectable = _require_dict(
+            item.get("selectable_contract"), "fresh selectable contract"
+        )
+        if selectable.get("eligible") is True:
+            item_id, item_sort = item.get("id"), item.get("sort")
+            if type(item_id) is not int or type(item_sort) is not int:
+                raise RuntimeError("Fresh selectable sort identity is invalid")
+            eligible.append((item_id, item_sort))
+    if (
+        len(baseline_ids) != len(set(baseline_ids))
+        or len(eligible) != len({item_id for item_id, _ in eligible})
+        or set(baseline_ids) != {item_id for item_id, _ in eligible}
+        or any(item_sort == TARGET_SORT for _, item_sort in eligible)
+    ):
+        raise RuntimeError("Fresh selectable set or target sort drifted")
+    index = sum(item_sort < TARGET_SORT for _, item_sort in eligible)
+    if ANCHOR_ID in baseline_ids and index != baseline_ids.index(ANCHOR_ID) + 1:
+        raise RuntimeError("Target sort no longer places the option after GUR")
+    return index
+
+
+def _target_order_exact(
+    observed_ids: list[int], baseline_ids: list[int], index: int, target_id: int
+) -> bool:
+    if (
+        target_id in baseline_ids
+        or not 0 <= index <= len(baseline_ids)
+        or len(baseline_ids) != len(set(baseline_ids))
+    ):
+        return False
+    expected = list(baseline_ids)
+    expected.insert(index, target_id)
+    return observed_ids == expected
+
+
+def _validate_fresh_precondition(
+    pending: dict[str, object],
+    remote: dict[str, object],
+    public: dict[str, object],
+) -> dict[str, object]:
+    current_models = _extract_model_preimage(remote)
+    pending_models = pending["models"]
+    if any(
+        current["before"] != expected["before"]
+        for current, expected in zip(current_models, pending_models)
+    ):
+        raise RuntimeError("Fresh DB audit drifted from the immutable preimage")
+    duplicates = _require_dict(remote.get("target_duplicates"), "fresh duplicates")
+    pages = _require_list(public.get("model_pages"), "fresh public pages", 12)
+    phase = _require_dict(remote.get("phase1b_evidence"), "fresh phase1b evidence")
+    render = _require_dict(phase.get("render_order"), "fresh render order")
+    render_models = _require_list(render.get("models"), "fresh render models", 12)
+    if (
+        duplicates.get("union") != []
+        or len(pages) != 12
+        or len(render_models) != 12
+        or public.get("all_12_model_pages_contract_ok") is not True
+        or public.get("render_order_source") != "element_sort_then_id_desc"
+        or public.get("primary_sort_proven_on_all_12") is not True
+        or public.get("target_sort_unique_in_linked_union") is not True
+        or public.get("content_publish_gate") is not False
+        or public.get("blockers")
+        != [
+            "public_no_content_policy_baseline_failed",
+            "content_publish_gate_is_blocked",
+        ]
+    ):
+        raise RuntimeError("Fresh audit gates drifted from the pinned baseline")
+    heads = []
+    option_hashes = []
+    descriptions = []
+    orders = []
+    for page, model, url, render_model in zip(
+        pages, pending_models, PUBLIC_MODEL_URLS, render_models
+    ):
+        head = _public_head(page, url)
+        controls = _require_list(
+            _require_dict(page, "fresh public page").get("strict_controls"),
+            "fresh strict controls",
+            256,
+        )
+        option_hash = _evidence_sha256(controls)
+        baseline_ids = _require_list(
+            _require_dict(page, "fresh public page").get("ordered_selectable_option_ids"),
+            "fresh ordered selectable ids",
+            MAX_PUBLIC_OPTION_OCCURRENCES,
+        )
+        if any(type(item) is not int or item <= 0 for item in baseline_ids):
+            raise RuntimeError("Fresh public selectable order is invalid")
+        insertion_index = _target_insertion_index(render_model, baseline_ids)
+        if head != model["public_head"] or option_hash != model["public_options_sha256"]:
+            raise RuntimeError("Fresh public model parity drifted")
+        heads.append(head)
+        option_hashes.append(option_hash)
+        value = _require_dict(page, "fresh public page").get("meta_descriptions")
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise RuntimeError("Fresh public meta-description shape is invalid")
+        descriptions.append(value)
+        orders.append({
+            "model_id": model["id"], "baseline_ids": baseline_ids,
+            "baseline_sha256": _evidence_sha256(baseline_ids),
+            "target_insertion_index": insertion_index,
+        })
+    return {
+        "passed": True,
+        "database_preimage_sha256": _evidence_sha256(current_models),
+        "public_heads_sha256": _evidence_sha256(heads),
+        "public_options_sha256": _evidence_sha256(option_hashes),
+        "public_meta_descriptions": descriptions,
+        "public_option_orders": orders,
+        "render_order_source": public["render_order_source"],
+    }
+
+
+def _fetch_public_allowlist(
+    urls: list[str],
+    fetch_fn: Callable[[str, frozenset[str]], dict[str, object]],
+) -> dict[str, object]:
+    allowed = frozenset(urls)
+    if len(allowed) != len(urls):
+        raise RuntimeError("Final public URL allowlist contains duplicates")
+    for url in urls:
+        _validate_exact_public_url(url, allowed)
+    fetched: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=min(MAX_PUBLIC_WORKERS, len(urls))) as pool:
+        futures = {pool.submit(fetch_fn, url, allowed): url for url in urls}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                fetched[url] = future.result()
+            except Exception as exc:
+                fetched[url] = {"error": _safe_error(exc)}
+    return fetched
+
+
+def verify_public_apply(
+    operation: dict[str, object],
+    pending: dict[str, object],
+    precondition: dict[str, object],
+    *,
+    fetch_fn: Callable[[str, frozenset[str]], dict[str, object]] = fetch_public_html,
+) -> dict[str, object]:
+    target_id = operation.get("target_id")
+    if type(target_id) is not int or target_id <= 0:
+        raise RuntimeError("Applied target id is unavailable for public verification")
+    urls = [*PUBLIC_MODEL_URLS, TARGET_PUBLIC_URL, TRAILER_PUBLIC_URL]
+    fetched = _fetch_public_allowlist(urls, fetch_fn)
+    model_results = []
+    baseline_descriptions = _require_list(
+        precondition.get("public_meta_descriptions"), "fresh meta descriptions", 12
+    )
+    baseline_orders = _require_list(
+        precondition.get("public_option_orders"), "fresh option orders", 12
+    )
+    if len(baseline_descriptions) != 12 or len(baseline_orders) != 12:
+        raise RuntimeError("Fresh public parity scope is incomplete")
+    for url, model, descriptions, raw_order in zip(
+        PUBLIC_MODEL_URLS, pending["models"], baseline_descriptions, baseline_orders
+    ):
+        order = _require_dict(raw_order, "fresh option order")
+        baseline_ids = order.get("baseline_ids")
+        insertion_index = order.get("target_insertion_index")
+        if (
+            order.get("model_id") != model["id"]
+            or not isinstance(baseline_ids, list)
+            or type(insertion_index) is not int
+            or order.get("baseline_sha256") != _evidence_sha256(baseline_ids)
+        ):
+            raise RuntimeError("Fresh option-order evidence is invalid")
+        evidence, parser = _parse_public_response(url, fetched.get(url))
+        controls = parser.strict_controls if parser is not None else []
+        observed_ids = [item.get("product_id") for item in controls]
+        target_controls = [item for item in controls if item.get("product_id") == target_id]
+        remaining = [item for item in controls if item.get("product_id") != target_id]
+        head_ok = False
+        try:
+            head_ok = _public_head(evidence, url) == model["public_head"]
+        except Exception:
+            head_ok = False
+        target_ok = (
+            len(target_controls) == 1
+            and target_controls[0].get("sum") == TARGET_PRICE
+            and target_controls[0].get("data_name") == TARGET_NAME
+            and target_controls[0].get("hidden_or_disabled") is False
+        )
+        existing_ok = _evidence_sha256(remaining) == model["public_options_sha256"]
+        description_ok = evidence.get("meta_descriptions") == descriptions
+        order_ok = _target_order_exact(
+            observed_ids, baseline_ids, insertion_index, target_id
+        )
+        ok = (
+            evidence.get("base_contract_ok") is True
+            and parser is not None
+            and parser.near_controls == []
+            and target_ok
+            and existing_ok
+            and head_ok
+            and description_ok
+            and order_ok
+        )
+        model_results.append(
+            {
+                "model_id": model["id"],
+                "model_code": model["code"],
+                "http_status": evidence.get("http_status"),
+                "body_sha256": evidence.get("body_sha256"),
+                "self_canonical": evidence.get("self_canonical"),
+                "indexable": evidence.get("robots_indexable"),
+                "target_occurrences": len(target_controls),
+                "target_contract_ok": target_ok,
+                "existing_options_parity": existing_ok,
+                "head_parity": head_ok,
+                "meta_description_parity": description_ok,
+                "target_insertion_index": insertion_index,
+                "ordered_option_ids_exact": order_ok,
+                "ok": ok,
+            }
+        )
+    target_evidence, target_parser = _parse_public_response(
+        TARGET_PUBLIC_URL, fetched.get(TARGET_PUBLIC_URL)
+    )
+    visible = (
+        re.sub(r"\s+", " ", " ".join(target_parser.visible_text_parts)).strip()
+        if target_parser is not None
+        else ""
+    )
+    target_page_ok = (
+        target_evidence.get("base_contract_ok") is True
+        and target_evidence.get("title") == TARGET_META_TITLE
+        and target_evidence.get("meta_descriptions") == [TARGET_META_DESCRIPTION]
+        and target_evidence.get("h1_count") == 1
+        and target_evidence.get("h1") == TARGET_PAGE_TITLE
+        and TARGET_DETAIL_TEXT in visible
+        and "7 000 ₽" in visible
+    )
+    trailer_evidence, trailer_parser = _parse_public_response(
+        TRAILER_PUBLIC_URL, fetched.get(TRAILER_PUBLIC_URL)
+    )
+    trailer_occurrences = sum(
+        item.get("product_id") == target_id
+        for item in (trailer_parser.strict_controls if trailer_parser is not None else [])
+    )
+    trailer_ok = (
+        trailer_evidence.get("base_contract_ok") is True
+        and trailer_parser is not None
+        and trailer_occurrences == 0
+        and not any(
+            item.get("product_id") == target_id for item in trailer_parser.near_controls
+        )
+    )
+    ok = (
+        all(item["ok"] is True for item in model_results)
+        and target_page_ok
+        and trailer_ok
+    )
+    return {
+        "status": "ok" if ok else "blocked",
+        "required_url_count": len(urls),
+        "model_pages": model_results,
+        "all_12_models_ok": all(item["ok"] is True for item in model_results),
+        "target_page": {
+            "http_status": target_evidence.get("http_status"),
+            "body_sha256": target_evidence.get("body_sha256"),
+            "self_canonical": target_evidence.get("self_canonical"),
+            "indexable": target_evidence.get("robots_indexable"),
+            "title_exact": target_evidence.get("title") == TARGET_META_TITLE,
+            "description_exact": target_evidence.get("meta_descriptions") == [TARGET_META_DESCRIPTION],
+            "h1_exact": target_evidence.get("h1_count") == 1
+            and target_evidence.get("h1") == TARGET_PAGE_TITLE,
+            "detail_copy_exact": TARGET_DETAIL_TEXT in visible,
+            "price_exact": "7 000 ₽" in visible,
+            "ok": target_page_ok,
+        },
+        "trailer": {
+            "http_status": trailer_evidence.get("http_status"),
+            "body_sha256": trailer_evidence.get("body_sha256"),
+            "target_occurrences": trailer_occurrences,
+            "ok": trailer_ok,
+        },
+        "browser_used": False,
+        "synthetic_lead_used": False,
+        "success": ok,
+    }
+
+
+def write_operation_receipt(
+    mode: str,
+    pending_path: Path,
+    pending_sha256: str,
+    current_head: str,
+    remote: dict[str, object],
+    *,
+    precondition: dict[str, object] | None = None,
+    public: dict[str, object] | None = None,
+    path: Path | None = None,
+) -> Path:
+    if (mode not in OPERATION_MODES or re.fullmatch(r"[a-f0-9]{64}", pending_sha256) is None
+        or re.fullmatch(r"[a-f0-9]{40}", current_head) is None):
+        raise RuntimeError("Operation receipt identity is invalid")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    destination = path or REPORT_ROOT / (
+        f"ROSOMAHA_BITRIX_FAN_BUTTON_{stamp}_{mode.upper()}.json"
+    )
+    receipt = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "domain": DOMAIN,
+        "mode": mode,
+        "operation_id": remote.get("operation_id"),
+        "pending_receipt": str(pending_path),
+        "pending_sha256": pending_sha256,
+        "current_git_head": current_head,
+        "database_mutations": remote.get("database_mutations"),
+        "secrets_exported": False,
+        "pii_exported": False,
+        "precondition": precondition,
+        "remote": remote,
+        "public": public,
+    }
+    _atomic_immutable_json(destination, receipt)
+    return destination
+
+
+def run_apply(
+    *,
+    execute_fn: Callable[..., dict[str, object]] = execute_remote,
+    public_audit_fn: Callable[[dict[str, object]], dict[str, object]] = collect_public_evidence,
+    public_verify_fn: Callable[..., dict[str, object]] = verify_public_apply,
+) -> tuple[dict[str, object], int]:
+    pending = load_fixed_baseline()
+    operation_id = str(pending["operation_id"])
+    path = pending_receipt_path(operation_id)
+    _atomic_immutable_json(path, pending)
+    pending_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    fresh_remote = execute_fn("audit")
+    fresh_public = public_audit_fn(fresh_remote)
+    precondition = _validate_fresh_precondition(pending, fresh_remote, fresh_public)
+    operation = execute_fn(
+        "apply", operation_payload=_remote_operation_payload(pending)
+    )
+    public = None
+    if operation.get("status") == "ok":
+        try:
+            public = public_verify_fn(operation, pending, precondition)
+        except Exception as exc:
+            public = {"status": "error", "success": False, "error": _safe_error(exc)}
+    receipt = write_operation_receipt(
+        "apply", path, pending_sha, pending["baseline"]["current_git_head"], operation,
+        precondition=precondition, public=public
+    )
+    success = operation.get("status") == "ok" and (public or {}).get("success") is True
+    result = {
+        "status": "ok" if success else "blocked",
+        "mode": "apply",
+        "operation_id": operation_id,
+        "classification": operation.get("classification"),
+        "target_id": operation.get("target_id"),
+        "database_mutations": operation.get("database_mutations"),
+        "public_success": (public or {}).get("success", False),
+        "receipt": str(receipt),
+        "pending_receipt": str(path),
+        "retry_allowed": False,
+    }
+    return result, 0 if success else 3
+
+
+def run_existing_operation(
+    mode: str,
+    operation_id: str,
+    *,
+    execute_fn: Callable[..., dict[str, object]] = execute_remote,
+) -> tuple[dict[str, object], int]:
+    if mode not in {"recover", "rollback"}:
+        raise ValueError("Existing operation mode is invalid")
+    operation_id = _validate_operation_id(operation_id)
+    pending, path, pending_sha = read_pending(operation_id)
+    remote = execute_fn(mode, operation_payload=_remote_operation_payload(pending))
+    receipt = write_operation_receipt(
+        mode, path, pending_sha, pending["baseline"]["current_git_head"], remote
+    )
+    success = remote.get("status") == "ok" and (
+        (mode == "rollback" and remote.get("classification") == "rolled_back_inactive")
+        or (
+            mode == "recover"
+            and remote.get("classification")
+            in {"not_started", "active_complete", "rolled_back_inactive"}
+        )
+    )
+    return {
+        "status": "ok" if success else "blocked",
+        "mode": mode,
+        "operation_id": operation_id,
+        "classification": remote.get("classification"),
+        "target_id": remote.get("target_id"),
+        "database_mutations": remote.get("database_mutations"),
+        "receipt": str(receipt),
+        "pending_receipt": str(path),
+        "retry_allowed": False,
+    }, 0 if success else 3
+
+
 def run_audit(
     *,
     execute_fn: Callable[[str], dict[str, object]] = execute_remote,
@@ -3329,32 +4304,30 @@ def run_audit(
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
-        parse_args(raw)
-    except ForbiddenModeError as exc:
-        print(
-            json.dumps(
-                {
-                    "status": "blocked",
-                    "mode": "forbidden",
-                    "error": _safe_error(exc),
-                    "network_attempted": False,
-                    "database_mutations": 0,
-                },
-                ensure_ascii=False,
-            ),
-            file=sys.stderr,
-        )
-        return 2
-    try:
-        result, exit_code = run_audit()
+        args = parse_args(raw)
+        if args.apply:
+            result, exit_code = run_apply()
+        elif args.recover:
+            result, exit_code = run_existing_operation("recover", args.recover)
+        elif args.rollback:
+            result, exit_code = run_existing_operation("rollback", args.rollback)
+        else:
+            result, exit_code = run_audit()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return exit_code
     except Exception as exc:
+        mode = (
+            "apply" if "--apply" in raw else "recover" if any(
+                item == "--recover" or item.startswith("--recover=") for item in raw
+            ) else "rollback" if any(
+                item == "--rollback" or item.startswith("--rollback=") for item in raw
+            ) else "audit"
+        )
         print(
             json.dumps(
                 {
                     "status": "error",
-                    "mode": "audit",
+                    "mode": mode,
                     "error": _safe_error(exc),
                     "database_mutations": 0,
                     "secrets_exported": False,
