@@ -18,6 +18,7 @@ const ROSOMAHA_SITEMAP_OPERATION_ID = 'bitrix-sitemap-d415e75c421e2e3c805b0a05';
 const ROSOMAHA_SITEMAP_RENAME_INTENT = "{\"schema\":1,\"operation_id\":\"bitrix-sitemap-d415e75c421e2e3c805b0a05\",\"state\":\"rename_intent\"}\n";
 const ROSOMAHA_SITEMAP_RENAME_COMPLETE = "{\"schema\":1,\"operation_id\":\"bitrix-sitemap-d415e75c421e2e3c805b0a05\",\"state\":\"rename_complete\",\"candidate_sha256\":\"11cff13b618473be3ce6e695a8f3654ea9be99983cf7c55f6116fba507b04498\"}\n";
 const ROSOMAHA_SITEMAP_MAX_BYTES = 256000;
+const ROSOMAHA_SITEMAP_LOCK_MODE = 0600;
 const ROSOMAHA_SITEMAP_BACKUP_ROOT = '/home/b/berkutm4/migration/rosomaha-rus/backups/bitrix-sitemap-url';
 const ROSOMAHA_SITEMAP_BACKINGS = [
     'root_sitemap' => '/home/b/berkutm4/rosomaha-rus.ru/public_html/sitemap.xml',
@@ -230,6 +231,124 @@ function rosomahaSitemapWriteExact(string $path, string $body, int $mode): void
         @unlink($path);
         rosomahaSitemapFail('file_mode_failed');
     }
+}
+
+function rosomahaSitemapLockStatsSafe(
+    array $pathStat,
+    array $handleStat,
+    int $expectedUid
+): bool {
+    foreach (['dev', 'ino', 'mode', 'nlink', 'uid'] as $key) {
+        if (!isset($pathStat[$key], $handleStat[$key])) {
+            return false;
+        }
+    }
+    $pathMode = (int) $pathStat['mode'];
+    $handleMode = (int) $handleStat['mode'];
+    return ($pathMode & 0170000) === 0100000
+        && ($handleMode & 0170000) === 0100000
+        // Existing owner-owned 0644 locks from the first operator revision are
+        // compatible; group/world write is never accepted.
+        && ($pathMode & 0022) === 0
+        && ($handleMode & 0022) === 0
+        && (int) $pathStat['nlink'] === 1
+        && (int) $handleStat['nlink'] === 1
+        && (int) $pathStat['uid'] === $expectedUid
+        && (int) $handleStat['uid'] === $expectedUid
+        && (int) $pathStat['dev'] === (int) $handleStat['dev']
+        && (int) $pathStat['ino'] === (int) $handleStat['ino'];
+}
+
+function rosomahaSitemapLockParentStatSafe(array $rootStat): bool
+{
+    if (!isset($rootStat['mode'], $rootStat['uid'])) {
+        return false;
+    }
+    $mode = (int) $rootStat['mode'];
+    return ($mode & 0170000) === 0040000 && ($mode & 0022) === 0;
+}
+
+function rosomahaSitemapValidateOperationLock(string $path, $handle, int $expectedUid): void
+{
+    if ($path !== ROSOMAHA_SITEMAP_BACKUP_ROOT . '/operation.lock') {
+        rosomahaSitemapFail('operation_lock_path_invalid');
+    }
+    clearstatcache(true, $path);
+    $pathStat = @lstat($path);
+    $handleStat = @fstat($handle);
+    if (
+        !is_array($pathStat)
+        || !is_array($handleStat)
+        || is_link($path)
+        || !is_file($path)
+        || @realpath($path) !== $path
+        || !rosomahaSitemapLockStatsSafe($pathStat, $handleStat, $expectedUid)
+    ) {
+        rosomahaSitemapFail('operation_lock_inode_or_mode_unsafe');
+    }
+}
+
+function rosomahaSitemapOpenOperationLock(string $path): array
+{
+    if ($path !== ROSOMAHA_SITEMAP_BACKUP_ROOT . '/operation.lock') {
+        rosomahaSitemapFail('operation_lock_path_invalid');
+    }
+    clearstatcache(true, ROSOMAHA_SITEMAP_BACKUP_ROOT);
+    $rootStat = @lstat(ROSOMAHA_SITEMAP_BACKUP_ROOT);
+    if (
+        !is_array($rootStat)
+        || !rosomahaSitemapLockParentStatSafe($rootStat)
+        || is_link(ROSOMAHA_SITEMAP_BACKUP_ROOT)
+        || @realpath(ROSOMAHA_SITEMAP_BACKUP_ROOT) !== ROSOMAHA_SITEMAP_BACKUP_ROOT
+    ) {
+        rosomahaSitemapFail('operation_lock_parent_unsafe');
+    }
+    $expectedUid = (int) $rootStat['uid'];
+    clearstatcache(true, $path);
+    $before = @lstat($path);
+    $created = false;
+    if ($before === false) {
+        $previousUmask = umask(0077);
+        try {
+            // Exclusive create never follows a path that appeared after lstat.
+            $handle = @fopen($path, 'x+b');
+        } finally {
+            umask($previousUmask);
+        }
+        if ($handle === false) {
+            rosomahaSitemapFail('operation_lock_exclusive_create_failed');
+        }
+        $created = true;
+    } else {
+        if (
+            is_link($path)
+            || !is_file($path)
+            || @realpath($path) !== $path
+            || !rosomahaSitemapLockStatsSafe($before, $before, $expectedUid)
+        ) {
+            rosomahaSitemapFail('operation_lock_existing_path_unsafe');
+        }
+        $handle = @fopen($path, 'r+b');
+        if ($handle === false) {
+            rosomahaSitemapFail('operation_lock_existing_open_failed');
+        }
+    }
+    try {
+        rosomahaSitemapValidateOperationLock($path, $handle, $expectedUid);
+        $handleStat = @fstat($handle);
+        if (
+            !is_array($handleStat)
+            || ($created && (((int) $handleStat['mode']) & 0777) !== ROSOMAHA_SITEMAP_LOCK_MODE)
+        ) {
+            rosomahaSitemapFail('operation_lock_created_mode_unsafe');
+        }
+        $observedMode = sprintf('%04o', ((int) $handleStat['mode']) & 0777);
+    } catch (Throwable $error) {
+        fclose($handle);
+        // Never unlink: a raced or pre-existing unsafe path may belong to another process.
+        throw $error;
+    }
+    return [$handle, $created, $expectedUid, $observedMode];
 }
 
 function rosomahaSitemapFsyncDirectory(string $directory): bool
@@ -507,14 +626,20 @@ function rosomahaSitemapRun(string $mode, array $request): array
         rosomahaSitemapFail('backup_root_identity_failed');
     }
     $lockPath = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/operation.lock';
-    $lock = @fopen($lockPath, 'c');
-    if ($lock === false || !@flock($lock, LOCK_EX | LOCK_NB)) {
-        if (is_resource($lock)) {
-            fclose($lock);
-        }
+    [$lock, $lockCreated, $lockUid, $lockMode] =
+        rosomahaSitemapOpenOperationLock($lockPath);
+    if (!@flock($lock, LOCK_EX | LOCK_NB)) {
+        fclose($lock);
         rosomahaSitemapFail('operation_lock_unavailable');
     }
     try {
+        // Bind the locked descriptor to the same safe path inode after flock too.
+        rosomahaSitemapValidateOperationLock($lockPath, $lock, $lockUid);
+        $lockedStat = @fstat($lock);
+        if (!is_array($lockedStat)) {
+            rosomahaSitemapFail('operation_lock_fstat_failed');
+        }
+        $lockMode = sprintf('%04o', ((int) $lockedStat['mode']) & 0777);
         // No operation-specific artifact may exist or be created before this lock.
         $operationDir = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/' . ROSOMAHA_SITEMAP_OPERATION_ID;
         if (file_exists($operationDir) || is_link($operationDir)) {
@@ -552,6 +677,7 @@ function rosomahaSitemapRun(string $mode, array $request): array
             )) {
                 rosomahaSitemapFail('rename_intent_readback_failed');
             }
+            rosomahaSitemapValidateOperationLock($lockPath, $lock, $lockUid);
             rosomahaSitemapAtomicReplace(
                 $active['path'], $active['body'], $candidate, $fileMode, $renamed
             );
@@ -565,6 +691,12 @@ function rosomahaSitemapRun(string $mode, array $request): array
                 rosomahaSitemapFail('rename_complete_readback_failed');
             }
             $public = rosomahaSitemapPublicReadback();
+            rosomahaSitemapValidateOperationLock($lockPath, $lock, $lockUid);
+            $finalLockStat = @fstat($lock);
+            if (!is_array($finalLockStat)) {
+                rosomahaSitemapFail('operation_lock_final_fstat_failed');
+            }
+            $lockMode = sprintf('%04o', ((int) $finalLockStat['mode']) & 0777);
             return $base + [
                 'status' => 'applied',
                 'after' => rosomahaSitemapState(rosomahaSitemapRead($active['path'])),
@@ -583,6 +715,12 @@ function rosomahaSitemapRun(string $mode, array $request): array
                     'exact_candidate' => true,
                 ],
                 'atomic_replace' => true,
+                'operation_lock' => [
+                    'created' => $lockCreated,
+                    'mode' => $lockMode,
+                    'regular_non_symlink' => true,
+                    'path_handle_inode_match' => true,
+                ],
                 'automatic_restore_required' => false,
             ];
         } catch (Throwable $error) {

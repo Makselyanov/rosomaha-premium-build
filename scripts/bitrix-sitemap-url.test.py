@@ -108,6 +108,12 @@ def remote(mode: str, *, before: str = "baseline", after: str | None = None) -> 
                 "sha256": operator.CANDIDATE_SHA256,
                 "exact_candidate": True,
             },
+            operation_lock={
+                "created": True,
+                "mode": "0600",
+                "regular_non_symlink": True,
+                "path_handle_inode_match": True,
+            },
         )
     elif mode == "recover":
         payload.update(status="not_started", classification="not_started")
@@ -268,6 +274,17 @@ class RemoteContractTests(unittest.TestCase):
     def test_apply_requires_backup_atomic_state_and_public_readback(self):
         payload = remote("apply")
         self.assertEqual(operator.validate_remote_payload(payload, expected_mode="apply")["status"], "applied")
+        payload["operation_lock"] = {
+            "created": False,
+            "mode": "0644",
+            "regular_non_symlink": True,
+            "path_handle_inode_match": True,
+        }
+        operator.validate_remote_payload(payload, expected_mode="apply")
+        payload["operation_lock"]["mode"] = "0664"
+        with self.assertRaises(operator.SitemapOperatorError):
+            operator.validate_remote_payload(payload, expected_mode="apply")
+        payload = remote("apply")
         payload["public_readback"] = {"exact_candidate": False}
         with self.assertRaises(operator.SitemapOperatorError):
             operator.validate_remote_payload(payload, expected_mode="apply")
@@ -373,6 +390,92 @@ class SourceSafetyTests(unittest.TestCase):
         self.assertLess(lock_index, operation_index)
         self.assertLess(lock_index, backup_index)
         self.assertIn("No operation-specific artifact may exist or be created before this lock", apply)
+
+    def test_lock_path_is_inode_bound_private_and_never_unlinked(self):
+        source = PHP_PATH.read_text(encoding="utf-8")
+        helper = source[
+            source.index("function rosomahaSitemapLockStatsSafe") :
+            source.index("function rosomahaSitemapFsyncDirectory")
+        ]
+        for needle in (
+            "@lstat($path)",
+            "@fstat($handle)",
+            "is_link($path)",
+            "@realpath($path) !== $path",
+            "['dev']",
+            "['ino']",
+            "['nlink']",
+            "['uid']",
+            "ROSOMAHA_SITEMAP_LOCK_MODE",
+            "@fopen($path, 'x+b')",
+            "@fopen($path, 'r+b')",
+            "umask(0077)",
+        ):
+            self.assertIn(needle, helper)
+        self.assertNotIn("unlink(", helper)
+        run = source[source.index("function rosomahaSitemapRun") :]
+        self.assertNotIn("fopen($lockPath, 'c')", run)
+        self.assertGreaterEqual(run.count("rosomahaSitemapValidateOperationLock("), 1)
+        self.assertIn("'mode' => $lockMode", run)
+
+    @unittest.skipUnless(shutil.which("php"), "PHP CLI is not installed")
+    def test_lock_stat_contract_execution(self):
+        php_path = json.dumps(PHP_PATH.resolve().as_posix())
+        code = f"""
+define('ROSOMAHA_SITEMAP_LIBRARY_ONLY', true);
+require {php_path};
+$good = ['dev' => 11, 'ino' => 22, 'mode' => 0100600, 'nlink' => 1, 'uid' => 33];
+$legacyReadOnly = $good; $legacyReadOnly['mode'] = 0100644;
+$symlink = $good; $symlink['mode'] = 0120777;
+$groupWritable = $good; $groupWritable['mode'] = 0100664;
+$groupWriteOnly = $good; $groupWriteOnly['mode'] = 0100620;
+$hardlink = $good; $hardlink['nlink'] = 2;
+$otherUid = $good; $otherUid['uid'] = 34;
+$otherInode = $good; $otherInode['ino'] = 23;
+echo json_encode([
+  rosomahaSitemapLockStatsSafe($good, $good, 33),
+  rosomahaSitemapLockStatsSafe($legacyReadOnly, $legacyReadOnly, 33),
+  rosomahaSitemapLockStatsSafe($symlink, $symlink, 33),
+  rosomahaSitemapLockStatsSafe($groupWritable, $groupWritable, 33),
+  rosomahaSitemapLockStatsSafe($groupWriteOnly, $groupWriteOnly, 33),
+  rosomahaSitemapLockStatsSafe($hardlink, $hardlink, 33),
+  rosomahaSitemapLockStatsSafe($otherUid, $otherUid, 33),
+  rosomahaSitemapLockStatsSafe($good, $otherInode, 33),
+]);
+"""
+        result = subprocess.run(
+            [shutil.which("php") or "php", "-r", code],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [True, True, False, False, False, False, False, False],
+        )
+
+    @unittest.skipUnless(shutil.which("php"), "PHP CLI is not installed")
+    def test_lock_parent_mode_contract_execution(self):
+        php_path = json.dumps(PHP_PATH.resolve().as_posix())
+        code = f"""
+define('ROSOMAHA_SITEMAP_LIBRARY_ONLY', true);
+require {php_path};
+$safe = ['mode' => 0040755, 'uid' => 33];
+$private = ['mode' => 0040700, 'uid' => 33];
+$groupWritable = ['mode' => 0040775, 'uid' => 33];
+$worldWritable = ['mode' => 0040777, 'uid' => 33];
+$regular = ['mode' => 0100600, 'uid' => 33];
+echo json_encode([
+  rosomahaSitemapLockParentStatSafe($safe),
+  rosomahaSitemapLockParentStatSafe($private),
+  rosomahaSitemapLockParentStatSafe($groupWritable),
+  rosomahaSitemapLockParentStatSafe($worldWritable),
+  rosomahaSitemapLockParentStatSafe($regular),
+]);
+"""
+        result = subprocess.run(
+            [shutil.which("php") or "php", "-r", code],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(json.loads(result.stdout), [True, True, False, False, False])
 
     def test_php_recovery_has_durable_rename_evidence(self):
         source = PHP_PATH.read_text(encoding="utf-8")

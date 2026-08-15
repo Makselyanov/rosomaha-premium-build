@@ -814,6 +814,19 @@ def validate_remote_payload(payload: Mapping[str, Any], *, expected_mode: str) -
         backup = root.get("backup")
         if not isinstance(backup, dict) or backup.get("sha256") != BASELINE_SHA256 or backup.get("bytes") != BASELINE_BYTES:
             raise SitemapOperatorError("Remote exact backup proof is incomplete")
+        lock = root.get("operation_lock")
+        if not isinstance(lock, dict) or type(lock.get("created")) is not bool:
+            raise SitemapOperatorError("Remote operation-lock proof is incomplete")
+        lock_mode = lock.get("mode")
+        if (
+            not isinstance(lock_mode, str)
+            or re.fullmatch(r"0[0-7]{3}", lock_mode) is None
+            or (int(lock_mode, 8) & 0o022) != 0
+            or (lock.get("created") is True and lock_mode != "0600")
+            or lock.get("regular_non_symlink") is not True
+            or lock.get("path_handle_inode_match") is not True
+        ):
+            raise SitemapOperatorError("Remote operation-lock inode/mode proof is unsafe")
         if root.get("public_readback") != {
             "bytes": CANDIDATE_BYTES,
             "sha256": CANDIDATE_SHA256,
