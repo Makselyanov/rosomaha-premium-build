@@ -723,24 +723,35 @@ def execute_remote(mode: str, public_body: bytes) -> dict[str, Any]:
         status, output, error = _bounded_channel_result(stdout.channel, MAX_REMOTE_SECONDS + 15)
     finally:
         client.close()
+    return interpret_remote_response(mode, output, status, error)
+
+
+def interpret_remote_response(
+    mode: str, output: bytes, status: int, error: bytes
+) -> dict[str, Any]:
+    """Couple the framed result, exit status, and redacted stderr evidence."""
     payload = parse_remote_frame(output, status)
-    if payload.get("status") == "error":
-        code = payload.get("error_code")
-        if (
-            payload.get("schema") != 1
-            or payload.get("mode") != mode
-            or payload.get("operation_id") != OPERATION_ID
-            or not isinstance(code, str)
-            or re.fullmatch(r"[a-z0-9_]{3,64}", code) is None
-        ):
-            raise SitemapOperatorError("Remote error frame identity is invalid")
-        raise RemoteReportedError(code, payload)
+    payload["remote_exit_status"] = status
     if error:
         payload["stderr_sha256"] = sha256_bytes(error)
         payload["stderr_bytes"] = len(error)
     else:
         payload["stderr_sha256"] = None
         payload["stderr_bytes"] = 0
+    if payload.get("status") == "error":
+        code = payload.get("error_code")
+        if (
+            payload.get("schema") != 1
+            or payload.get("mode") != mode
+            or payload.get("operation_id") != OPERATION_ID
+            or status != 1
+            or not isinstance(code, str)
+            or re.fullmatch(r"[a-z0-9_]{3,64}", code) is None
+        ):
+            raise SitemapOperatorError("Remote error frame identity is invalid")
+        raise RemoteReportedError(code, payload)
+    if status != 0 or error:
+        raise SitemapOperatorError("Remote success/status/stderr coupling is invalid")
     return validate_remote_payload(payload, expected_mode=mode)
 
 
@@ -756,6 +767,8 @@ def validate_remote_payload(payload: Mapping[str, Any], *, expected_mode: str) -
         or root.get("database_used") is not False
         or root.get("robots_changed") is not False
         or root.get("remote_exit_status") != 0
+        or root.get("stderr_bytes") != 0
+        or root.get("stderr_sha256") is not None
     ):
         raise SitemapOperatorError("Remote identity/scope contract failed")
     active = root.get("active_backing")
@@ -808,7 +821,8 @@ def validate_remote_payload(payload: Mapping[str, Any], *, expected_mode: str) -
         }:
             raise SitemapOperatorError("Remote public sitemap readback is invalid")
     if expected_mode == "recover" and root.get("classification") not in {
-        "not_started", "active_complete", "rolled_back", "indeterminate"
+        "not_started", "backup_only_not_started", "active_complete",
+        "rolled_back", "indeterminate",
     }:
         raise SitemapOperatorError("Remote recovery classification is invalid")
     return json.loads(json.dumps(root, ensure_ascii=False))

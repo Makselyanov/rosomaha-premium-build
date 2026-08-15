@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -50,6 +52,15 @@ def state(name: str) -> dict[str, object]:
     }
 
 
+def framed(payload: dict[str, object]) -> bytes:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return (
+        f"__ROSOMAHA_SITEMAP_JSON_BYTES__={len(raw)}\n"
+        f"__ROSOMAHA_SITEMAP_JSON_SHA256__={hashlib.sha256(raw).hexdigest()}\n"
+        f"__ROSOMAHA_SITEMAP_JSON_BASE64__={operator.base64.b64encode(raw).decode()}\n"
+    ).encode("ascii")
+
+
 def remote(mode: str, *, before: str = "baseline", after: str | None = None) -> dict[str, object]:
     after = after or before
     payload: dict[str, object] = {
@@ -72,6 +83,8 @@ def remote(mode: str, *, before: str = "baseline", after: str | None = None) -> 
         "filesystem_mutations": 0,
         "diff": {"added": [], "removed": []},
         "remote_exit_status": 0,
+        "stderr_sha256": None,
+        "stderr_bytes": 0,
     }
     if mode == "dry-run":
         payload.update(
@@ -268,22 +281,58 @@ class RemoteContractTests(unittest.TestCase):
     def test_recover_is_classification_only(self):
         payload = remote("recover")
         self.assertEqual(operator.validate_remote_payload(payload, expected_mode="recover")["classification"], "not_started")
+        payload["classification"] = "backup_only_not_started"
+        payload["status"] = "backup_only_not_started"
+        self.assertEqual(
+            operator.validate_remote_payload(payload, expected_mode="recover")["classification"],
+            "backup_only_not_started",
+        )
         payload["classification"] = "auto_rollback"
         with self.assertRaises(operator.SitemapOperatorError):
             operator.validate_remote_payload(payload, expected_mode="recover")
 
     def test_frame_integrity_and_duplicate_noise_rejected(self):
         payload = {"schema": 1}
-        raw = json.dumps(payload, separators=(",", ":")).encode()
-        frame = (
-            f"__ROSOMAHA_SITEMAP_JSON_BYTES__={len(raw)}\n"
-            f"__ROSOMAHA_SITEMAP_JSON_SHA256__={hashlib.sha256(raw).hexdigest()}\n"
-            f"__ROSOMAHA_SITEMAP_JSON_BASE64__={operator.base64.b64encode(raw).decode()}\n"
-        ).encode()
+        frame = framed(payload)
         parsed = operator.parse_remote_frame(frame, 0)
         self.assertEqual(parsed["schema"], 1)
         with self.assertRaises(operator.SitemapOperatorError):
             operator.parse_remote_frame(b"noise\n" + frame, 0)
+
+    def test_error_frame_persists_hashed_stderr_before_raise(self):
+        payload = {
+            "schema": 1,
+            "mode": "apply",
+            "operation_id": operator.OPERATION_ID,
+            "status": "error",
+            "error_code": "operation_lock_unavailable",
+        }
+        stderr = b"bounded remote diagnostic"
+        with self.assertRaises(operator.RemoteReportedError) as raised:
+            operator.interpret_remote_response("apply", framed(payload), 1, stderr)
+        evidence = raised.exception.payload
+        self.assertEqual(evidence["remote_exit_status"], 1)
+        self.assertEqual(evidence["stderr_bytes"], len(stderr))
+        self.assertEqual(evidence["stderr_sha256"], hashlib.sha256(stderr).hexdigest())
+        self.assertNotIn(stderr.decode(), json.dumps(evidence))
+
+    def test_result_exit_status_and_stderr_are_coupled(self):
+        error_payload = {
+            "schema": 1,
+            "mode": "audit",
+            "operation_id": operator.OPERATION_ID,
+            "status": "error",
+            "error_code": "site_root_identity_failed",
+        }
+        with self.assertRaises(operator.SitemapOperatorError):
+            operator.interpret_remote_response("audit", framed(error_payload), 0, b"")
+        success_payload = remote("audit")
+        for key in ("remote_exit_status", "stderr_sha256", "stderr_bytes"):
+            success_payload.pop(key)
+        with self.assertRaises(operator.SitemapOperatorError):
+            operator.interpret_remote_response(
+                "audit", framed(success_payload), 0, b"unexpected warning",
+            )
 
 
 class SourceSafetyTests(unittest.TestCase):
@@ -313,6 +362,61 @@ class SourceSafetyTests(unittest.TestCase):
             "automatic_restore_ok",
         ):
             self.assertIn(needle, source)
+
+    def test_apply_lock_precedes_operation_directory_and_backup_artifacts(self):
+        source = PHP_PATH.read_text(encoding="utf-8")
+        run = source[source.index("function rosomahaSitemapRun") :]
+        apply = run[run.index("$backupParent =") :]
+        lock_index = apply.index("@flock($lock, LOCK_EX | LOCK_NB)")
+        operation_index = apply.index("$operationDir =")
+        backup_index = apply.index("$backup = $operationDir")
+        self.assertLess(lock_index, operation_index)
+        self.assertLess(lock_index, backup_index)
+        self.assertIn("No operation-specific artifact may exist or be created before this lock", apply)
+
+    def test_php_recovery_has_durable_rename_evidence(self):
+        source = PHP_PATH.read_text(encoding="utf-8")
+        self.assertIn("rename-intent.json", source)
+        self.assertIn("rename-complete.json", source)
+        self.assertIn("backup_only_not_started", source)
+        self.assertLess(
+            source.index("ROSOMAHA_SITEMAP_RENAME_INTENT, 0400"),
+            source.index("rosomahaSitemapAtomicReplace(\n", source.index("function rosomahaSitemapRun")),
+        )
+
+    @unittest.skipUnless(shutil.which("php"), "PHP CLI is not installed")
+    def test_php_recovery_classification_execution(self):
+        php_path = json.dumps(PHP_PATH.resolve().as_posix())
+        code = f"""
+define('ROSOMAHA_SITEMAP_LIBRARY_ONLY', true);
+require {php_path};
+$baseline = ['state' => 'baseline'];
+$candidate = ['state' => 'candidate'];
+$backupOnly = [
+  'operation_directory_exists' => true, 'exists' => true,
+  'exact_baseline' => true, 'rename_intent_exists' => false,
+  'rename_intent_exact' => false, 'rename_complete_exists' => false,
+  'rename_complete_exact' => false,
+];
+$rolledBack = $backupOnly;
+$rolledBack['rename_intent_exists'] = true;
+$rolledBack['rename_intent_exact'] = true;
+$rolledBack['rename_complete_exists'] = true;
+$rolledBack['rename_complete_exact'] = true;
+echo json_encode([
+  rosomahaSitemapRecoveryClassification($baseline, $backupOnly),
+  rosomahaSitemapRecoveryClassification($baseline, $rolledBack),
+  rosomahaSitemapRecoveryClassification($candidate, $backupOnly),
+]);
+"""
+        result = subprocess.run(
+            [shutil.which("php") or "php", "-r", code],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            ["backup_only_not_started", "rolled_back", "active_complete"],
+        )
 
     def test_python_transport_contains_one_exec_dispatch_and_no_retry_loop(self):
         source = SCRIPT_PATH.read_text(encoding="utf-8")

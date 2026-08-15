@@ -15,6 +15,8 @@ const ROSOMAHA_SITEMAP_CANDIDATE_SHA256 = '11cff13b618473be3ce6e695a8f3654ea9be9
 const ROSOMAHA_SITEMAP_CANDIDATE_BYTES = 13113;
 const ROSOMAHA_SITEMAP_CANDIDATE_URLS = 144;
 const ROSOMAHA_SITEMAP_OPERATION_ID = 'bitrix-sitemap-d415e75c421e2e3c805b0a05';
+const ROSOMAHA_SITEMAP_RENAME_INTENT = "{\"schema\":1,\"operation_id\":\"bitrix-sitemap-d415e75c421e2e3c805b0a05\",\"state\":\"rename_intent\"}\n";
+const ROSOMAHA_SITEMAP_RENAME_COMPLETE = "{\"schema\":1,\"operation_id\":\"bitrix-sitemap-d415e75c421e2e3c805b0a05\",\"state\":\"rename_complete\",\"candidate_sha256\":\"11cff13b618473be3ce6e695a8f3654ea9be99983cf7c55f6116fba507b04498\"}\n";
 const ROSOMAHA_SITEMAP_MAX_BYTES = 256000;
 const ROSOMAHA_SITEMAP_BACKUP_ROOT = '/home/b/berkutm4/migration/rosomaha-rus/backups/bitrix-sitemap-url';
 const ROSOMAHA_SITEMAP_BACKINGS = [
@@ -367,27 +369,78 @@ function rosomahaSitemapReadBackupState(): array
 {
     $operationDir = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/' . ROSOMAHA_SITEMAP_OPERATION_ID;
     $backup = $operationDir . '/sitemap.preimage.xml';
+    $intent = $operationDir . '/rename-intent.json';
+    $complete = $operationDir . '/rename-complete.json';
+    $intentExists = file_exists($intent) || is_link($intent);
+    $completeExists = file_exists($complete) || is_link($complete);
+    $intentExact = false;
+    $completeExact = false;
+    if ($intentExists && is_file($intent) && !is_link($intent) && @realpath($intent) === $intent) {
+        $intentExact = hash_equals(ROSOMAHA_SITEMAP_RENAME_INTENT, rosomahaSitemapRead($intent));
+    }
+    if (
+        $completeExists && is_file($complete) && !is_link($complete)
+        && @realpath($complete) === $complete
+    ) {
+        $completeExact = hash_equals(
+            ROSOMAHA_SITEMAP_RENAME_COMPLETE, rosomahaSitemapRead($complete)
+        );
+    }
+    $markerEvidence = [
+        'rename_intent_exists' => $intentExists,
+        'rename_intent_exact' => $intentExact,
+        'rename_complete_exists' => $completeExists,
+        'rename_complete_exact' => $completeExact,
+    ];
     if (!file_exists($backup) && !is_link($backup)) {
-        return [
+        return $markerEvidence + [
             'operation_directory_exists' => is_dir($operationDir) || is_link($operationDir),
             'exists' => false,
             'exact_baseline' => false,
         ];
     }
     if (!is_file($backup) || is_link($backup) || @realpath($backup) !== $backup) {
-        return [
+        return $markerEvidence + [
             'operation_directory_exists' => true,
             'exists' => true,
             'exact_baseline' => false,
         ];
     }
     $body = rosomahaSitemapRead($backup);
-    return [
+    return $markerEvidence + [
         'operation_directory_exists' => true,
         'exists' => true,
         'exact_baseline' => strlen($body) === ROSOMAHA_SITEMAP_BASELINE_BYTES
             && hash_equals(ROSOMAHA_SITEMAP_BASELINE_SHA256, hash('sha256', $body)),
     ];
+}
+
+function rosomahaSitemapRecoveryClassification(array $before, array $backupState): string
+{
+    if ($before['state'] === 'candidate' && $backupState['exact_baseline']) {
+        return 'active_complete';
+    }
+    if (
+        $before['state'] === 'baseline'
+        && !$backupState['operation_directory_exists']
+        && !$backupState['exists']
+        && !$backupState['rename_intent_exists']
+        && !$backupState['rename_complete_exists']
+    ) {
+        return 'not_started';
+    }
+    if ($before['state'] === 'baseline' && $backupState['exact_baseline']) {
+        if ($backupState['rename_complete_exact']) {
+            return 'rolled_back';
+        }
+        if (
+            !$backupState['rename_intent_exists']
+            && !$backupState['rename_complete_exists']
+        ) {
+            return 'backup_only_not_started';
+        }
+    }
+    return 'indeterminate';
 }
 
 function rosomahaSitemapRun(string $mode, array $request): array
@@ -422,18 +475,7 @@ function rosomahaSitemapRun(string $mode, array $request): array
 
     if ($mode === 'recover') {
         $backupState = rosomahaSitemapReadBackupState();
-        $classification = 'indeterminate';
-        if ($before['state'] === 'candidate' && $backupState['exact_baseline']) {
-            $classification = 'active_complete';
-        } elseif (
-            $before['state'] === 'baseline'
-            && !$backupState['operation_directory_exists']
-            && !$backupState['exists']
-        ) {
-            $classification = 'not_started';
-        } elseif ($before['state'] === 'baseline' && $backupState['exact_baseline']) {
-            $classification = 'rolled_back';
-        }
+        $classification = rosomahaSitemapRecoveryClassification($before, $backupState);
         return $base + [
             'status' => $classification,
             'classification' => $classification,
@@ -464,23 +506,6 @@ function rosomahaSitemapRun(string $mode, array $request): array
     if (@realpath(ROSOMAHA_SITEMAP_BACKUP_ROOT) !== ROSOMAHA_SITEMAP_BACKUP_ROOT) {
         rosomahaSitemapFail('backup_root_identity_failed');
     }
-    $operationDir = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/' . ROSOMAHA_SITEMAP_OPERATION_ID;
-    if (file_exists($operationDir) || is_link($operationDir)) {
-        rosomahaSitemapFail('operation_already_exists_no_retry');
-    }
-    if (!@mkdir($operationDir, 0700, false) || @realpath($operationDir) !== $operationDir) {
-        rosomahaSitemapFail('operation_directory_failed');
-    }
-    $backup = $operationDir . '/sitemap.preimage.xml';
-    $fileMode = ((int) @fileperms($active['path'])) & 0777;
-    if ($fileMode < 0400 || $fileMode > 0777) {
-        rosomahaSitemapFail('active_file_mode_invalid');
-    }
-    rosomahaSitemapWriteExact($backup, $active['body'], 0400);
-    if (!hash_equals($active['body'], rosomahaSitemapRead($backup))) {
-        rosomahaSitemapFail('backup_readback_failed');
-    }
-    $candidate = rosomahaSitemapCandidate($active['body']);
     $lockPath = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/operation.lock';
     $lock = @fopen($lockPath, 'c');
     if ($lock === false || !@flock($lock, LOCK_EX | LOCK_NB)) {
@@ -489,66 +514,118 @@ function rosomahaSitemapRun(string $mode, array $request): array
         }
         rosomahaSitemapFail('operation_lock_unavailable');
     }
-    $renamed = false;
     try {
-        // Re-read under lock immediately before the single mutation.
-        if (!hash_equals($request['public_body'], rosomahaSitemapRead($active['path']))) {
-            rosomahaSitemapFail('locked_preimage_drifted');
+        // No operation-specific artifact may exist or be created before this lock.
+        $operationDir = ROSOMAHA_SITEMAP_BACKUP_ROOT . '/' . ROSOMAHA_SITEMAP_OPERATION_ID;
+        if (file_exists($operationDir) || is_link($operationDir)) {
+            rosomahaSitemapFail('operation_already_exists_no_retry');
         }
-        rosomahaSitemapAtomicReplace(
-            $active['path'], $active['body'], $candidate, $fileMode, $renamed
-        );
-        $public = rosomahaSitemapPublicReadback();
-        return $base + [
-            'status' => 'applied',
-            'after' => rosomahaSitemapState(rosomahaSitemapRead($active['path'])),
-            'filesystem_mutations' => 1,
-            'diff' => ['added' => [ROSOMAHA_SITEMAP_TARGET_URL], 'removed' => []],
-            'backup' => [
-                'bytes' => strlen($active['body']),
-                'sha256' => hash('sha256', $active['body']),
-                'immutable_mode' => '0400',
-            ],
-            'public_readback' => [
-                'bytes' => strlen($public),
-                'sha256' => hash('sha256', $public),
-                'exact_candidate' => true,
-            ],
-            'atomic_replace' => true,
-            'automatic_restore_required' => false,
-        ];
-    } catch (Throwable $error) {
-        $restoreOk = true;
-        if ($renamed) {
-            try {
-                rosomahaSitemapRestore($active['path'], $backup, $fileMode);
-            } catch (Throwable) {
-                $restoreOk = false;
-            }
+        if (
+            !@mkdir($operationDir, 0700, false)
+            || @realpath($operationDir) !== $operationDir
+        ) {
+            rosomahaSitemapFail('operation_directory_failed');
         }
-        $after = null;
+        $backup = $operationDir . '/sitemap.preimage.xml';
+        $intentMarker = $operationDir . '/rename-intent.json';
+        $completeMarker = $operationDir . '/rename-complete.json';
+        $fileMode = ((int) @fileperms($active['path'])) & 0777;
+        if ($fileMode < 0400 || $fileMode > 0777) {
+            rosomahaSitemapFail('active_file_mode_invalid');
+        }
+        rosomahaSitemapWriteExact($backup, $active['body'], 0400);
+        if (!hash_equals($active['body'], rosomahaSitemapRead($backup))) {
+            rosomahaSitemapFail('backup_readback_failed');
+        }
+        $candidate = rosomahaSitemapCandidate($active['body']);
+        $renamed = false;
         try {
-            $after = rosomahaSitemapState(rosomahaSitemapRead($active['path']));
-        } catch (Throwable) {
-            $after = [
-                'state' => 'unknown', 'bytes' => 0, 'sha256' => str_repeat('0', 64),
-                'url_count' => 0, 'unique_url_count' => 0, 'target_count' => 0,
+            // Re-read under lock immediately before the single mutation.
+            if (!hash_equals($request['public_body'], rosomahaSitemapRead($active['path']))) {
+                rosomahaSitemapFail('locked_preimage_drifted');
+            }
+            rosomahaSitemapWriteExact(
+                $intentMarker, ROSOMAHA_SITEMAP_RENAME_INTENT, 0400
+            );
+            if (!hash_equals(
+                ROSOMAHA_SITEMAP_RENAME_INTENT, rosomahaSitemapRead($intentMarker)
+            )) {
+                rosomahaSitemapFail('rename_intent_readback_failed');
+            }
+            rosomahaSitemapAtomicReplace(
+                $active['path'], $active['body'], $candidate, $fileMode, $renamed
+            );
+            rosomahaSitemapWriteExact(
+                $completeMarker, ROSOMAHA_SITEMAP_RENAME_COMPLETE, 0400
+            );
+            if (!hash_equals(
+                ROSOMAHA_SITEMAP_RENAME_COMPLETE,
+                rosomahaSitemapRead($completeMarker)
+            )) {
+                rosomahaSitemapFail('rename_complete_readback_failed');
+            }
+            $public = rosomahaSitemapPublicReadback();
+            return $base + [
+                'status' => 'applied',
+                'after' => rosomahaSitemapState(rosomahaSitemapRead($active['path'])),
+                'filesystem_mutations' => 1,
+                'diff' => ['added' => [ROSOMAHA_SITEMAP_TARGET_URL], 'removed' => []],
+                'backup' => [
+                    'bytes' => strlen($active['body']),
+                    'sha256' => hash('sha256', $active['body']),
+                    'immutable_mode' => '0400',
+                    'rename_intent_exact' => true,
+                    'rename_complete_exact' => true,
+                ],
+                'public_readback' => [
+                    'bytes' => strlen($public),
+                    'sha256' => hash('sha256', $public),
+                    'exact_candidate' => true,
+                ],
+                'atomic_replace' => true,
+                'automatic_restore_required' => false,
             ];
+        } catch (Throwable $error) {
+            $restoreOk = true;
+            if ($renamed) {
+                try {
+                    rosomahaSitemapRestore($active['path'], $backup, $fileMode);
+                } catch (Throwable) {
+                    $restoreOk = false;
+                }
+            }
+            $after = null;
+            try {
+                $after = rosomahaSitemapState(rosomahaSitemapRead($active['path']));
+            } catch (Throwable) {
+                $after = [
+                    'state' => 'unknown', 'bytes' => 0,
+                    'sha256' => str_repeat('0', 64), 'url_count' => 0,
+                    'unique_url_count' => 0, 'target_count' => 0,
+                ];
+            }
+            rosomahaSitemapEmit($base + [
+                'status' => 'error',
+                'error_code' => $error instanceof RosomahaSitemapException
+                    ? $error->getMessage() : 'unexpected_apply_error',
+                'after' => $after,
+                'filesystem_mutations' => $renamed ? 2 : 0,
+                'diff' => ['added' => [], 'removed' => []],
+                'automatic_restore_required' => $renamed,
+                'automatic_restore_ok' => $restoreOk,
+            ], 1);
         }
-        rosomahaSitemapEmit($base + [
-            'status' => 'error',
-            'error_code' => $error instanceof RosomahaSitemapException
-                ? $error->getMessage() : 'unexpected_apply_error',
-            'after' => $after,
-            'filesystem_mutations' => $renamed ? 2 : 0,
-            'diff' => ['added' => [], 'removed' => []],
-            'automatic_restore_required' => $renamed,
-            'automatic_restore_ok' => $restoreOk,
-        ], 1);
     } finally {
         @flock($lock, LOCK_UN);
         fclose($lock);
     }
+}
+
+if (
+    defined('ROSOMAHA_SITEMAP_LIBRARY_ONLY')
+    && ROSOMAHA_SITEMAP_LIBRARY_ONLY === true
+) {
+    return;
 }
 
 try {
