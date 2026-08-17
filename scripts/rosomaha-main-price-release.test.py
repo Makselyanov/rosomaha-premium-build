@@ -1489,15 +1489,37 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertFalse(evidence["valid"])
         self.assertIn("old visible price is still present", evidence["blockers"])
 
-    def test_old_public_baseline_may_lack_visible_price_but_requires_jsonld(self) -> None:
+    def test_public_baseline_requires_current_visible_price_and_jsonld(self) -> None:
         path = "/catalog/rosomaha-standart-plus"
-        raw = page_html(path, "1300000").replace("<main>Цена от 1 300 000 ₽</main>".encode("utf-8"), b"")
+        raw = page_html(path, "1350000")
         evidence = helper.verify_html_page(
-            raw, path, expected_price=1300000, absent_price=1350000,
-            require_visible_price=False,
+            raw, path, expected_price=1350000, absent_price=1300000,
+            require_visible_price=True,
         )
         self.assertTrue(evidence["valid"])
-        self.assertEqual(evidence["price"]["json_ld_prices"], [1300000])
+        self.assertEqual(evidence["price"]["visible_count"], 1)
+        self.assertEqual(evidence["price"]["json_ld_prices"], [1350000])
+
+    def test_old_and_new_snapshots_pin_the_same_current_prices(self) -> None:
+        def response(url: str, **_kwargs) -> dict:
+            path = url.removeprefix(helper.BASE_URL) or "/"
+            price = helper.MODEL_PRICES.get(path)
+            return {
+                "url": url,
+                "status": 200,
+                "final_url": url,
+                "attempts": 1,
+                "raw": page_html(path, price),
+            }
+
+        with mock.patch.object(helper, "read_http", side_effect=response):
+            old = helper.public_seo_snapshot(stage="old")
+            new = helper.public_seo_snapshot(stage="new")
+        for path, price in helper.MODEL_PRICES.items():
+            self.assertEqual(old["pages"][path]["price"]["expected"], price)
+            self.assertEqual(new["pages"][path]["price"]["expected"], price)
+            self.assertTrue(old["pages"][path]["price"]["visible_required"])
+            self.assertTrue(new["pages"][path]["price"]["visible_required"])
 
     def test_duplicate_jsonld_offer_price_blocks_candidate(self) -> None:
         path = "/catalog/rosomaha-standart-plus"

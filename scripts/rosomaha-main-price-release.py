@@ -1013,11 +1013,15 @@ def public_seo_snapshot(*, stage: str) -> dict[str, Any]:
         response = read_http(BASE_URL + ("/" if path == "/" else path))
         if response["status"] != 200 or response["final_url"] != response["url"]:
             raise HelperError(f"public page is not exact HTTP 200: {path}")
-        expected = OLD_MODEL_PRICES.get(path) if stage == "old" else MODEL_PRICES.get(path)
-        absent = MODEL_PRICES.get(path) if stage == "old" else OLD_MODEL_PRICES.get(path)
+        # The isolated coffer-image candidate is based on the currently live
+        # official-price commit. Prices are an invariant of this release, not
+        # an approved mutation: both the preflight and postflight must expose
+        # the same current value and must not resurrect the obsolete value.
+        expected = MODEL_PRICES.get(path)
+        absent = OLD_MODEL_PRICES.get(path)
         evidence = verify_html_page(
             response["raw"], path, expected_price=expected, absent_price=absent,
-            require_visible_price=stage == "new",
+            require_visible_price=True,
         )
         if not evidence["valid"]:
             raise HelperError(f"public SEO/price verification failed for {path}: {evidence['blockers']}")
