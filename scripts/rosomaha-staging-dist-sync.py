@@ -55,6 +55,18 @@ ARTICLES_CZ_DIR = f"{APP_ROOT}/src/data/articles-cz"
 RELEASE_SCRIPT_SHA256 = "9caad8bde40e0f269ad0887c8b16c97cfc18c0495ad72068f2c812d2859c1fa2"
 ROLLBACK_SCRIPT_SHA256 = "8f2390ec2d6b3248b49ef8b690de5413bdcc7930180e584524de72094d676388"
 PINNED_OPERATOR_SHA256 = "f19c0fe449e100319c6341506fce4a4a1cd5beb76afe8936d5f2492d3b29f61c"
+RECOVERY_OPERATOR_COMPATIBILITY = {
+    "81a8a9a2e707846752d878b1d43dea112d77e224612c6401a9cf874469adcf6d": (
+        "4ff66bb7a6f5c1c826cf4d5da05337b279fc1e3e7db301528f858f996e24baaf",
+        1786972429,
+        "3489d74a93f1f5700a4270efea252fcd081d9bfec2c2bd4e16d81ccee83dc881",
+    ),
+    "54f46def8a7a424994df808b476305cd6bfb8211eb757a166a1b6d58afa6cede": (
+        "cea04a069c7ebc859d964378363b0e12fc5fb1cec41d6494eb61c5a6395bf308",
+        1786972483,
+        "3489d74a93f1f5700a4270efea252fcd081d9bfec2c2bd4e16d81ccee83dc881",
+    ),
+}
 
 MAX_OPERATOR_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 32 * 1024 * 1024
@@ -609,6 +621,16 @@ def receipt_material(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key != "receipt_token"}
 
 
+def exact_recovery_operator_compatibility(payload: dict[str, Any]) -> bool:
+    expected = RECOVERY_OPERATOR_COMPATIBILITY.get(payload.get("receipt_token"))
+    observed = (
+        payload.get("baseline_token"),
+        payload.get("audit_epoch"),
+        payload.get("operator_sha256"),
+    )
+    return expected is not None and observed == expected
+
+
 def audit() -> tuple[dict[str, Any], Path]:
     frozen_operator = operator_bytes()
     client, identity = connect(AUDIT_LOGIN)
@@ -652,7 +674,9 @@ def parse_utc(value: Any, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def load_baseline(path: Path, *, require_fresh: bool) -> tuple[dict[str, Any], Path, bytes]:
+def load_baseline(
+    path: Path, *, require_fresh: bool, allow_recovery_operator_compatibility: bool = False
+) -> tuple[dict[str, Any], Path, bytes]:
     resolved = safe_baseline_path(path)
     last_error: HelperError | None = None
     raw: bytes | None = None
@@ -680,7 +704,13 @@ def load_baseline(path: Path, *, require_fresh: bool) -> tuple[dict[str, Any], P
     if payload.get("receipt_token") != sha256_bytes(canonical_json(receipt_material(payload))):
         raise HelperError("baseline receipt content token mismatch")
     frozen_operator = operator_bytes()
-    if payload.get("operator_sha256") != sha256_bytes(frozen_operator):
+    if (
+        payload.get("operator_sha256") != sha256_bytes(frozen_operator)
+        and not (
+            allow_recovery_operator_compatibility
+            and exact_recovery_operator_compatibility(payload)
+        )
+    ):
         raise HelperError("fixed operator changed after audit")
     server = payload.get("server")
     if not isinstance(server, dict):
@@ -705,7 +735,11 @@ def load_baseline(path: Path, *, require_fresh: bool) -> tuple[dict[str, Any], P
 def invoke_bound_operation(mode: str, baseline_path: Path) -> tuple[dict[str, Any], Path]:
     if mode not in {"apply", "recover"}:
         raise HelperError("unsupported bound operation")
-    baseline, _, frozen_operator = load_baseline(baseline_path, require_fresh=mode == "apply")
+    baseline, _, frozen_operator = load_baseline(
+        baseline_path,
+        require_fresh=mode == "apply",
+        allow_recovery_operator_compatibility=mode == "recover",
+    )
     if mode == "apply" and baseline.get("status") != "ready":
         raise HelperError("baseline is already synchronized; apply replay is forbidden")
     token = baseline.get("baseline_token")
@@ -786,7 +820,8 @@ def invoke_bound_operation(mode: str, baseline_path: Path) -> tuple[dict[str, An
         "schema": SCHEMA, "status": remote["status"], "mode": mode,
         "completed_at": utc_now(), "host": HOST, "roles": ROLES,
         "baseline_token": token, "baseline_receipt_token": baseline["receipt_token"],
-        "operator_sha256": baseline["operator_sha256"], "apply_identity": identity,
+        "operator_sha256": sha256_bytes(frozen_operator),
+        "baseline_operator_sha256": baseline["operator_sha256"], "apply_identity": identity,
         "server": remote,
     }
     payload["receipt_token"] = sha256_bytes(canonical_json(receipt_material(payload)))

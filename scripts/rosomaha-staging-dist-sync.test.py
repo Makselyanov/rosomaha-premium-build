@@ -588,6 +588,49 @@ class StagingDistSyncTest(unittest.TestCase):
                 loaded, _, _ = self.helper.load_baseline(path, require_fresh=False)
                 self.assertEqual(loaded["baseline_token"], remote["baseline_token"])
 
+    def test_recovery_operator_compatibility_is_exactly_two_receipts(self):
+        compatibility = self.helper.RECOVERY_OPERATOR_COMPATIBILITY
+        self.assertEqual(len(compatibility), 2)
+        for receipt_token, contract in compatibility.items():
+            baseline_token, audit_epoch, operator_sha256 = contract
+            payload = {
+                "receipt_token": receipt_token,
+                "baseline_token": baseline_token,
+                "audit_epoch": audit_epoch,
+                "operator_sha256": operator_sha256,
+            }
+            self.assertTrue(self.helper.exact_recovery_operator_compatibility(payload))
+            for field in ("receipt_token", "baseline_token", "audit_epoch", "operator_sha256"):
+                tampered = copy.deepcopy(payload)
+                tampered[field] = "0" * 64 if field != "audit_epoch" else audit_epoch + 1
+                self.assertFalse(self.helper.exact_recovery_operator_compatibility(tampered))
+
+    def test_changed_operator_receipt_is_allowed_only_by_explicit_recovery_gate(self):
+        remote = snapshot_fixture(self.helper)
+        payload = baseline_wrapper(self.helper, remote)
+        payload["operator_sha256"] = "3" * 64
+        payload["receipt_token"] = self.helper.sha256_bytes(
+            self.helper.canonical_json(self.helper.receipt_material(payload))
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            report_root = Path(raw).resolve()
+            path = report_root / "20260817T000000Z-test-rosomaha-staging-dist-baseline.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            patches = (
+                mock.patch.object(self.helper, "REPORT_ROOT", report_root),
+                mock.patch.object(self.helper, "safe_directory", side_effect=lambda value, _root: Path(value).resolve()),
+                mock.patch.object(self.helper, "exact_recovery_operator_compatibility", return_value=True),
+            )
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(self.helper.HelperError):
+                    self.helper.load_baseline(path, require_fresh=False)
+                loaded, _, _ = self.helper.load_baseline(
+                    path,
+                    require_fresh=False,
+                    allow_recovery_operator_compatibility=True,
+                )
+                self.assertEqual(loaded["operator_sha256"], "3" * 64)
+
     def test_remote_operator_also_rejects_expired_apply_epoch(self):
         self.operator["AUDIT_EPOCH_RAW"] = str(int(time.time()) - self.operator["AUDIT_TTL_SECONDS"] - 1)
         with self.assertRaises(self.operator["SyncError"]):
