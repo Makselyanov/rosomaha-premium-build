@@ -56,6 +56,7 @@ MAX_CZ_FILES = 1_000
 AUDIT_TTL_SECONDS = 30 * 60
 FIXED_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 FIXED_EPOCH_PATTERN = re.compile(r"[0-9]{10}")
+SAFE_STATE_GIDS = {0, 33}
 
 
 class SyncError(RuntimeError):
@@ -676,8 +677,10 @@ def validate_state_root(paths, *, allow_absent):
     observed = sorted(item.name for item in state.iterdir()) if stat.S_ISDIR(details.st_mode) else []
     valid = bool(
         stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode)
-        and details.st_uid == 0 and stat.S_IMODE(details.st_mode) == 0o700
-        and state.parent == APP_ROOT and within(APP_ROOT, state)
+        and details.st_uid == 0 and details.st_gid in SAFE_STATE_GIDS
+        and stat.S_IMODE(details.st_mode) == 0o700
+        and state.parent == APP_ROOT and str(state.resolve(strict=True)) == str(state)
+        and within(APP_ROOT, state)
         and set(observed).issubset({"candidate", "backup"})
     )
     if not valid:
@@ -685,11 +688,100 @@ def validate_state_root(paths, *, allow_absent):
     return {"exists": True, "valid": True, "entries": observed}
 
 
+def cleanup_exact_created_empty_state(state, created):
+    if created is None:
+        return False
+    try:
+        current = os.lstat(state)
+        valid = bool(
+            stat.S_ISDIR(current.st_mode) and not stat.S_ISLNK(current.st_mode)
+            and current.st_uid == 0 and current.st_gid in SAFE_STATE_GIDS
+            and (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino)
+            and state.parent == APP_ROOT and str(state.resolve(strict=True)) == str(state)
+            and within(APP_ROOT, state) and not any(state.iterdir())
+        )
+        if not valid:
+            return False
+        os.rmdir(state)
+        return path_absent(state)
+    except OSError:
+        return False
+
+
 def create_state_root(paths):
-    if not path_absent(paths["state"]):
+    state = paths["state"]
+    if not path_absent(state):
         raise SyncError("receipt-bound private state root already exists")
-    os.mkdir(paths["state"], 0o700)
-    validate_state_root(paths, allow_absent=False)
+    created = None
+    try:
+        app_details = os.lstat(APP_ROOT)
+        if (
+            not stat.S_ISDIR(app_details.st_mode) or stat.S_ISLNK(app_details.st_mode)
+            or app_details.st_uid != 0 or app_details.st_gid not in SAFE_STATE_GIDS
+            or str(APP_ROOT.resolve(strict=True)) != str(APP_ROOT)
+        ):
+            raise SyncError("application root cannot provide a safe private-state gid")
+        os.mkdir(state, 0o700)
+        created = os.lstat(state)
+        if (
+            not stat.S_ISDIR(created.st_mode) or stat.S_ISLNK(created.st_mode)
+            or created.st_uid != 0 or created.st_gid not in SAFE_STATE_GIDS
+            or state.parent != APP_ROOT or str(state.resolve(strict=True)) != str(state)
+            or not within(APP_ROOT, state) or any(state.iterdir())
+        ):
+            raise SyncError("new private state root inode/path is unsafe")
+        os.chown(state, 0, app_details.st_gid, follow_symlinks=False)
+        os.chmod(state, 0o700, follow_symlinks=False)
+        normalized = os.lstat(state)
+        if (
+            not stat.S_ISDIR(normalized.st_mode) or stat.S_ISLNK(normalized.st_mode)
+            or (normalized.st_dev, normalized.st_ino) != (created.st_dev, created.st_ino)
+            or normalized.st_uid != 0 or normalized.st_gid != app_details.st_gid
+            or stat.S_IMODE(normalized.st_mode) != 0o700
+            or str(state.resolve(strict=True)) != str(state) or any(state.iterdir())
+        ):
+            raise SyncError("new private state root normalization is not exact")
+        return validate_state_root(paths, allow_absent=False)
+    except Exception:
+        cleanup_exact_created_empty_state(state, created)
+        raise
+
+
+def normalize_legacy_recovery_state_root(paths):
+    state = paths["state"]
+    if path_absent(state):
+        return {"exists": False, "valid": True, "entries": [], "normalized_legacy": False}
+    details = os.lstat(state)
+    observed = sorted(item.name for item in state.iterdir()) if stat.S_ISDIR(details.st_mode) else []
+    base_valid = bool(
+        stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+        and details.st_uid == 0 and details.st_gid in SAFE_STATE_GIDS
+        and state.parent == APP_ROOT and str(state.resolve(strict=True)) == str(state)
+        and within(APP_ROOT, state) and set(observed).issubset({"candidate", "backup"})
+    )
+    if not base_valid:
+        raise SyncError("legacy receipt-bound state root is unsafe")
+    mode = stat.S_IMODE(details.st_mode)
+    if mode == 0o700:
+        result = validate_state_root(paths, allow_absent=False)
+        result["normalized_legacy"] = False
+        return result
+    if mode != 0o2700:
+        raise SyncError("legacy receipt-bound state root has an unsupported mode")
+    os.chmod(state, 0o700, follow_symlinks=False)
+    normalized = os.lstat(state)
+    if (
+        not stat.S_ISDIR(normalized.st_mode) or stat.S_ISLNK(normalized.st_mode)
+        or (normalized.st_dev, normalized.st_ino) != (details.st_dev, details.st_ino)
+        or normalized.st_uid != 0 or normalized.st_gid != details.st_gid
+        or stat.S_IMODE(normalized.st_mode) != 0o700
+        or str(state.resolve(strict=True)) != str(state)
+        or sorted(item.name for item in state.iterdir()) != observed
+    ):
+        raise SyncError("legacy receipt-bound state root normalization is not exact")
+    result = validate_state_root(paths, allow_absent=False)
+    result["normalized_legacy"] = True
+    return result
 
 
 def require_exact_baseline(snapshot, token, audit_epoch, *, require_mismatch):
@@ -927,10 +1019,9 @@ def recover_sync(token, audit_epoch):
     if not identity_for_mode("recover").get("valid"):
         raise SyncError("recover requires exact root identity")
     paths = token_paths(token)
-    validate_state_root(paths, allow_absent=True)
     with open_shared_lock() as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        validate_state_root(paths, allow_absent=True)
+        state_root = normalize_legacy_recovery_state_root(paths)
         # The current release, canonical articles, live articles, articles-cz,
         # scripts and symlink must still equal the receipt-bound material.  Dist
         # and the deterministic recovery paths are classified separately.
@@ -963,7 +1054,9 @@ def recover_sync(token, audit_epoch):
                 "schema": SCHEMA, "status": "recovered_verified_success", "mode": "recover",
                 "completed_at": utc_now(), "account": APPLY_LOGIN, "roles": ROLES,
                 "baseline_token": token, "classification": state,
-                "backup": str(paths["backup"]), "mutation_performed": False,
+                "backup": str(paths["backup"]),
+                "mutation_performed": state_root["normalized_legacy"],
+                "legacy_state_root_normalized": state_root["normalized_legacy"],
                 "postread": {
                     "current_release": observed["current_release"],
                     "current_digest": observed["current_tree"]["digest"],
@@ -996,7 +1089,8 @@ def recover_sync(token, audit_epoch):
             "schema": SCHEMA, "status": "recovered_verified_baseline", "mode": "recover",
             "completed_at": utc_now(), "account": APPLY_LOGIN, "roles": ROLES,
             "baseline_token": token, "classification": state,
-            "mutation_performed": state != "baseline_restored",
+            "mutation_performed": state != "baseline_restored" or state_root["exists"],
+            "legacy_state_root_normalized": state_root["normalized_legacy"],
             "postread": {
                 "current_release": post["current_release"],
                 "current_digest": post["current_tree"]["digest"],

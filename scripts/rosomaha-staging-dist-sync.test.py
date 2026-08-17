@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -51,6 +52,71 @@ def operator_namespace() -> dict:
     ):
         exec(compile(operator_python_source(), str(OPERATOR_PATH), "exec"), namespace)
     return namespace
+
+
+class SetgidStateOs:
+    """Model Linux setgid inheritance while tests run on Windows."""
+
+    def __init__(self, app_root: Path, state: Path, *, initial_mode: int | None = None,
+                 fail_chmod: bool = False, inject_unknown: bool = False):
+        self.app_root = app_root
+        self.state = state
+        self.state_mode = initial_mode
+        self.state_uid = 0
+        self.state_gid = 33
+        self.fail_chmod = fail_chmod
+        self.inject_unknown = inject_unknown
+        self.chown_calls = []
+        self.chmod_calls = []
+        self.replace_calls = []
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    @staticmethod
+    def _directory_stat(path: Path, mode: int, uid: int, gid: int):
+        details = os.lstat(path)
+        return types.SimpleNamespace(
+            st_mode=stat.S_IFDIR | mode,
+            st_uid=uid,
+            st_gid=gid,
+            st_dev=details.st_dev,
+            st_ino=details.st_ino,
+        )
+
+    def lstat(self, path):
+        path = Path(path)
+        if path == self.app_root:
+            return self._directory_stat(path, 0o3775, 0, 33)
+        if path == self.state and self.state_mode is not None:
+            return self._directory_stat(path, self.state_mode, self.state_uid, self.state_gid)
+        return os.lstat(path)
+
+    def mkdir(self, path, mode=0o777):
+        os.mkdir(path, mode)
+        if Path(path) == self.state:
+            self.state_mode = 0o2700
+
+    def chown(self, path, uid, gid, *, follow_symlinks=True):
+        self.chown_calls.append((Path(path), uid, gid, follow_symlinks))
+        if Path(path) != self.state:
+            raise AssertionError(f"unexpected chown target: {path}")
+        self.state_uid = uid
+        self.state_gid = gid
+
+    def chmod(self, path, mode, *, follow_symlinks=True):
+        self.chmod_calls.append((Path(path), mode, follow_symlinks))
+        if Path(path) != self.state:
+            raise AssertionError(f"unexpected chmod target: {path}")
+        if self.inject_unknown:
+            (self.state / "unknown-entry").write_text("do not remove", encoding="utf-8")
+        if self.fail_chmod:
+            raise PermissionError("simulated chmod failure")
+        self.state_mode = mode
+
+    def replace(self, source, destination):
+        self.replace_calls.append((Path(source), Path(destination)))
+        return os.replace(source, destination)
 
 
 def manifest(label: str, *, root_info: dict | None = None) -> dict:
@@ -165,6 +231,7 @@ class StagingDistSyncTest(unittest.TestCase):
         cls.operator = operator_namespace()
 
     def setUp(self):
+        self.operator["os"] = os
         self.operator["AUDIT_EPOCH_RAW"] = ""
         app = PurePosixPath(self.helper.APP_ROOT)
         self.operator["APP_ROOT"] = app
@@ -202,6 +269,125 @@ class StagingDistSyncTest(unittest.TestCase):
             source.index("os.replace(DIST_DIR, paths[\"backup\"])") ,
             source.index("os.replace(paths[\"candidate\"], DIST_DIR)"),
         )
+
+    def test_create_state_root_normalizes_inherited_setgid_before_dist_swap(self):
+        with tempfile.TemporaryDirectory() as raw:
+            app = Path(raw).resolve()
+            dist = app / "dist"
+            dist.mkdir()
+            marker = dist / "baseline.txt"
+            marker.write_text("unchanged", encoding="utf-8")
+            state = app / ".staging-dist-sync-state-test"
+            paths = {"state": state, "candidate": state / "candidate", "backup": state / "backup"}
+            fake_os = SetgidStateOs(app, state)
+            self.operator["APP_ROOT"] = app
+            self.operator["DIST_DIR"] = dist
+            self.operator["os"] = fake_os
+
+            observed = self.operator["create_state_root"](paths)
+
+            self.assertEqual(observed["entries"], [])
+            self.assertEqual(fake_os.state_mode, 0o700)
+            self.assertEqual(fake_os.chown_calls, [(state, 0, 33, False)])
+            self.assertEqual(fake_os.chmod_calls, [(state, 0o700, False)])
+            self.assertEqual(fake_os.replace_calls, [])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+        source = operator_python_source()
+        apply_body = source[source.index("def apply_sync"):source.index("def recovery_classification")]
+        self.assertLess(
+            apply_body.index("create_state_root(paths)"),
+            apply_body.index('os.replace(DIST_DIR, paths["backup"])'),
+        )
+
+    def test_create_state_root_failure_cleans_only_exact_empty_inode_pre_swap(self):
+        with tempfile.TemporaryDirectory() as raw:
+            app = Path(raw).resolve()
+            dist = app / "dist"
+            dist.mkdir()
+            marker = dist / "baseline.txt"
+            marker.write_text("unchanged", encoding="utf-8")
+            state = app / ".staging-dist-sync-state-test"
+            paths = {"state": state, "candidate": state / "candidate", "backup": state / "backup"}
+            fake_os = SetgidStateOs(app, state, fail_chmod=True)
+            self.operator["APP_ROOT"] = app
+            self.operator["DIST_DIR"] = dist
+            self.operator["os"] = fake_os
+
+            with self.assertRaises(PermissionError):
+                self.operator["create_state_root"](paths)
+
+            self.assertFalse(state.exists())
+            self.assertEqual(fake_os.replace_calls, [])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_create_state_root_failure_refuses_cleanup_after_unknown_entry(self):
+        with tempfile.TemporaryDirectory() as raw:
+            app = Path(raw).resolve()
+            state = app / ".staging-dist-sync-state-test"
+            paths = {"state": state, "candidate": state / "candidate", "backup": state / "backup"}
+            fake_os = SetgidStateOs(app, state, fail_chmod=True, inject_unknown=True)
+            self.operator["APP_ROOT"] = app
+            self.operator["os"] = fake_os
+
+            with self.assertRaises(PermissionError):
+                self.operator["create_state_root"](paths)
+
+            self.assertTrue((state / "unknown-entry").is_file())
+            self.assertEqual(fake_os.replace_calls, [])
+
+    def test_two_legacy_02700_roots_normalize_only_by_exact_token_path(self):
+        with tempfile.TemporaryDirectory() as raw:
+            app = Path(raw).resolve()
+            self.operator["APP_ROOT"] = app
+            first = self.operator["token_paths"]("a" * 64)
+            second = self.operator["token_paths"]("b" * 64)
+            first["state"].mkdir()
+            second["state"].mkdir()
+            second["backup"].mkdir()
+
+            first_os = SetgidStateOs(app, first["state"], initial_mode=0o2700)
+            self.operator["os"] = first_os
+            with self.assertRaises(self.operator["SyncError"]):
+                self.operator["validate_state_root"](first, allow_absent=False)
+            normalized_first = self.operator["normalize_legacy_recovery_state_root"](first)
+            self.assertTrue(normalized_first["normalized_legacy"])
+            self.assertEqual(first_os.chmod_calls, [(first["state"], 0o700, False)])
+            self.assertTrue(second["backup"].is_dir())
+
+            second_os = SetgidStateOs(app, second["state"], initial_mode=0o2700)
+            self.operator["os"] = second_os
+            normalized_second = self.operator["normalize_legacy_recovery_state_root"](second)
+            self.assertTrue(normalized_second["normalized_legacy"])
+            self.assertEqual(normalized_second["entries"], ["backup"])
+            self.assertEqual(second_os.chmod_calls, [(second["state"], 0o700, False)])
+
+    def test_legacy_normalization_blocks_unknown_entries_and_wrong_mode(self):
+        for mode, unknown_entry in ((0o2700, True), (0o770, False)):
+            with self.subTest(mode=oct(mode), unknown_entry=unknown_entry), tempfile.TemporaryDirectory() as raw:
+                app = Path(raw).resolve()
+                state = app / ".staging-dist-sync-state-test"
+                state.mkdir()
+                if unknown_entry:
+                    (state / "intruder").write_text("unsafe", encoding="utf-8")
+                paths = {"state": state, "candidate": state / "candidate", "backup": state / "backup"}
+                fake_os = SetgidStateOs(app, state, initial_mode=mode)
+                self.operator["APP_ROOT"] = app
+                self.operator["os"] = fake_os
+
+                with self.assertRaises(self.operator["SyncError"]):
+                    self.operator["normalize_legacy_recovery_state_root"](paths)
+
+                self.assertEqual(fake_os.chmod_calls, [])
+
+    def test_recovery_legacy_normalization_occurs_only_inside_shared_lock(self):
+        source = operator_python_source()
+        recover_body = source[source.index("def recover_sync"):source.index("def emit")]
+        lock_index = recover_body.index("fcntl.flock")
+        normalize_index = recover_body.index("normalize_legacy_recovery_state_root(paths)")
+        self.assertLess(lock_index, normalize_index)
+        self.assertNotIn("normalize_legacy_recovery_state_root", recover_body[:lock_index])
+        self.assertNotIn("validate_state_root(paths", recover_body[:lock_index])
 
     def test_manifest_diff_is_exact_and_directional(self):
         current = {
