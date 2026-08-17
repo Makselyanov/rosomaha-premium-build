@@ -26,6 +26,12 @@
         "apply:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --apply",
         "recover:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.py --recover",
         "test:bitrix-sitemap-url": "python scripts/bitrix-sitemap-url.test.py",
+        "audit:bitrix-coffer-image": "python scripts/bitrix-coffer-image.py --audit",
+        "dry-run:bitrix-coffer-image": "python scripts/bitrix-coffer-image.py --dry-run",
+        "apply:bitrix-coffer-image": "python scripts/bitrix-coffer-image.py --apply",
+        "recover:bitrix-coffer-image": "python scripts/bitrix-coffer-image.py --recover",
+        "rollback:bitrix-coffer-image": "python scripts/bitrix-coffer-image.py --rollback",
+        "test:bitrix-coffer-image": "python scripts/bitrix-coffer-image.test.py",
         "test:bitrix-category-seo": "node --test scripts/bitrix-category-seo-baseline.test.mjs",
         "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs",
         "audit:seo-prerender": "node scripts/audit-prerender-seo.mjs"
