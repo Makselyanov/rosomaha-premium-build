@@ -11,7 +11,7 @@ BUNDLE_DIR="${2:-}"
 case "$MODE" in
   audit|root-audit) ;;
   apply|rollback|diagnose-recovery|repair-release-root)
-    [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-64ba304-[0-9a-f]{16}$ ]] || {
+    [[ "$BUNDLE_DIR" =~ ^/tmp/rosomaha-main-price-release-538a470-[0-9a-f]{16}$ ]] || {
       echo '{"status":"error","error":"invalid fixed bundle path"}'
       exit 2
     }
@@ -56,8 +56,8 @@ HOST = "90.156.168.115"
 AUDIT_LOGIN = "deploy"
 APPLY_LOGIN = "root"
 ROLES = {"audit": AUDIT_LOGIN, "apply": APPLY_LOGIN}
-TARGET_COMMIT = "64ba304c6c3128493a30e7408273652a326752d3"
-RELEASE_LABEL = "prices-64ba304"
+TARGET_COMMIT = "538a470f868a811b0463dc991b2f3ea03cfc460b"
+RELEASE_LABEL = "prices-538a470"
 APP_ROOT = Path("/var/www/rosomaha")
 DIST_DIR = APP_ROOT / "dist"
 RELEASES_DIR = APP_ROOT / "_releases"
@@ -1152,7 +1152,7 @@ def parse_progress_raw(raw, baseline_token):
 
 
 def validate_bundle(bundle):
-    match = re.fullmatch(r"/tmp/rosomaha-main-price-release-64ba304-([0-9a-f]{16})", str(bundle))
+    match = re.fullmatch(r"/tmp/rosomaha-main-price-release-538a470-([0-9a-f]{16})", str(bundle))
     if not match:
         raise ReleaseError("invalid bundle path")
     details = os.lstat(bundle)
@@ -1941,7 +1941,7 @@ def apply_release(bundle):
                 progress_started_at, progress_started_monotonic,
                 release_switched=release_switched,
             )
-            if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-64ba304", Path(new_release).name):
+            if not release_switched or not release_path(new_release) or not re.fullmatch(r"[0-9]{8}-[0-9]{6}-prices-538a470", Path(new_release).name):
                 raise ReleaseError("guarded release did not switch to the expected labelled release")
             if exact_label_releases() != [new_release]:
                 raise ReleaseError("exact release target was not uniquely created")
@@ -2231,7 +2231,7 @@ def diagnostic_cz_pair(before, after, baseline):
 def diagnostic_labels(value, exact_new):
     safe = [
         item for item in value
-        if isinstance(item, str) and re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", item)
+        if isinstance(item, str) and re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-538a470", item)
     ]
     valid = len(safe) == len(value) and len(value) <= 4
     return {
@@ -2268,7 +2268,7 @@ def read_diagnostic_apply_receipt(bundle, baseline):
         or receipt.get("target_commit") != TARGET_COMMIT or receipt.get("baseline_token") != baseline.get("baseline_token")
         or receipt.get("previous_release") != baseline.get("current_release")
         or not isinstance(exact_new, str)
-        or not re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", exact_new)
+        or not re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-538a470", exact_new)
         or receipt.get("candidate_tree_digest") != baseline.get("candidate", {}).get("tree_digest")
     ):
         raise ReleaseError("apply receipt identity mismatch for diagnosis")

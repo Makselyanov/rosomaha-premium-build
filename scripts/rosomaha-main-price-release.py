@@ -56,12 +56,12 @@ IDENTITY_FILE = Path.home() / ".ssh/id_ed25519"
 APP_ROOT = "/var/www/rosomaha"
 REMOTE_CANONICAL_ARTICLES = f"{APP_ROOT}/public/api/articles.json"
 REMOTE_ARTICLES_CZ = f"{APP_ROOT}/src/data/articles-cz"
-TARGET_COMMIT = "64ba304c6c3128493a30e7408273652a326752d3"
-RELEASE_LABEL = "prices-64ba304"
+TARGET_COMMIT = "538a470f868a811b0463dc991b2f3ea03cfc460b"
+RELEASE_LABEL = "prices-538a470"
 BASE_URL = "https://xn--80aa8ahaki9a.site"
 
 EXPECTED_ARTICLE_COUNT = 61
-EXPECTED_PRERENDER_ROUTE_COUNT = 96
+EXPECTED_PRERENDER_ROUTE_COUNT = 91
 RUNTIME_ARTICLES_MANIFEST = "api/articles-runtime-manifest.json"
 RUNTIME_ARTICLES_SCHEMA = "rosomaha-canonical-articles-runtime/v1"
 MAX_HTTP_BYTES = 25 * 1024 * 1024
@@ -149,7 +149,7 @@ OLD_MODEL_PRICES = {
     "/catalog/rosomaha-pickup-uaz-18": 2_250_000,
     "/catalog/rosomaha-pickup-toyota": 2_450_000,
 }
-CORE_PATHS = ("/", "/catalog", "/articles")
+CORE_PATHS = ("/", "/catalog", "/options", "/articles")
 SEO_SNAPSHOT_PATHS = (*CORE_PATHS, *MODEL_PRICES)
 
 
@@ -2619,7 +2619,7 @@ def validate_recovery_diagnostic(payload: dict[str, Any], baseline: dict[str, An
             or not plain_int(item.get("count")) or not isinstance(releases, list) or len(releases) > 4
             or item.get("count") != len(releases) or item.get("truncated") is not False
             or item.get("exact_receipt_set") is not True or len(releases) != 1
-            or not all(re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-64ba304", release) for release in releases)
+            or not all(re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-538a470", release) for release in releases)
         ):
             raise HelperError("recovery diagnostic label evidence is unsafe")
     if labels["before"] != labels["after"]:
