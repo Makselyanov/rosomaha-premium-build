@@ -330,6 +330,57 @@ class StagingDistSyncTest(unittest.TestCase):
                 with self.assertRaises(self.helper.HelperError):
                     self.helper.load_baseline(path, require_fresh=True)
 
+    def test_read_exact_regular_tolerates_handle_timestamp_drift_when_path_is_stable(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            target = root / "receipt.json"
+            target.write_text('{"status":"ready"}', encoding="utf-8")
+            original_fstat = helper.os.fstat
+            calls = {"count": 0}
+
+            def fake_fstat(fd):
+                stat_result = original_fstat(fd)
+                calls["count"] += 1
+                if calls["count"] != 2:
+                    return stat_result
+                values = list(stat_result)
+                values[8] = values[8] + 1
+                values[9] = values[9] + 1
+                return os.stat_result(values)
+
+            with mock.patch.object(helper.os, "fstat", side_effect=fake_fstat):
+                observed = helper.read_exact_regular(target, root, max_bytes=helper.MAX_RECEIPT_BYTES)
+            self.assertEqual(observed, target.read_bytes())
+
+    def test_load_baseline_retries_transient_changed_during_read(self):
+        remote = snapshot_fixture(self.helper)
+        payload = baseline_wrapper(self.helper, remote)
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        with tempfile.TemporaryDirectory() as raw_dir:
+            report_root = Path(raw_dir).resolve()
+            path = report_root / "20260817T000000Z-test-rosomaha-staging-dist-baseline.json"
+            path.write_bytes(raw)
+            calls = {"count": 0}
+
+            def flaky_read(*_args, **_kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise self.helper.HelperError(
+                        f"bounded regular file changed during read: {path}"
+                    )
+                return raw
+
+            with mock.patch.object(self.helper, "REPORT_ROOT", report_root), mock.patch.object(
+                self.helper, "safe_directory", side_effect=lambda path, _root: Path(path).resolve()
+            ), mock.patch.object(self.helper, "read_exact_regular", side_effect=flaky_read), mock.patch.object(
+                self.helper.time, "sleep", return_value=None
+            ):
+                loaded, resolved, _ = self.helper.load_baseline(path, require_fresh=True)
+            self.assertEqual(calls["count"], 2)
+            self.assertEqual(loaded["baseline_token"], remote["baseline_token"])
+            self.assertEqual(resolved, path)
+
     def test_expired_receipt_blocks_apply_but_remains_recoverable(self):
         remote = snapshot_fixture(self.helper)
         captured = datetime.now(timezone.utc) - timedelta(hours=2)

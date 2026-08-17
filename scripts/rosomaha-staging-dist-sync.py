@@ -131,32 +131,33 @@ def read_exact_regular(path: Path, root: Path, *, max_bytes: int) -> bytes:
     fd = os.open(resolved, flags)
     try:
         before = os.fstat(fd)
-        linked = os.lstat(resolved)
+        linked_before = os.lstat(resolved)
         if (
-            not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(linked.st_mode)
+            not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(linked_before.st_mode)
             or before.st_nlink != 1
-            or (before.st_dev, before.st_ino) != (linked.st_dev, linked.st_ino)
+            or (before.st_dev, before.st_ino) != (linked_before.st_dev, linked_before.st_ino)
             or before.st_size > max_bytes
         ):
             raise HelperError(f"unsafe bounded regular file: {path}")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(64 * 1024, max_bytes + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_bytes:
-                raise HelperError(f"bounded regular file exceeds limit: {path}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(max_bytes + 1)
+        total = len(data)
+        if total > max_bytes:
+            raise HelperError(f"bounded regular file exceeds limit: {path}")
         after = os.fstat(fd)
+        linked_after = os.lstat(resolved)
+        path_identity_stable = (
+            (linked_before.st_dev, linked_before.st_ino, linked_before.st_size, linked_before.st_mtime_ns)
+            == (linked_after.st_dev, linked_after.st_ino, linked_after.st_size, linked_after.st_mtime_ns)
+        )
         if (
             total != before.st_size
-            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (before.st_dev, before.st_ino, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or not path_identity_stable
         ):
             raise HelperError(f"bounded regular file changed during read: {path}")
-        return b"".join(chunks)
+        return data
     finally:
         os.close(fd)
 
@@ -653,7 +654,19 @@ def parse_utc(value: Any, field: str) -> datetime:
 
 def load_baseline(path: Path, *, require_fresh: bool) -> tuple[dict[str, Any], Path, bytes]:
     resolved = safe_baseline_path(path)
-    raw = read_exact_regular(resolved, REPORT_ROOT, max_bytes=MAX_RECEIPT_BYTES)
+    last_error: HelperError | None = None
+    raw: bytes | None = None
+    for attempt in range(3):
+        try:
+            raw = read_exact_regular(resolved, REPORT_ROOT, max_bytes=MAX_RECEIPT_BYTES)
+            break
+        except HelperError as exc:
+            if "bounded regular file changed during read" not in str(exc) or attempt == 2:
+                raise
+            last_error = exc
+            time.sleep(0.2)
+    if raw is None:
+        raise last_error or HelperError("baseline receipt could not be read safely")
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
