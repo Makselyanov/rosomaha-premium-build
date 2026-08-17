@@ -4,7 +4,7 @@ import { ArrowRight, Gauge, PackageOpen, Search, ShieldCheck, SlidersHorizontal,
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { catalogModels } from '@/data/catalog';
-import { productOptions, products, type ProductOption } from '@/data/products';
+import { allProductOptions, productOptions, products, type ProductOption } from '@/data/products';
 import { resolveMediaUrl } from '@/lib/media';
 
 type OptionsCategoryId = 'all' | 'traction' | 'cargo' | 'comfort' | 'expedition';
@@ -66,6 +66,7 @@ const optionCategoryById: Record<string, Exclude<OptionsCategoryId, 'all'>> = {
   'kofr-rear-fabric': 'cargo',
   'kofr-rear-plastic': 'cargo',
   'kofr-rear-triple': 'cargo',
+  'kofr-rear-triple-extreme': 'cargo',
   'frame-tent': 'cargo',
   'winch-stationary': 'traction',
   'winch-removable': 'traction',
@@ -159,7 +160,7 @@ export default function OptionsPage() {
 
   const options = useMemo(
     () =>
-      productOptions.map((option) => ({
+      allProductOptions.map((option) => ({
         ...option,
         category: getOptionCategory(option.id),
       })),
@@ -215,7 +216,7 @@ export default function OptionsPage() {
   );
 
   const compatibleModelsCount = useMemo(
-    () => products.filter((product) => product.options === productOptions).length,
+    () => products.filter((product) => productOptions.every((option) => product.options.includes(option))).length,
     [],
   );
 
@@ -497,7 +498,11 @@ export default function OptionsPage() {
                         <img
                           src={imageUrl}
                           alt={option.name}
-                          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+                          width={option.imageWidth}
+                          height={option.imageHeight}
+                          className={`h-full w-full transition-transform duration-500 group-hover:scale-[1.03] ${
+                            option.imageFit === 'contain' ? 'object-contain' : 'object-cover'
+                          }`}
                           loading="lazy"
                         />
                       ) : (

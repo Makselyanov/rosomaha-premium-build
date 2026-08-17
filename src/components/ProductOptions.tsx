@@ -88,7 +88,12 @@ export default function ProductOptions({
                 <img
                   src={optionImage}
                   alt={option.name}
-                  className="h-36 w-full shrink-0 rounded border border-border/60 bg-secondary/20 object-cover sm:h-16 sm:w-16"
+                  width={option.imageWidth}
+                  height={option.imageHeight}
+                  className={`h-36 w-full shrink-0 rounded border border-border/60 bg-secondary/20 sm:h-16 sm:w-16 ${
+                    option.imageFit === 'contain' ? 'object-contain' : 'object-cover'
+                  }`}
+                  loading="lazy"
                   onError={() => {
                     setBrokenImages((prev) => ({ ...prev, [option.id]: true }));
                   }}

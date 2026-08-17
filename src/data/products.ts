@@ -49,6 +49,9 @@ export interface ProductOption {
   price: number;
   priceFormatted: string;
   image: string;
+  imageFit?: 'cover' | 'contain';
+  imageWidth?: number;
+  imageHeight?: number;
   specs?: Record<string, string>;
 }
 
@@ -484,6 +487,25 @@ export const productOptions: ProductOption[] = [
   },
 ];
 
+export const extremeRearCofferOption: ProductOption = {
+  id: 'kofr-rear-triple-extreme',
+  name: 'Задний кофр, пластиковый трехсекционный ЭКСТРИМ',
+  price: 75000,
+  priceFormatted: '75 000 ₽',
+  image: '/media/options/extreme-three-section-coffer-dimensions.jpg',
+  imageFit: 'contain',
+  imageWidth: 3000,
+  imageHeight: 2636,
+  specs: {
+    'Габаритная длина, мм': '1940',
+    'Габаритная высота, мм': '1067',
+    'Глубина, мм': '351',
+  },
+};
+
+export const extremeProductOptions: ProductOption[] = [...productOptions, extremeRearCofferOption];
+export const allProductOptions: ProductOption[] = [...productOptions, extremeRearCofferOption];
+
 // Базовая комплектация Стандарт ПЛЮС
 const standardPlusEquipment = [
   'Шины Урал (обдирыши 1100х500)',
@@ -719,7 +741,7 @@ export const products: Product[] = [
     ],
     variants: classicVariants,
     colors: productColors,
-    options: productOptions,
+    options: extremeProductOptions,
     specs: {
       length: '3100',
       width: '2250',
@@ -757,7 +779,7 @@ export const products: Product[] = [
     ],
     variants: classicVariants,
     colors: productColors,
-    options: productOptions,
+    options: extremeProductOptions,
     specs: {
       length: '3100',
       width: '2250',
@@ -961,7 +983,7 @@ export const products: Product[] = [
     thumbnails: [modelExtrimePlus],
     variants: classicVariants,
     colors: productColors,
-    options: productOptions,
+    options: extremeProductOptions,
     specs: {
       length: '3200',
       width: '2400',
