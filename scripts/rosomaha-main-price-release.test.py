@@ -68,7 +68,7 @@ def fixture_tree(digest: str) -> dict:
 
 def recovery_diagnostic_payload(token: str = "a" * 64) -> tuple[dict, dict]:
     baseline_sha = "d" * 64
-    release_path = "/var/www/rosomaha/_releases/20260813-144814-prices-538a470"
+    release_path = "/var/www/rosomaha/_releases/20260813-144814-prices-cb77869"
     link = {"valid": True, "symlink": True, "uid": 0, "gid": 33, "dev": 7, "ino": 10}
     current_item = {
         "state": "receipt_release", "matches_receipt": True,
@@ -200,7 +200,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertEqual(helper.AUDIT_LOGIN, "deploy")
         self.assertEqual(helper.APPLY_LOGIN, "root")
         self.assertEqual(helper.ROLES, {"audit": "deploy", "apply": "root"})
-        self.assertEqual(helper.TARGET_COMMIT, "538a470f868a811b0463dc991b2f3ea03cfc460b")
+        self.assertEqual(helper.TARGET_COMMIT, "cb778691d53cc0b92a4f6399c291a1e3d487ee8b")
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
         self.assertIn(
@@ -679,7 +679,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertNotIn("OPERATOR_PATH", upload)
 
     def test_apply_operator_timeout_is_1200_and_rollback_remains_360(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-aaaaaaaaaaaaaaaa"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-aaaaaaaaaaaaaaaa"
         client = object()
         with mock.patch.object(helper, "run_remote", return_value={
             "exit_code": 0, "stdout": '{"status":"released"}\n', "stderr": "",
@@ -807,7 +807,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
                 self.rmdir_calls.append(path)
 
         sftp = FakeSFTP()
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-aaaaaaaaaaaaaaaa"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-aaaaaaaaaaaaaaaa"
         self.assertTrue(helper.cleanup_bundle_sftp(sftp, remote_dir))
         self.assertEqual(
             sftp.removed,
@@ -836,13 +836,13 @@ class MainPriceReleaseV4Test(unittest.TestCase):
                 self.rmdir_called = True
 
         sftp = FakeSFTP()
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-bbbbbbbbbbbbbbbb"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-bbbbbbbbbbbbbbbb"
         self.assertFalse(helper.cleanup_bundle_sftp(sftp, remote_dir, preserve_on_unknown=True))
         self.assertFalse(sftp.remove_called)
         self.assertFalse(sftp.rmdir_called)
 
     def test_cleanup_bundle_sftp_preserves_non_root_owned_partial(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-eeeeeeeeeeeeeeee"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-eeeeeeeeeeeeeeee"
 
         class FakeSFTP:
             def __init__(self) -> None:
@@ -867,7 +867,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertFalse(sftp.remove_called)
 
     def test_cleanup_bundle_sftp_preserves_unexpected_file_without_deleting_anything(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-cccccccccccccccc"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-cccccccccccccccc"
 
         class FakeSFTP:
             def __init__(self) -> None:
@@ -892,7 +892,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertFalse(sftp.remove_called)
 
     def test_cleanup_bundle_sftp_treats_missing_fixed_directory_as_clean(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-dddddddddddddddd"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-dddddddddddddddd"
 
         class FakeSFTP:
             def lstat(self, _path: str):
@@ -901,7 +901,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertTrue(helper.cleanup_bundle_sftp(FakeSFTP(), remote_dir))
 
     def test_cleanup_bundle_sftp_accepts_exact_progress_and_removes_it(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-abababababababab"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-abababababababab"
 
         class FakeSFTP:
             def __init__(self) -> None:
@@ -928,7 +928,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertEqual(sftp.removed, [f"{remote_dir}/apply-progress.json"])
 
     def test_cleanup_bundle_sftp_preserves_unsafe_progress_topology_or_size(self) -> None:
-        remote_dir = "/tmp/rosomaha-main-price-release-538a470-acacacacacacacac"
+        remote_dir = "/tmp/rosomaha-main-price-release-cb77869-acacacacacacacac"
 
         class FakeSFTP:
             def __init__(self, *, mode=0o600, uid=0, size=300) -> None:
@@ -1734,7 +1734,7 @@ Allow: /
         directory = namespace["stat"].S_IFDIR
         before = private_directory_stat(directory | 0o700, ino=21)
         after = private_directory_stat(directory | 0o755, ino=21)
-        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-538a470"
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-cb77869"
         with mock.patch.object(namespace["os"], "open", return_value=91) as opened, \
                 mock.patch.object(namespace["os"], "fstat", side_effect=[before, after]), \
                 mock.patch.object(namespace["os"], "lstat", side_effect=[before, after]), \
@@ -1758,7 +1758,7 @@ Allow: /
     def test_release_root_mode_repair_rejects_wrong_mode_without_chmod(self) -> None:
         namespace = operator_namespace()
         wrong = private_directory_stat(namespace["stat"].S_IFDIR | 0o755, ino=22)
-        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-538a470"
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-cb77869"
         with mock.patch.object(namespace["os"], "open", return_value=92), \
                 mock.patch.object(namespace["os"], "fstat", return_value=wrong), \
                 mock.patch.object(namespace["os"], "lstat", return_value=wrong), \
@@ -1774,7 +1774,7 @@ Allow: /
         directory = namespace["stat"].S_IFDIR
         before = private_directory_stat(directory | 0o700, ino=23)
         after = private_directory_stat(directory | 0o755, ino=24)
-        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-538a470"
+        exact_current = "/var/www/rosomaha/_releases/20260813-144814-prices-cb77869"
         with mock.patch.object(namespace["os"], "open", return_value=93), \
                 mock.patch.object(namespace["os"], "fstat", side_effect=[before, after]), \
                 mock.patch.object(namespace["os"], "lstat", side_effect=[before, after]), \
@@ -2122,7 +2122,7 @@ Allow: /
 
     def test_remote_bundle_path_is_fixed_to_commit_and_token(self) -> None:
         token = "a" * 64
-        self.assertEqual(helper.remote_bundle_path(token), "/tmp/rosomaha-main-price-release-538a470-aaaaaaaaaaaaaaaa")
+        self.assertEqual(helper.remote_bundle_path(token), "/tmp/rosomaha-main-price-release-cb77869-aaaaaaaaaaaaaaaa")
         with self.assertRaises(helper.HelperError):
             helper.remote_bundle_path("../bad")
 
@@ -2164,7 +2164,7 @@ Allow: /
                 "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
             }
 
-        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-538a470"
+        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-cb77869"
         receipt = {"new_release": new_release}
         self.assertEqual(helper.classify_recovery_state(audit(new_release, "new-tree", [new_release]), baseline, receipt), "released_candidate")
         self.assertEqual(helper.classify_recovery_state(audit(baseline["current_release"], "old-tree"), baseline, None), "original")
@@ -2191,13 +2191,13 @@ Allow: /
             "release_scripts": baseline["release_scripts"],
             "articles": {name: {"valid": True, "sha256": "article"} for name in ("canonical", "current", "live")},
         }
-        residual = dict(base_audit, existing_label_releases=["/var/www/rosomaha/_releases/partial-prices-538a470"])
+        residual = dict(base_audit, existing_label_releases=["/var/www/rosomaha/_releases/partial-prices-cb77869"])
         self.assertEqual(helper.classify_recovery_state(residual, baseline, None), "unexpected")
-        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-538a470"
+        new_release = "/var/www/rosomaha/_releases/20260812-120000-prices-cb77869"
         released = dict(
             base_audit, current_release=new_release,
             current_tree={"valid": True, "digest": "new-tree"},
-            existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-538a470"],
+            existing_label_releases=[new_release, "/var/www/rosomaha/_releases/extra-prices-cb77869"],
         )
         self.assertEqual(helper.classify_recovery_state(released, baseline, {"new_release": new_release}), "unexpected")
 
@@ -2238,7 +2238,7 @@ Allow: /
             helper, "public_verify", return_value={"stage": "old", "valid": True},
         ), mock.patch.object(helper, "cleanup_bundle", return_value=False):
             payload, success = helper.recover_ambiguous_apply(
-                "/tmp/rosomaha-main-price-release-538a470-cccccccccccccccc",
+                "/tmp/rosomaha-main-price-release-cb77869-cccccccccccccccc",
                 baseline,
                 RuntimeError("boom"),
                 b"frozen",

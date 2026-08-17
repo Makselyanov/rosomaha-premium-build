@@ -56,8 +56,8 @@ IDENTITY_FILE = Path.home() / ".ssh/id_ed25519"
 APP_ROOT = "/var/www/rosomaha"
 REMOTE_CANONICAL_ARTICLES = f"{APP_ROOT}/public/api/articles.json"
 REMOTE_ARTICLES_CZ = f"{APP_ROOT}/src/data/articles-cz"
-TARGET_COMMIT = "538a470f868a811b0463dc991b2f3ea03cfc460b"
-RELEASE_LABEL = "prices-538a470"
+TARGET_COMMIT = "cb778691d53cc0b92a4f6399c291a1e3d487ee8b"
+RELEASE_LABEL = "prices-cb77869"
 BASE_URL = "https://xn--80aa8ahaki9a.site"
 
 EXPECTED_ARTICLE_COUNT = 61
@@ -2619,7 +2619,7 @@ def validate_recovery_diagnostic(payload: dict[str, Any], baseline: dict[str, An
             or not plain_int(item.get("count")) or not isinstance(releases, list) or len(releases) > 4
             or item.get("count") != len(releases) or item.get("truncated") is not False
             or item.get("exact_receipt_set") is not True or len(releases) != 1
-            or not all(re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-538a470", release) for release in releases)
+            or not all(re.fullmatch(r"/var/www/rosomaha/_releases/[0-9]{8}-[0-9]{6}-prices-cb77869", release) for release in releases)
         ):
             raise HelperError("recovery diagnostic label evidence is unsafe")
     if labels["before"] != labels["after"]:
