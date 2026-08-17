@@ -201,6 +201,7 @@ class MainPriceReleaseV4Test(unittest.TestCase):
         self.assertEqual(helper.APPLY_LOGIN, "root")
         self.assertEqual(helper.ROLES, {"audit": "deploy", "apply": "root"})
         self.assertEqual(helper.TARGET_COMMIT, "cb778691d53cc0b92a4f6399c291a1e3d487ee8b")
+        self.assertEqual(helper.EXPECTED_PRERENDER_ROUTE_COUNT, 96)
         self.assertEqual(helper.EXPECTED_PUBLIC_KEY_FINGERPRINT, "SHA256:Bvnk8M0TiB4Ovg17j/WvixBPxsjeWuiN6zcfFWa40Uo")
         self.assertEqual(helper.IDENTITY_FILE.name, "id_ed25519")
         self.assertIn(

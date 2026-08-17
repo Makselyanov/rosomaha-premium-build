@@ -61,7 +61,7 @@ RELEASE_LABEL = "prices-cb77869"
 BASE_URL = "https://xn--80aa8ahaki9a.site"
 
 EXPECTED_ARTICLE_COUNT = 61
-EXPECTED_PRERENDER_ROUTE_COUNT = 91
+EXPECTED_PRERENDER_ROUTE_COUNT = 96
 RUNTIME_ARTICLES_MANIFEST = "api/articles-runtime-manifest.json"
 RUNTIME_ARTICLES_SCHEMA = "rosomaha-canonical-articles-runtime/v1"
 MAX_HTTP_BYTES = 25 * 1024 * 1024
