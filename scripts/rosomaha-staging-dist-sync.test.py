@@ -385,9 +385,21 @@ class StagingDistSyncTest(unittest.TestCase):
         recover_body = source[source.index("def recover_sync"):source.index("def emit")]
         lock_index = recover_body.index("fcntl.flock")
         normalize_index = recover_body.index("normalize_legacy_recovery_state_root(paths)")
+        required_root_index = recover_body.index('if legacy_state_required and not state_root["exists"]')
         self.assertLess(lock_index, normalize_index)
+        self.assertLess(normalize_index, required_root_index)
         self.assertNotIn("normalize_legacy_recovery_state_root", recover_body[:lock_index])
         self.assertNotIn("validate_state_root(paths", recover_body[:lock_index])
+
+    def test_exact_legacy_recovery_tokens_require_their_bound_epoch(self):
+        contracts = self.operator["LEGACY_SETGID_RECOVERY_EPOCHS"]
+        self.assertEqual(len(contracts), 2)
+        requires_state = self.operator["exact_legacy_recovery_state_required"]
+        for token, epoch in contracts.items():
+            self.assertTrue(requires_state(token, epoch))
+            with self.assertRaises(self.operator["SyncError"]):
+                requires_state(token, epoch + 1)
+        self.assertFalse(requires_state("f" * 64, 1786972429))
 
     def test_manifest_diff_is_exact_and_directional(self):
         current = {
@@ -630,6 +642,11 @@ class StagingDistSyncTest(unittest.TestCase):
                     allow_recovery_operator_compatibility=True,
                 )
                 self.assertEqual(loaded["operator_sha256"], "3" * 64)
+
+    def test_invoke_bound_operation_opens_legacy_operator_gate_only_for_recover(self):
+        source = HELPER_PATH.read_text(encoding="utf-8")
+        invoke_body = source[source.index("def invoke_bound_operation"):source.index("def argument_parser")]
+        self.assertIn('allow_recovery_operator_compatibility=mode == "recover"', invoke_body)
 
     def test_remote_operator_also_rejects_expired_apply_epoch(self):
         self.operator["AUDIT_EPOCH_RAW"] = str(int(time.time()) - self.operator["AUDIT_TTL_SECONDS"] - 1)

@@ -57,6 +57,10 @@ AUDIT_TTL_SECONDS = 30 * 60
 FIXED_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 FIXED_EPOCH_PATTERN = re.compile(r"[0-9]{10}")
 SAFE_STATE_GIDS = {0, 33}
+LEGACY_SETGID_RECOVERY_EPOCHS = {
+    "4ff66bb7a6f5c1c826cf4d5da05337b279fc1e3e7db301528f858f996e24baaf": 1786972429,
+    "cea04a069c7ebc859d964378363b0e12fc5fb1cec41d6494eb61c5a6395bf308": 1786972483,
+}
 
 
 class SyncError(RuntimeError):
@@ -784,6 +788,15 @@ def normalize_legacy_recovery_state_root(paths):
     return result
 
 
+def exact_legacy_recovery_state_required(token, audit_epoch):
+    expected_epoch = LEGACY_SETGID_RECOVERY_EPOCHS.get(token)
+    if expected_epoch is None:
+        return False
+    if audit_epoch != expected_epoch:
+        raise SyncError("legacy receipt-bound state root epoch mismatch")
+    return True
+
+
 def require_exact_baseline(snapshot, token, audit_epoch, *, require_mismatch):
     if receipt_bound_token(snapshot, audit_epoch) != token:
         raise SyncError("server state drifted from the receipt-bound baseline")
@@ -1019,9 +1032,12 @@ def recover_sync(token, audit_epoch):
     if not identity_for_mode("recover").get("valid"):
         raise SyncError("recover requires exact root identity")
     paths = token_paths(token)
+    legacy_state_required = exact_legacy_recovery_state_required(token, audit_epoch)
     with open_shared_lock() as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         state_root = normalize_legacy_recovery_state_root(paths)
+        if legacy_state_required and not state_root["exists"]:
+            raise SyncError("exact legacy receipt-bound state root is absent")
         # The current release, canonical articles, live articles, articles-cz,
         # scripts and symlink must still equal the receipt-bound material.  Dist
         # and the deterministic recovery paths are classified separately.

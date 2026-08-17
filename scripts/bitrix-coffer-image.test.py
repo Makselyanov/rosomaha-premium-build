@@ -203,11 +203,16 @@ def public_baseline(state: dict[str, object] | None = None) -> dict[str, object]
         ],
         "visible_text": {"bytes": 128, "sha256": "9" * 64},
         "structured_data": {
-            "document_count": 1,
+            "format": "schema.org-microdata",
             "product_count": 1,
+            "offer_count": 1,
+            "product_names": [MODULE.ELEMENT_NAME],
+            "product_urls": [MODULE.OPTION_URL],
             "product_images": [
                 MODULE.PUBLIC_ORIGIN + state["detail_picture"]["relative_path"]
             ],
+            "offer_prices": ["75000"],
+            "offer_currencies": ["RUB"],
             "masked_sha256": "8" * 64,
         },
     }
@@ -243,11 +248,16 @@ def public_baseline(state: dict[str, object] | None = None) -> dict[str, object]
                 "itemprop_image": [f"{MODULE.PUBLIC_ORIGIN}/upload/model-{model_id}.jpg"],
                 "visible_text": {"bytes": 256, "sha256": f"{model_id % 10}" * 64},
                 "structured_data": {
-                    "document_count": 1,
+                    "format": "schema.org-microdata",
                     "product_count": 1,
+                    "offer_count": 1,
+                    "product_names": [f"Model {model_id}"],
+                    "product_urls": [url],
                     "product_images": [
                         f"{MODULE.PUBLIC_ORIGIN}/upload/model-{model_id}.jpg"
                     ],
+                    "offer_prices": ["1000000"],
+                    "offer_currencies": ["RUB"],
                     "masked_sha256": f"{(model_id + 1) % 10}" * 64,
                 },
             },
@@ -495,7 +505,7 @@ class StaticPhpContractTests(unittest.TestCase):
         python_source = SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn('"visible_text"', python_source)
         self.assertIn('"structured_data"', python_source)
-        self.assertIn("Product JSON-LD contract", python_source)
+        self.assertIn("Product microdata contract", python_source)
 
     def test_only_two_photo_writers_and_one_detail_writer(self) -> None:
         self.assertEqual(self.source.count("CIBlockElement::SetPropertyValuesEx("), 2)
@@ -744,13 +754,19 @@ class PublicContractTests(unittest.TestCase):
         <link rel="canonical" href="{MODULE.OPTION_URL}">
         <meta name="description" content="Описание">
         <meta property="og:image" content="/upload/preview.jpg">
+        </head><body><div itemscope itemtype="http://schema.org/Product">
+        <h1>{MODULE.ELEMENT_NAME}</h1>
+        <div itemprop="offers" itemscope itemtype="http://schema.org/Offer">
+          <meta itemprop="price" content="75000">
+          <meta itemprop="priceCurrency" content="RUB">
+        </div>
+        <meta itemprop="name" content="{MODULE.ELEMENT_NAME}">
+        <link itemprop="url" href="{MODULE.OPTION_URL}">
         <link href="/upload/first.jpg" itemprop="image">
-        <script type="application/ld+json">{{"@type":"Product","name":"Кофр","image":"/upload/first.jpg"}}</script>
-        </head><body><h1>{MODULE.ELEMENT_NAME}</h1>
         <a href="/upload/first.jpg" data-fancybox="gallery"><img src="/upload/thumb.jpg"></a>
         <span onclick="priceCalculator.toggleOption(this)" data-product-id="952"
           data-sum="75000" data-name="{MODULE.ELEMENT_NAME}" data-row-id="row"></span>
-        </body></html>
+        </div></body></html>
         """
         parser = MODULE.ProductPageParser()
         parser.feed(html)
@@ -762,25 +778,62 @@ class PublicContractTests(unittest.TestCase):
         self.assertEqual(parser.h1, MODULE.ELEMENT_NAME)
         self.assertIn(MODULE.ELEMENT_NAME, parser.visible_text)
         structured = MODULE.structured_data_snapshot(
-            parser.json_ld_blocks, base_url=MODULE.OPTION_URL
+            parser, base_url=MODULE.OPTION_URL
         )
         self.assertEqual(structured["product_images"], [f"{MODULE.PUBLIC_ORIGIN}/upload/first.jpg"])
+        self.assertEqual(structured["product_names"], [MODULE.ELEMENT_NAME])
+        self.assertEqual(structured["offer_prices"], ["75000"])
 
-    def test_jsonld_masks_only_product_image(self) -> None:
-        first = MODULE.structured_data_snapshot(
-            ['{"@context":"https://schema.org","@type":"Product","name":"Кофр","offers":{"price":"75000"},"image":"/upload/a.jpg"}'],
-            base_url=MODULE.OPTION_URL,
-        )
-        second = MODULE.structured_data_snapshot(
-            ['{"@context":"https://schema.org","@type":"Product","name":"Кофр","offers":{"price":"75000"},"image":"/upload/b.jpg"}'],
-            base_url=MODULE.OPTION_URL,
-        )
-        commercial_drift = MODULE.structured_data_snapshot(
-            ['{"@context":"https://schema.org","@type":"Product","name":"Кофр","offers":{"price":"76000"},"image":"/upload/b.jpg"}'],
-            base_url=MODULE.OPTION_URL,
-        )
+    def test_microdata_masks_only_product_image(self) -> None:
+        def snapshot(image: str, price: str) -> dict[str, object]:
+            parser = MODULE.ProductPageParser()
+            parser.feed(f"""
+              <div itemscope itemtype="http://schema.org/Product">
+                <div itemprop="offers" itemscope itemtype="http://schema.org/Offer">
+                  <meta itemprop="price" content="{price}">
+                  <meta itemprop="priceCurrency" content="RUB">
+                </div>
+                <meta itemprop="name" content="{MODULE.ELEMENT_NAME}">
+                <link itemprop="url" href="{MODULE.OPTION_URL}">
+                <link itemprop="image" href="{image}">
+              </div>
+            """)
+            parser.close()
+            return MODULE.structured_data_snapshot(parser, base_url=MODULE.OPTION_URL)
+
+        first = snapshot("/upload/a.jpg", "75000")
+        second = snapshot("/upload/b.jpg", "75000")
+        commercial_drift = snapshot("/upload/b.jpg", "76000")
         self.assertEqual(first["masked_sha256"], second["masked_sha256"])
         self.assertNotEqual(second["masked_sha256"], commercial_drift["masked_sha256"])
+
+    def test_microdata_rejects_missing_or_duplicate_product_offer(self) -> None:
+        cases = (
+            "<div></div>",
+            """
+              <div itemscope itemtype="http://schema.org/Product">
+                <meta itemprop="name" content="x"><link itemprop="url" href="/x/">
+                <link itemprop="image" href="/x.jpg">
+              </div>
+            """,
+            """
+              <div itemscope itemtype="http://schema.org/Product">
+                <div itemprop="offers" itemscope itemtype="http://schema.org/Offer">
+                  <meta itemprop="price" content="1"><meta itemprop="priceCurrency" content="RUB">
+                </div>
+                <div itemprop="offers" itemscope itemtype="http://schema.org/Offer"></div>
+                <meta itemprop="name" content="x"><link itemprop="url" href="/x/">
+                <link itemprop="image" href="/x.jpg">
+              </div>
+            """,
+        )
+        for html in cases:
+            parser = MODULE.ProductPageParser()
+            parser.feed(html)
+            parser.close()
+            with self.subTest(html=html[:40]):
+                with self.assertRaises(MODULE.PublicGateError):
+                    MODULE.structured_data_snapshot(parser, base_url=MODULE.OPTION_URL)
 
     def test_database_public_parity_normal(self) -> None:
         state = sample_state()
@@ -833,11 +886,11 @@ class PublicContractTests(unittest.TestCase):
                 with self.assertRaises(MODULE.PublicGateError):
                     MODULE.verify_public_after(baseline, after, payload)
 
-    def test_candidate_rejects_visible_content_or_jsonld_drift(self) -> None:
+    def test_candidate_rejects_visible_content_or_microdata_drift(self) -> None:
         before = sample_state()
         baseline = public_baseline(before)
         payload = MODULE.build_operation_payload(before, source_evidence())
-        for mutation in ("visible", "jsonld"):
+        for mutation in ("visible", "microdata"):
             after = public_baseline(applied_state(before))
             attach_thumbnail_clone_proof(payload, after)
             if mutation == "visible":

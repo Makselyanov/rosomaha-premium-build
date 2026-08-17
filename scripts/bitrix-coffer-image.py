@@ -837,6 +837,11 @@ def execute_remote(
 
 
 class ProductPageParser(HTMLParser):
+    VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.canonical: list[str] = []
@@ -851,12 +856,20 @@ class ProductPageParser(HTMLParser):
         self._in_h1 = 0
         self._in_body = 0
         self._ignored_depth = 0
-        self._json_ld_parts: list[str] | None = None
         self._gallery_anchor_depth = 0
+        self._product_depth = 0
         self._title_parts: list[str] = []
         self._h1_parts: list[str] = []
         self._visible_parts: list[str] = []
-        self.json_ld_blocks: list[str] = []
+        self.product_scope_count = 0
+        self.offer_scope_count = 0
+        self.product_itemtypes: list[str] = []
+        self.offer_itemtypes: list[str] = []
+        self.product_names: list[str] = []
+        self.product_urls: list[str] = []
+        self.product_images: list[str] = []
+        self.offer_prices: list[str] = []
+        self.offer_currencies: list[str] = []
 
     @staticmethod
     def attrs(values: list[tuple[str, str | None]]) -> dict[str, str]:
@@ -865,16 +878,52 @@ class ProductPageParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = self.attrs(attrs)
         tag = tag.casefold()
+        itemtype = values.get("itemtype", "")
+        itemtype_folded = itemtype.casefold().rstrip("/")
+        is_product_scope = (
+            "itemscope" in values
+            and itemtype_folded in {
+                "http://schema.org/product", "https://schema.org/product"
+            }
+        )
+        if is_product_scope:
+            self.product_scope_count += 1
+            self.product_itemtypes.append(itemtype)
+            if self._product_depth == 0:
+                self._product_depth = 1
+            elif tag not in self.VOID_TAGS:
+                self._product_depth += 1
+        elif self._product_depth > 0 and tag not in self.VOID_TAGS:
+            self._product_depth += 1
+
+        if self._product_depth > 0:
+            if (
+                "itemscope" in values
+                and itemtype_folded in {
+                    "http://schema.org/offer", "https://schema.org/offer"
+                }
+            ):
+                self.offer_scope_count += 1
+                self.offer_itemtypes.append(itemtype)
+            itemprops = {
+                item.casefold() for item in values.get("itemprop", "").split()
+            }
+            if "name" in itemprops and values.get("content"):
+                self.product_names.append(values["content"])
+            if "url" in itemprops and values.get("href"):
+                self.product_urls.append(values["href"])
+            if "image" in itemprops:
+                image = values.get("href") or values.get("content")
+                if image:
+                    self.product_images.append(image)
+            if "price" in itemprops and values.get("content"):
+                self.offer_prices.append(values["content"])
+            if "pricecurrency" in itemprops and values.get("content"):
+                self.offer_currencies.append(values["content"])
         if tag == "body":
             self._in_body += 1
         if tag in {"script", "style", "noscript", "template"}:
             self._ignored_depth += 1
-            if (
-                tag == "script"
-                and values.get("type", "").split(";", 1)[0].strip().casefold()
-                == "application/ld+json"
-            ):
-                self._json_ld_parts = []
             return
         if self._ignored_depth:
             return
@@ -908,10 +957,9 @@ class ProductPageParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
+        if self._product_depth > 0 and tag not in self.VOID_TAGS:
+            self._product_depth -= 1
         if tag in {"script", "style", "noscript", "template"}:
-            if tag == "script" and self._json_ld_parts is not None:
-                self.json_ld_blocks.append("".join(self._json_ld_parts))
-                self._json_ld_parts = None
             if self._ignored_depth > 0:
                 self._ignored_depth -= 1
             return
@@ -927,8 +975,6 @@ class ProductPageParser(HTMLParser):
             self._in_body -= 1
 
     def handle_data(self, data: str) -> None:
-        if self._json_ld_parts is not None:
-            self._json_ld_parts.append(data)
         if self._ignored_depth:
             return
         if self._in_title:
@@ -952,67 +998,43 @@ class ProductPageParser(HTMLParser):
 
 
 def structured_data_snapshot(
-    blocks: Sequence[str],
+    parser: ProductPageParser,
     *,
     base_url: str,
 ) -> dict[str, object]:
-    if not blocks or len(blocks) > 64:
-        raise PublicGateError("JSON-LD blocks отсутствуют или вышли за лимит")
-    documents: list[object] = []
-    product_images: list[str] = []
-    product_count = 0
-
-    def image_urls(value: object) -> list[str]:
-        if isinstance(value, str):
-            return [urljoin(base_url, value)]
-        if isinstance(value, list):
-            return [url for item in value for url in image_urls(item)]
-        if isinstance(value, dict):
-            urls: list[str] = []
-            for key in ("url", "contentUrl"):
-                if key in value:
-                    urls.extend(image_urls(value[key]))
-            return urls
-        return []
-
-    def mask(value: object) -> object:
-        nonlocal product_count
-        if isinstance(value, list):
-            return [mask(item) for item in value]
-        if not isinstance(value, dict):
-            return value
-        raw_type = value.get("@type")
-        types = raw_type if isinstance(raw_type, list) else [raw_type]
-        is_product = any(
-            isinstance(item, str) and item.casefold() == "product"
-            for item in types
-        )
-        result: dict[str, object] = {}
-        if is_product:
-            product_count += 1
-        for key, item in value.items():
-            if is_product and key == "image":
-                product_images.extend(image_urls(item))
-                result[key] = "__ROSOMAHA_PRODUCT_IMAGE__"
-            else:
-                result[key] = mask(item)
-        return result
-
-    for raw in blocks:
-        if not raw.strip():
-            raise PublicGateError("JSON-LD block пуст")
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise PublicGateError("JSON-LD повреждён") from exc
-        documents.append(mask(value))
-    if product_count != 1 or not product_images:
-        raise PublicGateError("Нужен ровно один JSON-LD Product с image")
+    product_images = [urljoin(base_url, item) for item in parser.product_images]
+    product_urls = [urljoin(base_url, item) for item in parser.product_urls]
+    if (
+        parser.product_scope_count != 1
+        or parser.offer_scope_count != 1
+        or parser.product_itemtypes != ["http://schema.org/Product"]
+        or parser.offer_itemtypes != ["http://schema.org/Offer"]
+        or len(parser.product_names) != 1
+        or len(product_urls) != 1
+        or len(product_images) != 1
+        or len(parser.offer_prices) != 1
+        or len(parser.offer_currencies) != 1
+    ):
+        raise PublicGateError("Product microdata отсутствует, неоднозначна или повреждена")
+    stable = {
+        "product_itemtypes": parser.product_itemtypes,
+        "offer_itemtypes": parser.offer_itemtypes,
+        "product_names": parser.product_names,
+        "product_urls": product_urls,
+        "product_images": ["__ROSOMAHA_PRODUCT_IMAGE__"],
+        "offer_prices": parser.offer_prices,
+        "offer_currencies": parser.offer_currencies,
+    }
     return {
-        "document_count": len(documents),
-        "product_count": product_count,
+        "format": "schema.org-microdata",
+        "product_count": parser.product_scope_count,
+        "offer_count": parser.offer_scope_count,
+        "product_names": parser.product_names,
+        "product_urls": product_urls,
         "product_images": product_images,
-        "masked_sha256": evidence_sha256(documents),
+        "offer_prices": parser.offer_prices,
+        "offer_currencies": parser.offer_currencies,
+        "masked_sha256": evidence_sha256(stable),
     }
 
 
@@ -1062,7 +1084,7 @@ def parse_public_page(url: str) -> dict[str, object]:
     visible_bytes = parser.visible_text.encode("utf-8")
     if not visible_bytes:
         raise PublicGateError("Public visible content пуст")
-    structured_data = structured_data_snapshot(parser.json_ld_blocks, base_url=url)
+    structured_data = structured_data_snapshot(parser, base_url=url)
     return {
         "status": 200,
         "final_url": url,
@@ -1119,9 +1141,15 @@ def public_audit() -> dict[str, object]:
     if option["itemprop_image"] != [gallery_urls[0]]:
         raise PublicGateError("itemprop=image не совпал с первым gallery image")
     structured = option["structured_data"]
-    if structured["product_images"] != [gallery_urls[0]]:
+    if (
+        structured["product_images"] != [gallery_urls[0]]
+        or structured["product_names"] != [ELEMENT_NAME]
+        or structured["product_urls"] != [OPTION_URL]
+        or structured["offer_prices"] != ["75000"]
+        or structured["offer_currencies"] != ["RUB"]
+    ):
         raise PublicGateError(
-            "JSON-LD Product.image должен точно совпасть с первым gallery image"
+            "Product microdata не совпала с именем, URL, ценой или первым фото"
         )
     thumbnail = public_image_snapshot(thumbnails[0]) if thumbnails else None
     if (
@@ -1662,16 +1690,18 @@ def verify_public_after(
     if (
         not isinstance(before_structured, dict)
         or not isinstance(after_structured, dict)
-        or after_structured.get("document_count")
-            != before_structured.get("document_count")
+        or after_structured.get("format") != "schema.org-microdata"
+        or after_structured.get("format") != before_structured.get("format")
         or after_structured.get("product_count")
             != before_structured.get("product_count")
+        or after_structured.get("offer_count")
+            != before_structured.get("offer_count")
         or after_structured.get("masked_sha256")
             != before_structured.get("masked_sha256")
         or not isinstance(after_structured.get("product_images"), list)
         or after_structured["product_images"] != [after_gallery[0]["url"]]
     ):
-        raise PublicGateError("Product JSON-LD contract изменился")
+        raise PublicGateError("Product microdata contract изменился")
     before_thumbnail = baseline.get("first_thumbnail")
     after_thumbnail = after.get("first_thumbnail")
     thumbnail_proof = payload["expected"].get("thumbnail_clone_proof")
@@ -1736,16 +1766,18 @@ def verify_public_rollback(
     if (
         not isinstance(baseline_structured, dict)
         or not isinstance(after_structured, dict)
-        or after_structured.get("document_count")
-            != baseline_structured.get("document_count")
+        or after_structured.get("format") != "schema.org-microdata"
+        or after_structured.get("format") != baseline_structured.get("format")
         or after_structured.get("product_count")
             != baseline_structured.get("product_count")
+        or after_structured.get("offer_count")
+            != baseline_structured.get("offer_count")
         or after_structured.get("masked_sha256")
             != baseline_structured.get("masked_sha256")
         or not isinstance(after_structured.get("product_images"), list)
         or after_structured["product_images"] != [after_gallery[0]["url"]]
     ):
-        raise PublicGateError("Rollback Product JSON-LD contract изменился")
+        raise PublicGateError("Rollback Product microdata contract изменился")
     baseline_thumbnail = baseline.get("first_thumbnail")
     after_thumbnail = after.get("first_thumbnail")
     if (
