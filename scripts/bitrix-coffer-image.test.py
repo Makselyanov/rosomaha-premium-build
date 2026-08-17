@@ -354,6 +354,99 @@ class SourceContractTests(unittest.TestCase):
             MODULE.jpeg_dimensions(b"\xff\xd8\xff\xc0\x00")
 
 
+class CredentialTests(unittest.TestCase):
+    PLACEHOLDER = "synthetic-test-placeholder"
+
+    @staticmethod
+    def write_source(directory: str, text: str) -> Path:
+        path = Path(directory) / "project-credentials.txt"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_exact_legacy_source_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                (
+                    "https://cp.beget.com/ логин "
+                    f"{MODULE.EXPECTED_LOGIN} пароль {self.PLACEHOLDER}\n"
+                ),
+            )
+            login, password = MODULE.load_credentials(environ={}, env_path=path)
+        self.assertEqual(login, MODULE.EXPECTED_LOGIN)
+        self.assertEqual(password, self.PLACEHOLDER)
+
+    def test_exact_standard_pair_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                (
+                    f"BEGET_LOGIN={MODULE.EXPECTED_LOGIN}\n"
+                    f"BEGET_PASSWORD={self.PLACEHOLDER}\n"
+                ),
+            )
+            login, password = MODULE.load_credentials(environ={}, env_path=path)
+        self.assertEqual(login, MODULE.EXPECTED_LOGIN)
+        self.assertEqual(password, self.PLACEHOLDER)
+
+    def test_mixed_standard_and_legacy_sources_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                (
+                    f"BEGET_LOGIN={MODULE.EXPECTED_LOGIN}\n"
+                    f"BEGET_PASSWORD={self.PLACEHOLDER}\n"
+                    "https://cp.beget.com/ логин ignored пароль ignored\n"
+                ),
+            )
+            with self.assertRaises(MODULE.CredentialError):
+                MODULE.load_credentials(environ={}, env_path=path)
+
+    def test_duplicate_standard_assignment_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                (
+                    f"BEGET_LOGIN={MODULE.EXPECTED_LOGIN}\n"
+                    f"BEGET_LOGIN={MODULE.EXPECTED_LOGIN}\n"
+                    f"BEGET_PASSWORD={self.PLACEHOLDER}\n"
+                ),
+            )
+            with self.assertRaises(MODULE.CredentialError):
+                MODULE.load_credentials(environ={}, env_path=path)
+
+    def test_duplicate_legacy_source_fails(self) -> None:
+        legacy = (
+            "https://cp.beget.com/ логин "
+            f"{MODULE.EXPECTED_LOGIN} пароль {self.PLACEHOLDER}\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(directory, legacy + legacy)
+            with self.assertRaises(MODULE.CredentialError):
+                MODULE.load_credentials(environ={}, env_path=path)
+
+    def test_incomplete_standard_pair_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                f"BEGET_LOGIN={MODULE.EXPECTED_LOGIN}\n",
+            )
+            with self.assertRaises(MODULE.CredentialError):
+                MODULE.load_credentials(environ={}, env_path=path)
+
+    def test_unexpected_account_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_source(
+                directory,
+                (
+                    "https://cp.beget.com/ логин unpinned-account "
+                    f"пароль {self.PLACEHOLDER}\n"
+                ),
+            )
+            with self.assertRaises(MODULE.CredentialError):
+                MODULE.load_credentials(environ={}, env_path=path)
+
+
 class StaticPhpContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

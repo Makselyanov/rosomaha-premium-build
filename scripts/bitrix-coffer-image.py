@@ -261,6 +261,33 @@ def _parse_env_value(raw: str) -> str:
     return value
 
 
+def _credentials_from_text(text: str) -> tuple[str, str]:
+    matches: dict[str, list[str]] = {"BEGET_LOGIN": [], "BEGET_PASSWORD": []}
+    assignment = re.compile(
+        r"^\s*(?:export\s+)?(BEGET_LOGIN|BEGET_PASSWORD)\s*=\s*(.*?)\s*$"
+    )
+    for line in text.splitlines():
+        match = assignment.fullmatch(line)
+        if match:
+            matches[match.group(1)].append(match.group(2))
+    standard_seen = any(matches.values())
+    legacy = re.findall(
+        r"https://cp\.beget\.com/\s+логин\s+(\S+)\s+пароль\s+(\S+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if standard_seen:
+        if legacy or any(len(matches[key]) != 1 for key in matches):
+            raise CredentialError("Проектные учётные данные Beget неоднозначны")
+        return (
+            _parse_env_value(matches["BEGET_LOGIN"][0]),
+            _parse_env_value(matches["BEGET_PASSWORD"][0]),
+        )
+    if len(legacy) != 1:
+        raise CredentialError("Учётные данные Beget не найдены ровно один раз")
+    return _parse_env_value(legacy[0][0]), _parse_env_value(legacy[0][1])
+
+
 def load_credentials(
     *,
     environ: Mapping[str, str] | None = None,
@@ -276,17 +303,9 @@ def load_credentials(
     else:
         if not env_path.is_file():
             raise CredentialError("Файл проектных учётных данных отсутствует")
-        matches: dict[str, list[str]] = {key: [] for key in keys}
-        pattern = re.compile(
-            r"^\s*(?:export\s+)?(BEGET_LOGIN|BEGET_PASSWORD)\s*=\s*(.*?)\s*$"
+        login, password = _credentials_from_text(
+            env_path.read_text(encoding="utf-8-sig")
         )
-        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
-            match = pattern.fullmatch(line)
-            if match:
-                matches[match.group(1)].append(match.group(2))
-        if any(len(matches[key]) != 1 for key in keys):
-            raise CredentialError("Проектные учётные данные Beget неоднозначны")
-        login, password = (_parse_env_value(matches[key][0]) for key in keys)
     if login != EXPECTED_LOGIN:
         raise CredentialError("Обнаружен другой аккаунт Beget; соединение запрещено")
     return login, password
