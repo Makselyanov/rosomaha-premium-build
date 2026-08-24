@@ -52,6 +52,7 @@ EXPECTED_AD_COUNT = 5
 
 CANONICAL_API_VERSION = "v501"
 LEGACY_API_VERSION = "v5"
+SUSPEND_API_VERSION = LEGACY_API_VERSION
 API_ORIGIN = "https://api.direct.yandex.com/json"
 MAX_RESPONSE_BYTES = 4_000_000
 MAX_EVIDENCE_BYTES = 1_000_000
@@ -573,6 +574,13 @@ def _assert_request_contract(
         elif service == "ads":
             _assert_ads_get_contract(params)
         return
+    if mutation_kind in {"suspend_after_moderation", "suspend_recovery"}:
+        if version != SUSPEND_API_VERSION or not use_client_login:
+            raise OperatorError("Post-moderation suspend разрешён только через safe v5 и точный Client-Login")
+        if (service, method) != ("campaigns", "suspend"):
+            raise OperatorError("Post-moderation safety mutation разрешает только campaigns.suspend")
+        assert_suspend_scope(params)
+        return
     if version != CANONICAL_API_VERSION or not use_client_login:
         raise OperatorError("Любая мутация разрешена только через v501 и точный Client-Login")
     if mutation_kind in {
@@ -592,6 +600,22 @@ def _assert_request_contract(
         _assert_exact_ad_ids(ids)
         return
     raise OperatorError("Неизвестный mutation kind")
+
+
+def assert_suspend_scope(params: Mapping[str, Any]) -> None:
+    if set(params) != {"SelectionCriteria"}:
+        raise OperatorError("Campaigns.suspend содержит лишние поля")
+    criteria = params.get("SelectionCriteria")
+    if not isinstance(criteria, Mapping) or set(criteria) != {"Ids"}:
+        raise OperatorError("Campaigns.suspend требует только SelectionCriteria.Ids")
+    ids = criteria.get("Ids")
+    if not isinstance(ids, list) or len(ids) != 1:
+        raise OperatorError("Campaigns.suspend требует ровно одну кампанию")
+    campaign_id = _exact_int(ids[0], "Suspend Campaign Id")
+    if campaign_id in PROTECTED_CAMPAIGN_IDS:
+        raise OperatorError("Защищённая кампания не может быть остановлена этим оператором")
+    if campaign_id != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Campaigns.suspend разрешён только для 713802902")
 
 
 def _assert_campaign_get_contract(params: Mapping[str, Any], version: str) -> None:
@@ -778,14 +802,21 @@ def read_campaign(api: Any, version: str, campaign_id: int = TARGET_CAMPAIGN_ID)
 
 
 def validate_canonical_campaign(
-    campaign: Mapping[str, Any], *, require_draft: bool, require_off: bool = True
+    campaign: Mapping[str, Any],
+    *,
+    require_draft: bool,
+    allowed_states: Sequence[str] = ("OFF",),
 ) -> dict[str, Any]:
     if _exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID:
         raise OperatorError("Получена другая кампания")
     if campaign.get("Type") != "UNIFIED_CAMPAIGN":
         raise OperatorError("v501 обязан вернуть UNIFIED_CAMPAIGN; legacy TEXT view не разрешает запись")
-    if require_off and campaign.get("State") != "OFF":
-        raise OperatorError("Кампания обязана оставаться в State=OFF")
+    state = campaign.get("State")
+    if state not in set(allowed_states):
+        raise OperatorError(
+            "Кампания имеет небезопасное состояние; разрешены только "
+            + "/".join(allowed_states)
+        )
     if require_draft and campaign.get("Status") != "DRAFT":
         raise OperatorError("Перед мутацией кампания обязана иметь Status=DRAFT")
     unified = campaign.get("UnifiedCampaign")
@@ -881,8 +912,16 @@ def _goal_items(container: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     return sorted(normalized, key=lambda item: item["GoalId"])
 
 
-def measurement(campaign: Mapping[str, Any]) -> dict[str, Any]:
-    unified = validate_canonical_campaign(campaign, require_draft=False)
+def measurement(
+    campaign: Mapping[str, Any],
+    *,
+    allowed_states: Sequence[str] = ("OFF", "SUSPENDED"),
+) -> dict[str, Any]:
+    unified = validate_canonical_campaign(
+        campaign,
+        require_draft=False,
+        allowed_states=allowed_states,
+    )
     return {"CounterIds": _counter_ids(unified), "PriorityGoals": _goal_items(unified)}
 
 
@@ -1004,6 +1043,30 @@ def _campaign_without_moderation_status(campaign: Mapping[str, Any]) -> dict[str
     value.pop("Status", None)
     value.pop("StatusClarification", None)
     return value
+
+
+def _campaign_without_moderation_lifecycle(campaign: Mapping[str, Any]) -> dict[str, Any]:
+    value = _campaign_without_moderation_status(campaign)
+    value.pop("State", None)
+    return value
+
+
+def moderation_phase(campaign: Mapping[str, Any], ads: Sequence[Mapping[str, Any]]) -> str:
+    state = campaign.get("State")
+    status = campaign.get("Status")
+    ad_statuses = [ad.get("Status") for ad in ads]
+    if status == "DRAFT" and ad_statuses and all(item == "DRAFT" for item in ad_statuses):
+        return "pre_moderation_suspended" if state == "SUSPENDED" else "pre_moderation"
+    moderated = {"MODERATION", "PREACCEPTED", "ACCEPTED", "REJECTED"}
+    if status in {"MODERATION", "ACCEPTED", "REJECTED"} and ad_statuses and all(
+        item in moderated for item in ad_statuses
+    ):
+        return "post_moderation_suspended" if state == "SUSPENDED" else "post_moderation_off"
+    return "inconsistent"
+
+
+def suspend_campaign_payload() -> dict[str, Any]:
+    return {"SelectionCriteria": {"Ids": [TARGET_CAMPAIGN_ID]}}
 
 
 def _safe_notifications(value: Any) -> list[dict[str, Any]]:
@@ -1590,18 +1653,214 @@ def _attempt_counter_restore(
     return receipt
 
 
+def _inspect_suspension_state(
+    api: Any,
+    baseline_campaign: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        current = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(
+            current,
+            require_draft=False,
+            allowed_states=("OFF", "SUSPENDED", "ON", "UNKNOWN"),
+        )
+        lifecycle_equal = (
+            _campaign_without_moderation_lifecycle(current)
+            == _campaign_without_moderation_lifecycle(baseline_campaign)
+        )
+        measurement_equal = measurement(
+            current,
+            allowed_states=("OFF", "SUSPENDED", "ON", "UNKNOWN"),
+        ) == measurement(
+            baseline_campaign,
+            allowed_states=("OFF", "SUSPENDED", "ON", "UNKNOWN"),
+        )
+        return {
+            "readback": True,
+            "state": current.get("State"),
+            "status": current.get("Status"),
+            "campaign_sha256": sha256_json(current),
+            "lifecycle_cas_equal": lifecycle_equal,
+            "measurement_unchanged": measurement_equal,
+            "campaign": current,
+        }
+    except Exception as exc:
+        return {"readback": False, "error": _safe_text(exc)}
+
+
+def _dispatch_suspend(api: Any, mutation_kind: str) -> dict[str, Any]:
+    result = api.call(
+        SUSPEND_API_VERSION,
+        "campaigns",
+        "suspend",
+        suspend_campaign_payload(),
+        use_client_login=True,
+        mutation_kind=mutation_kind,
+    )
+    _assert_action_results(result, "SuspendResults", [TARGET_CAMPAIGN_ID])
+    return result
+
+
+def ensure_campaign_suspended(
+    api: Any,
+    baseline_campaign: Mapping[str, Any],
+    *,
+    dispatch_immediately: bool = False,
+) -> dict[str, Any]:
+    """Best-effort exact suspend with bounded ambiguous-response recovery."""
+
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    receipt: dict[str, Any] = {
+        "status": "manual_inspection_required",
+        "safe_from_spend": False,
+        "manual_inspection_required": False,
+        "primary_started": False,
+        "recovery_started": False,
+    }
+    if dispatch_immediately:
+        # ads.moderate can turn a funded campaign ON.  Once moderation has
+        # been dispatched, the very next provider request must be this exact
+        # idempotent stop -- never a diagnostic GET or CAS check.
+        receipt["initial_readback"] = {
+            "skipped": True,
+            "reason": "immediate suspend before any provider readback",
+        }
+    else:
+        initial = _inspect_suspension_state(api, baseline_campaign)
+        receipt["initial_readback"] = {
+            key: value for key, value in initial.items() if key != "campaign"
+        }
+        if not initial.get("readback"):
+            receipt["manual_inspection_required"] = True
+            receipt["mutation_requests"] = 0
+            return receipt
+        if not initial.get("lifecycle_cas_equal") or not initial.get("measurement_unchanged"):
+            receipt.update(
+                manual_inspection_required=True,
+                reason="campaign or measurement CAS changed before suspend",
+                mutation_requests=0,
+            )
+            return receipt
+        if initial.get("state") == "SUSPENDED":
+            receipt.update(
+                status="already_suspended",
+                safe_from_spend=True,
+                final_state="SUSPENDED",
+                mutation_requests=0,
+            )
+            return receipt
+        if initial.get("state") not in {"OFF", "ON"}:
+            receipt.update(
+                manual_inspection_required=True,
+                reason="campaign state is not safely classifiable for suspend",
+                mutation_requests=0,
+            )
+            return receipt
+
+    primary_error: Exception | None = None
+    try:
+        receipt["primary_started"] = True
+        _dispatch_suspend(api, "suspend_after_moderation")
+    except Exception as exc:
+        primary_error = exc
+        receipt["primary_error"] = _safe_text(exc)
+        if isinstance(exc, OperatorError) and exc.partial:
+            receipt.update(exc.partial)
+
+    after_primary = _inspect_suspension_state(api, baseline_campaign)
+    receipt["primary_readback"] = {
+        key: value for key, value in after_primary.items() if key != "campaign"
+    }
+    if (
+        after_primary.get("readback")
+        and after_primary.get("state") == "SUSPENDED"
+        and after_primary.get("lifecycle_cas_equal")
+        and after_primary.get("measurement_unchanged")
+    ):
+        receipt.update(
+            status=(
+                "suspended"
+                if primary_error is None
+                else "suspended_readback_after_ambiguous_response"
+            ),
+            safe_from_spend=True,
+            final_state="SUSPENDED",
+            manual_inspection_required=primary_error is not None,
+        )
+        receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) - mutations_before
+        return receipt
+
+    # A single retry is allowed only for the same idempotent exact suspend and
+    # only when fresh readback proves the campaign is still OFF/ON with intact CAS.
+    if (
+        primary_error is not None
+        and after_primary.get("readback")
+        and after_primary.get("state") in {"OFF", "ON"}
+        and after_primary.get("lifecycle_cas_equal")
+        and after_primary.get("measurement_unchanged")
+    ):
+        recovery_error: Exception | None = None
+        try:
+            receipt["recovery_started"] = True
+            _dispatch_suspend(api, "suspend_recovery")
+        except Exception as exc:
+            recovery_error = exc
+            receipt["recovery_error"] = _safe_text(exc)
+            if isinstance(exc, OperatorError) and exc.partial:
+                receipt.update(exc.partial)
+        after_recovery = _inspect_suspension_state(api, baseline_campaign)
+        receipt["recovery_readback"] = {
+            key: value for key, value in after_recovery.items() if key != "campaign"
+        }
+        if (
+            after_recovery.get("readback")
+            and after_recovery.get("state") == "SUSPENDED"
+            and after_recovery.get("lifecycle_cas_equal")
+            and after_recovery.get("measurement_unchanged")
+        ):
+            receipt.update(
+                status=(
+                    "suspended_after_recovery"
+                    if recovery_error is None
+                    else "suspended_readback_after_ambiguous_recovery"
+                ),
+                safe_from_spend=True,
+                final_state="SUSPENDED",
+                manual_inspection_required=True,
+            )
+            receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) - mutations_before
+            return receipt
+
+    receipt["manual_inspection_required"] = True
+    receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) - mutations_before
+    return receipt
+
+
 def _classify_ambiguous_moderation(
     api: Any,
+    baseline_campaign: Mapping[str, Any],
     baseline_bundle: Mapping[str, Any],
     expected_ids: Sequence[int],
 ) -> dict[str, Any]:
     try:
         current_bundle = read_moderation_bundle(api)
         current_ads = current_bundle["ads"]
-        campaign = read_campaign(api, CANONICAL_API_VERSION)
-        validate_canonical_campaign(campaign, require_draft=False)
+        inspected = _inspect_suspension_state(api, baseline_campaign)
+        if not inspected.get("readback"):
+            return {"status": "manual_inspection_required", "campaign": inspected}
+        if not inspected.get("lifecycle_cas_equal") or not inspected.get("measurement_unchanged"):
+            return {
+                "status": "manual_inspection_required",
+                "reason": "campaign or measurement CAS changed",
+            }
+        state = inspected.get("state")
         if sha256_json(current_bundle) == sha256_json(baseline_bundle):
-            return {"status": "baseline_intact", "reason": "moderation was not committed"}
+            suffix = {
+                "SUSPENDED": "baseline_safely_suspended",
+                "OFF": "baseline_intact",
+                "ON": "baseline_requires_immediate_suspend",
+            }.get(state, "manual_inspection_required")
+            return {"status": suffix, "campaign_state": state}
         try:
             validate_moderated_readback(current_ads, expected_ids)
         except OperatorError:
@@ -1610,19 +1869,20 @@ def _classify_ambiguous_moderation(
                 "reason": "moderation state is neither exact baseline nor complete candidate",
                 "current_bundle_sha256": sha256_json(current_bundle),
             }
-        if (
-            campaign.get("State") == "OFF"
-            and _without_moderation_fields(current_bundle)
-            == _without_moderation_fields(baseline_bundle)
-        ):
+        if _without_moderation_fields(current_bundle) != _without_moderation_fields(baseline_bundle):
             return {
-                "status": "candidate_committed_response_lost",
-                "reason": "five ads left DRAFT while campaign remained OFF",
-                "current_bundle_sha256": sha256_json(current_bundle),
+                "status": "manual_inspection_required",
+                "reason": "creative/group/condition CAS changed",
             }
+        status = {
+            "SUSPENDED": "candidate_committed_safely_suspended",
+            "ON": "candidate_committed_requires_immediate_suspend",
+            "OFF": "candidate_committed_off_not_final",
+        }.get(state, "manual_inspection_required")
         return {
-            "status": "manual_inspection_required",
-            "reason": "candidate ads exist but campaign or creative CAS changed",
+            "status": status,
+            "campaign_state": state,
+            "current_bundle_sha256": sha256_json(current_bundle),
         }
     except Exception as exc:
         return {"status": "manual_inspection_required", "error": _safe_text(exc)}
@@ -1647,10 +1907,15 @@ def _run_operation_core(
 
     identity = prove_identity(api)
     canonical = read_campaign(api, CANONICAL_API_VERSION)
-    unified = validate_canonical_campaign(canonical, require_draft=False)
+    unified = validate_canonical_campaign(
+        canonical,
+        require_draft=False,
+        allowed_states=("OFF", "SUSPENDED"),
+    )
     legacy = _legacy_view(api)
     protected_before = read_protected_snapshot(api)
     ads = read_ads(api)
+    phase = moderation_phase(canonical, ads)
     receipt = _base_receipt(mode, identity)
     receipt.update(
         canonical_campaign={
@@ -1660,6 +1925,7 @@ def _run_operation_core(
             "snapshot_sha256": sha256_json(canonical),
             "package_strategy": unified.get("PackageBiddingStrategy"),
             "measurement": measurement(canonical),
+            "moderation_phase": phase,
         },
         legacy_v5_view=legacy,
         ads={
@@ -1677,7 +1943,7 @@ def _run_operation_core(
             and unified.get("PackageBiddingStrategy") is None
         )
         receipt["ready_for_moderation"] = (
-            receipt["ready_for_measurement_mutation"]
+            phase in {"pre_moderation", "pre_moderation_suspended"}
             and len(ads) == EXPECTED_AD_COUNT
             and len({ad.get("Id") for ad in ads}) == EXPECTED_AD_COUNT
             and all(ad.get("Status") == "DRAFT" for ad in ads)
@@ -1688,7 +1954,16 @@ def _run_operation_core(
         return receipt
 
     action = dry_run_action if mode == "dry-run" else mode
-    validate_canonical_campaign(canonical, require_draft=True)
+    if action == "moderate":
+        validate_canonical_campaign(
+            canonical,
+            require_draft=False,
+            allowed_states=("OFF", "SUSPENDED"),
+        )
+    else:
+        # Measurement mutations are never permitted after moderation or while
+        # suspended; their only safe preimage remains DRAFT/OFF.
+        validate_canonical_campaign(canonical, require_draft=True, allowed_states=("OFF",))
     campaign_hash = sha256_json(canonical)
     if mode != "dry-run":
         _assert_expected_hash(campaign_hash, expected_campaign_sha256, "Campaign")
@@ -1875,9 +2150,18 @@ def _run_operation_core(
 
     if action == "moderate":
         moderation_bundle = read_moderation_bundle(api)
-        ad_ids = validate_five_draft_ads(moderation_bundle["ads"])
+        bundle_ads = moderation_bundle["ads"]
+        ad_ids = _assert_exact_ad_ids([ad.get("Id") for ad in bundle_ads])
+        current_phase = moderation_phase(canonical, bundle_ads)
+        if current_phase == "inconsistent":
+            raise OperatorError("Campaign/ad moderation lifecycle имеет противоречивое состояние")
+        if current_phase in {"pre_moderation", "pre_moderation_suspended"}:
+            validate_five_draft_ads(bundle_ads)
+        else:
+            validate_moderated_readback(bundle_ads, ad_ids)
         ads_hash = sha256_json(moderation_bundle)
         receipt["planned_ad_ids"] = ad_ids
+        receipt["moderation_phase"] = current_phase
         receipt["moderation_bundle_sha256"] = ads_hash
         receipt["moderation_bundle_counts"] = {
             "ads": len(moderation_bundle["ads"]),
@@ -1886,7 +2170,20 @@ def _run_operation_core(
             "sitelink_sets": len(moderation_bundle["sitelinks"]),
         }
         if mode == "dry-run":
-            receipt.update(status="ready", mutation_requests=0)
+            if current_phase == "post_moderation_suspended":
+                dry_status = "already_suspended"
+                planned_actions: list[str] = []
+            elif current_phase == "post_moderation_off":
+                dry_status = "ready_to_suspend_post_moderation"
+                planned_actions = ["campaigns.suspend"]
+            else:
+                dry_status = "ready"
+                planned_actions = ["ads.moderate", "campaigns.suspend"]
+            receipt.update(
+                status=dry_status,
+                planned_actions=planned_actions,
+                mutation_requests=0,
+            )
             if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
                 raise OperatorError("Dry-run выполнил mutation request")
             return receipt
@@ -1894,54 +2191,130 @@ def _run_operation_core(
         _assert_expected_hash(ads_hash, expected_ads_sha256, "Ads")
         verify_moderate_guard(env)
         fresh_campaign = read_campaign(api, CANONICAL_API_VERSION)
-        validate_canonical_campaign(fresh_campaign, require_draft=True)
+        validate_canonical_campaign(
+            fresh_campaign,
+            require_draft=False,
+            allowed_states=("OFF", "SUSPENDED"),
+        )
         if sha256_json(fresh_campaign) != campaign_hash:
             raise OperatorError("Campaign CAS изменился перед moderation")
         fresh_bundle = read_moderation_bundle(api)
         fresh_ads = fresh_bundle["ads"]
-        validate_five_draft_ads(fresh_ads)
+        fresh_phase = moderation_phase(fresh_campaign, fresh_ads)
+        if fresh_phase != current_phase:
+            raise OperatorError("Moderation lifecycle CAS изменился перед mutation")
+        if fresh_phase in {"pre_moderation", "pre_moderation_suspended"}:
+            validate_five_draft_ads(fresh_ads)
+        elif fresh_phase in {"post_moderation_off", "post_moderation_suspended"}:
+            validate_moderated_readback(fresh_ads, ad_ids)
+        else:
+            raise OperatorError("Fresh moderation lifecycle противоречив")
         if sha256_json(fresh_bundle) != ads_hash:
             raise OperatorError("Full creative/display-condition CAS изменился перед moderation")
-        mutation_started = False
-        try:
-            mutation_started = True
-            result = api.call(
-                CANONICAL_API_VERSION,
-                "ads",
-                "moderate",
-                {"SelectionCriteria": {"Ids": ad_ids}},
-                use_client_login=True,
-                mutation_kind="moderate",
+
+        if fresh_phase == "post_moderation_suspended":
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="already_suspended",
+                mutation_requests=0,
+                protected_unchanged=True,
+                post_campaign_state="SUSPENDED",
+                post_campaign_status=fresh_campaign.get("Status"),
+                post_ad_statuses={str(ad["Id"]): ad.get("Status") for ad in fresh_ads},
             )
-            _assert_action_results(result, "ModerateResults", ad_ids)
+            return receipt
+
+        mutation_started = False
+        moderate_dispatched = False
+        suspension: dict[str, Any] | None = None
+        try:
+            if fresh_phase in {"pre_moderation", "pre_moderation_suspended"}:
+                mutation_started = True
+                moderate_dispatched = True
+                result = api.call(
+                    CANONICAL_API_VERSION,
+                    "ads",
+                    "moderate",
+                    {"SelectionCriteria": {"Ids": ad_ids}},
+                    use_client_login=True,
+                    mutation_kind="moderate",
+                )
+                _assert_action_results(result, "ModerateResults", ad_ids)
+
+            # Ads.moderate can automatically put a funded campaign ON.  The
+            # next provider mutation is therefore always the exact suspend.
+            suspension = ensure_campaign_suspended(
+                api,
+                fresh_campaign,
+                dispatch_immediately=True,
+            )
+            mutation_started = mutation_started or suspension.get("primary_started", False)
+            if not suspension.get("safe_from_spend") or suspension.get("manual_inspection_required"):
+                suspend_partial: dict[str, Any] = {"suspension": suspension}
+                if suspension.get("provider_warnings"):
+                    suspend_partial["provider_warnings"] = suspension["provider_warnings"]
+                raise OperatorError(
+                    "Post-moderation suspend требует ручной проверки",
+                    partial=suspend_partial,
+                )
+
             post_bundle = read_moderation_bundle(api)
             post_ads = post_bundle["ads"]
             validate_moderated_readback(post_ads, ad_ids)
             if _without_moderation_fields(post_bundle) != _without_moderation_fields(fresh_bundle):
                 raise OperatorError("Moderation postflight обнаружил изменение creative/display-condition CAS")
             post_campaign = read_campaign(api, CANONICAL_API_VERSION)
-            validate_canonical_campaign(post_campaign, require_draft=False)
-            if post_campaign.get("State") != "OFF":
-                raise OperatorError("Moderation postflight: кампания перестала быть OFF")
-            if _campaign_without_moderation_status(post_campaign) != _campaign_without_moderation_status(fresh_campaign):
-                raise OperatorError("Moderation postflight обнаружил изменение кампании вне статуса модерации")
+            validate_canonical_campaign(
+                post_campaign,
+                require_draft=False,
+                allowed_states=("SUSPENDED",),
+            )
+            if measurement(post_campaign) != measurement(fresh_campaign):
+                raise OperatorError("Moderation postflight изменил measurement")
+            if (
+                _campaign_without_moderation_lifecycle(post_campaign)
+                != _campaign_without_moderation_lifecycle(fresh_campaign)
+            ):
+                raise OperatorError("Moderation postflight изменил campaign CAS вне lifecycle")
             protected_after = read_protected_snapshot(api)
             assert_protected_equal(protected_before, protected_after)
         except Exception as exc:
+            # After any dispatched moderation call the first recovery action is
+            # always the same exact suspend.  If it already succeeded, this is
+            # a read-only confirmation and does not dispatch again.
+            if suspension is not None:
+                emergency_suspend = suspension
+            elif moderate_dispatched or fresh_phase == "post_moderation_off":
+                emergency_suspend = ensure_campaign_suspended(
+                    api,
+                    fresh_campaign,
+                    dispatch_immediately=True,
+                )
+            else:
+                emergency_suspend = {"status": "not_needed", "safe_from_spend": False}
             recovery = (
-                _classify_ambiguous_moderation(api, fresh_bundle, ad_ids)
-                if mutation_started
+                _classify_ambiguous_moderation(
+                    api,
+                    fresh_campaign,
+                    fresh_bundle,
+                    ad_ids,
+                )
+                if mutation_started or moderate_dispatched
                 else {"status": "not_needed"}
             )
             partial = dict(receipt)
             if isinstance(exc, OperatorError) and exc.partial:
                 partial.update(exc.partial)
             partial.update(
-                status="failed",
+                status="manual_inspection_required",
                 error=_safe_text(exc),
                 mutation_started=mutation_started,
+                moderate_dispatched=moderate_dispatched,
+                suspension=suspension,
+                emergency_suspend=emergency_suspend,
                 recovery=recovery,
-                rollback={"status": "not_supported_for_moderation" if mutation_started else "not_needed"},
+                rollback={"status": "never_resume_or_rollback_moderation"},
                 mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
             )
             try:
@@ -1953,10 +2326,14 @@ def _run_operation_core(
                 partial["protected_error"] = _safe_text(protected_exc)
             raise OperatorError("Moderation не прошла postflight", partial=partial) from None
         receipt.update(
-            status="submitted",
+            status=("submitted_suspended" if moderate_dispatched else "suspended_post_moderation"),
             mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
             protected_unchanged=True,
-            post_campaign_state="OFF",
+            suspension=suspension,
+            post_campaign_state="SUSPENDED",
+            post_campaign_status=post_campaign.get("Status"),
+            measurement_unchanged=True,
+            creative_bundle_unchanged=True,
             post_ad_statuses={str(ad["Id"]): ad.get("Status") for ad in post_ads},
         )
         return receipt
@@ -2024,6 +2401,139 @@ def save_receipt(receipt: Mapping[str, Any], *, secrets: Sequence[str] = ()) -> 
         handle.flush()
         os.fsync(handle.fileno())
     return path
+
+
+def receipt_is_verified_safe(receipt: Mapping[str, Any]) -> bool:
+    """Return True only for an explicitly proven safe terminal receipt.
+
+    The CLI must never infer success merely because ``run_operation`` returned.
+    This final gate is deliberately independent from the operation branches so
+    an accidentally returned blocked, partial, or unknown receipt still exits
+    non-zero after preserving its diagnostic artifact.
+    """
+
+    if not isinstance(receipt, Mapping):
+        return False
+    status = receipt.get("status")
+    mode = receipt.get("mode")
+    if status in {
+        "blocked",
+        "error",
+        "failed",
+        "in_progress",
+        "manual_inspection_required",
+    }:
+        return False
+    if mode not in {"audit", "dry-run", "apply-counter", "apply-measurement", "moderate"}:
+        return False
+
+    account = receipt.get("account")
+    scope = receipt.get("scope")
+    canonical = receipt.get("canonical_campaign")
+    if not isinstance(account, Mapping) or account.get("login") != EXPECTED_LOGIN:
+        return False
+    if not isinstance(scope, Mapping):
+        return False
+    if (
+        scope.get("campaign_id") != TARGET_CAMPAIGN_ID
+        or scope.get("counter_id") != TARGET_COUNTER_ID
+        or scope.get("hard_goal_id") != HARD_GOAL_ID
+        or scope.get("protected_campaign_ids") != list(PROTECTED_CAMPAIGN_IDS)
+        or scope.get("launch_or_spend_methods_allowed") is not False
+    ):
+        return False
+    if not isinstance(canonical, Mapping) or canonical.get("state") not in {"OFF", "SUSPENDED"}:
+        return False
+    try:
+        mutation_requests = _exact_int(
+            receipt.get("mutation_requests"),
+            "Receipt mutation_requests",
+            positive=False,
+        )
+    except OperatorError:
+        return False
+    if mutation_requests < 0:
+        return False
+
+    request_log = receipt.get("request_log")
+    if not isinstance(request_log, list) or any(not isinstance(item, Mapping) for item in request_log):
+        return False
+    logged_mutations = [item for item in request_log if item.get("mutation_kind") is not None]
+    if len(logged_mutations) != mutation_requests:
+        return False
+    allowed_mutations = {
+        "audit": set(),
+        "dry-run": set(),
+        "apply-counter": {"apply_counter"},
+        "apply-measurement": {"apply_measurement"},
+        "moderate": {"moderate", "suspend_after_moderation", "suspend_recovery"},
+    }[str(mode)]
+    if any(item.get("mutation_kind") not in allowed_mutations for item in logged_mutations):
+        return False
+    if any(item.get("method") in {"resume", "start"} for item in request_log):
+        return False
+
+    if mode == "audit":
+        return status == "ok" and mutation_requests == 0
+
+    if mode == "dry-run":
+        if mutation_requests != 0:
+            return False
+        if status == "ready":
+            return True
+        if status == "ready_to_suspend_post_moderation":
+            return canonical.get("state") == "OFF"
+        if status == "already_suspended":
+            return canonical.get("state") == "SUSPENDED"
+        return False
+
+    mutation_lock = receipt.get("mutation_lock")
+    if not isinstance(mutation_lock, Mapping) or mutation_lock.get("released") is not True:
+        return False
+
+    if mode in {"apply-counter", "apply-measurement"}:
+        if receipt.get("protected_unchanged") is not True or receipt.get("post_campaign_state") != "OFF":
+            return False
+        if status == "already_exact":
+            return mutation_requests == 0
+        if status == "applied":
+            return mutation_requests == 1
+        return False
+
+    if mode == "moderate":
+        if (
+            receipt.get("protected_unchanged") is not True
+            or receipt.get("post_campaign_state") != "SUSPENDED"
+        ):
+            return False
+        if status == "already_suspended":
+            return mutation_requests == 0 and not logged_mutations
+        if status not in {"submitted_suspended", "suspended_post_moderation"}:
+            return False
+        mutation_sequence = [item.get("mutation_kind") for item in logged_mutations]
+        expected_sequence = (
+            ["moderate", "suspend_after_moderation"]
+            if status == "submitted_suspended"
+            else ["suspend_after_moderation"]
+        )
+        if mutation_sequence != expected_sequence or mutation_requests != len(expected_sequence):
+            return False
+        suspension = receipt.get("suspension")
+        if not isinstance(suspension, Mapping):
+            return False
+        return (
+            mutation_requests >= 1
+            and suspension.get("safe_from_spend") is True
+            and suspension.get("manual_inspection_required") is False
+            and receipt.get("measurement_unchanged") is True
+            and receipt.get("creative_bundle_unchanged") is True
+        )
+
+    return False
+
+
+def receipt_exit_code(receipt: Mapping[str, Any]) -> int:
+    return 0 if receipt_is_verified_safe(receipt) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2106,7 +2616,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     path = save_receipt(receipt, secrets=(token,))
     print(path)
-    return 0
+    exit_code = receipt_exit_code(receipt)
+    if exit_code:
+        print(
+            "Receipt не подтверждает безопасное завершение; требуется проверка.",
+            file=sys.stderr,
+        )
+    return exit_code
 
 
 if __name__ == "__main__":

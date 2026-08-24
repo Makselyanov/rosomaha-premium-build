@@ -3,13 +3,15 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("yandex-direct-rosomaha-rus-measurement.py")
@@ -164,6 +166,20 @@ def five_ads_with_one_text_ad() -> list[dict[str, Any]]:
     return ads
 
 
+def five_moderated_ads() -> list[dict[str, Any]]:
+    ads = five_ads()
+    for ad in ads:
+        ad["Status"] = "MODERATION"
+        responsive = ad["ResponsiveAd"]
+        for item in responsive["Titles"]:
+            item["Status"] = "MODERATION"
+        for item in responsive["Texts"]:
+            item["Status"] = "MODERATION"
+        for item in responsive["AdImages"]["Items"]:
+            item["Status"] = "MODERATION"
+    return ads
+
+
 def adgroups_from_ads(ads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -274,6 +290,8 @@ class FakeApi:
         self.mutation_requests = 0
         self.update_payloads: list[dict[str, Any]] = []
         self.moderate_payloads: list[dict[str, Any]] = []
+        self.suspend_payloads: list[dict[str, Any]] = []
+        self.state_at_suspend_dispatch: list[str] = []
         self.sitelinks_get_payloads: list[dict[str, Any]] = []
         self.glitch_next_target_read_after_update = False
         self._glitch_armed = False
@@ -286,6 +304,13 @@ class FakeApi:
         self.raise_after_moderate_unknown = False
         self.raise_before_moderate_commit = False
         self.moderate_warning = False
+        self.raise_before_suspend_commit = False
+        self.raise_after_suspend_commit = False
+        self.raise_after_suspend_unknown = False
+        self.suspend_warning = False
+        self.fail_first_post_moderate_campaign_get = False
+        self._post_moderate_get_failure_armed = False
+        self.drift_campaign_after_moderate = False
 
     def call(
         self,
@@ -332,6 +357,9 @@ class FakeApi:
         if (service, method) == ("campaigns", "get"):
             ids = params["SelectionCriteria"]["Ids"]
             if ids == [operator.TARGET_CAMPAIGN_ID]:
+                if self._post_moderate_get_failure_armed:
+                    self._post_moderate_get_failure_armed = False
+                    raise operator.ProviderError("simulated first post-moderate GET failure")
                 source = copy.deepcopy(self.campaign)
                 if version == operator.LEGACY_API_VERSION:
                     return {"Campaigns": [legacy_campaign(source)]}
@@ -395,6 +423,27 @@ class FakeApi:
                 self.update_warning = False
             return {"UpdateResults": [row]}
 
+        if (service, method) == ("campaigns", "suspend"):
+            payload = copy.deepcopy(dict(params))
+            self.suspend_payloads.append(payload)
+            self.state_at_suspend_dispatch.append(self.campaign["State"])
+            if self.raise_before_suspend_commit:
+                self.raise_before_suspend_commit = False
+                raise operator.ProviderError("simulated suspend timeout before commit")
+            self.campaign["State"] = "SUSPENDED"
+            if self.raise_after_suspend_unknown:
+                self.raise_after_suspend_unknown = False
+                self.campaign["State"] = "UNKNOWN"
+                raise operator.ProviderError("simulated suspend timeout with unknown state")
+            if self.raise_after_suspend_commit:
+                self.raise_after_suspend_commit = False
+                raise operator.ProviderError("simulated suspend lost response after commit")
+            row: dict[str, Any] = {"Id": operator.TARGET_CAMPAIGN_ID}
+            if self.suspend_warning:
+                self.suspend_warning = False
+                row["Warnings"] = [{"Code": 997, "Message": "simulated suspend warning"}]
+            return {"SuspendResults": [row]}
+
         if (service, method) == ("ads", "get"):
             ads = copy.deepcopy(self.ads)
             text_fields = set(params.get("TextAdFieldNames", []))
@@ -449,6 +498,16 @@ class FakeApi:
                         for image in ad["ResponsiveAd"].get("AdImages", {}).get("Items", []):
                             image["Status"] = "MODERATION"
             self.campaign["Status"] = "MODERATION"
+            self.campaign["State"] = "ON"
+            if self.fail_first_post_moderate_campaign_get:
+                self.fail_first_post_moderate_campaign_get = False
+                self._post_moderate_get_failure_armed = True
+            if self.drift_campaign_after_moderate:
+                self.drift_campaign_after_moderate = False
+                self.campaign["DailyBudget"] = {
+                    "Amount": 999_000_000,
+                    "Mode": "STANDARD",
+                }
             if self.raise_after_moderate_unknown:
                 self.raise_after_moderate_unknown = False
                 self.ads[0]["ResponsiveAd"]["Href"] = "https://unexpected.example/"
@@ -681,8 +740,160 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         sent_ids = api.moderate_payloads[0]["SelectionCriteria"]["Ids"]
         self.assertEqual(sent_ids[0], 9_007_199_254_740_993)
         self.assertEqual(len(set(sent_ids)), 5)
-        self.assertEqual(receipt["status"], "submitted")
-        self.assertEqual(receipt["post_campaign_state"], "OFF")
+        self.assertEqual(receipt["status"], "submitted_suspended")
+        self.assertEqual(receipt["post_campaign_state"], "SUSPENDED")
+        self.assertEqual(api.mutation_requests, 2)
+        self.assertEqual(
+            api.suspend_payloads,
+            [{"SelectionCriteria": {"Ids": [operator.TARGET_CAMPAIGN_ID]}}],
+        )
+        self.assertEqual(api.state_at_suspend_dispatch, ["ON"])
+        mutations = [item for item in api.request_log if item["mutation_kind"]]
+        self.assertEqual(
+            [(item["version"], item["service"], item["method"]) for item in mutations],
+            [("v501", "ads", "moderate"), ("v5", "campaigns", "suspend")],
+        )
+        self.assertFalse(
+            any(item["method"] in {"resume", "start"} for item in api.request_log)
+        )
+        self.assertTrue(receipt["measurement_unchanged"])
+        self.assertTrue(receipt["creative_bundle_unchanged"])
+        self.assertTrue(receipt["protected_unchanged"])
+        receipt["request_log"] = api.request_log
+        self.assertEqual(operator.receipt_exit_code(receipt), 0)
+
+        forbidden = copy.deepcopy(receipt)
+        forbidden["request_log"].append(
+            {
+                "version": "v5",
+                "service": "campaigns",
+                "method": "resume",
+                "mutation_kind": None,
+            }
+        )
+        self.assertEqual(operator.receipt_exit_code(forbidden), 1)
+
+    def test_audit_accepts_suspended_post_moderation_and_rejects_on(self):
+        suspended = FakeApi(
+            campaign=canonical_campaign(
+                status="MODERATION",
+                state="SUSPENDED",
+                counter_ids=[operator.TARGET_COUNTER_ID],
+            ),
+            ads=five_moderated_ads(),
+        )
+        receipt = operator.run_operation(suspended, "audit")
+        self.assertEqual(receipt["status"], "ok")
+        self.assertEqual(receipt["canonical_campaign"]["state"], "SUSPENDED")
+        self.assertEqual(
+            receipt["canonical_campaign"]["moderation_phase"],
+            "post_moderation_suspended",
+        )
+        self.assertFalse(receipt["ready_for_measurement_mutation"])
+        self.assertFalse(receipt["ready_for_moderation"])
+        self.assertEqual(suspended.mutation_requests, 0)
+
+        active = FakeApi(campaign=canonical_campaign(status="MODERATION", state="ON"))
+        with self.assertRaisesRegex(operator.OperatorError, "небезопасное состояние"):
+            operator.run_operation(active, "audit")
+        self.assertEqual(active.mutation_requests, 0)
+
+    def test_measurement_mutations_never_accept_suspended_campaign(self):
+        api = FakeApi(campaign=canonical_campaign(state="SUSPENDED"))
+        with self.assertRaisesRegex(operator.OperatorError, "разрешены только OFF"):
+            operator.run_operation(
+                api,
+                "apply-counter",
+                expected_campaign_sha256=operator.sha256_json(api.campaign),
+                environ={operator.COUNTER_GUARD_ENV: operator.COUNTER_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        self.assertEqual(api.mutation_requests, 0)
+
+    def test_post_moderation_already_suspended_is_idempotent(self):
+        api = FakeApi(
+            campaign=canonical_campaign(status="MODERATION", state="SUSPENDED"),
+            ads=five_moderated_ads(),
+        )
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        dry = operator.run_operation(api, "dry-run", dry_run_action="moderate")
+        self.assertEqual(dry["status"], "already_suspended")
+        receipt = operator.run_operation(
+            api,
+            "moderate",
+            expected_campaign_sha256=expected_campaign,
+            expected_ads_sha256=expected_bundle,
+            environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+            lock_policy=FakeLockPolicy(),
+        )
+        self.assertEqual(receipt["status"], "already_suspended")
+        self.assertEqual(api.mutation_requests, 0)
+        self.assertEqual(api.moderate_payloads, [])
+        self.assertEqual(api.suspend_payloads, [])
+
+    def test_post_moderation_off_is_suspended_without_resubmission(self):
+        api = FakeApi(
+            campaign=canonical_campaign(status="MODERATION", state="OFF"),
+            ads=five_moderated_ads(),
+        )
+        receipt = operator.run_operation(
+            api,
+            "moderate",
+            expected_campaign_sha256=operator.sha256_json(api.campaign),
+            expected_ads_sha256=bundle_hash(api),
+            environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+            lock_policy=FakeLockPolicy(),
+        )
+        self.assertEqual(receipt["status"], "suspended_post_moderation")
+        self.assertEqual(api.moderate_payloads, [])
+        self.assertEqual(len(api.suspend_payloads), 1)
+        mutations = [item["mutation_kind"] for item in api.request_log if item["mutation_kind"]]
+        self.assertEqual(mutations, ["suspend_after_moderation"])
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        receipt["request_log"] = api.request_log
+        self.assertEqual(operator.receipt_exit_code(receipt), 0)
+
+    def test_suspend_contract_rejects_protected_wrong_version_and_resume(self):
+        exact = operator.suspend_campaign_payload()
+        operator._assert_request_contract(
+            operator.SUSPEND_API_VERSION,
+            "campaigns",
+            "suspend",
+            exact,
+            use_client_login=True,
+            mutation_kind="suspend_after_moderation",
+        )
+        protected = copy.deepcopy(exact)
+        protected["SelectionCriteria"]["Ids"] = [operator.PROTECTED_CAMPAIGN_IDS[0]]
+        with self.assertRaisesRegex(operator.OperatorError, "Защищённая"):
+            operator._assert_request_contract(
+                operator.SUSPEND_API_VERSION,
+                "campaigns",
+                "suspend",
+                protected,
+                use_client_login=True,
+                mutation_kind="suspend_after_moderation",
+            )
+        with self.assertRaises(operator.OperatorError):
+            operator._assert_request_contract(
+                operator.CANONICAL_API_VERSION,
+                "campaigns",
+                "suspend",
+                exact,
+                use_client_login=True,
+                mutation_kind="suspend_after_moderation",
+            )
+        for forbidden in ("resume", "start", "update"):
+            with self.subTest(forbidden=forbidden), self.assertRaises(operator.OperatorError):
+                operator._assert_request_contract(
+                    operator.SUSPEND_API_VERSION,
+                    "campaigns",
+                    forbidden,
+                    exact,
+                    use_client_login=True,
+                    mutation_kind="suspend_after_moderation",
+                )
 
     def test_duplicate_ads_block_moderation(self):
         api = FakeApi(ads=five_ads(duplicate=True))
@@ -1078,7 +1289,7 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(operator.OperatorError, "хотя бы одно условие"):
             operator.read_moderation_bundle(api2)
 
-    def test_moderation_ambiguous_response_is_classified_without_second_write(self):
+    def test_moderation_ambiguous_response_is_followed_by_exact_suspend(self):
         api = FakeApi()
         expected_campaign = operator.sha256_json(api.campaign)
         expected_bundle = bundle_hash(api)
@@ -1095,13 +1306,74 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         self.assertTrue(raised.exception.partial["mutation_started"])
         self.assertEqual(
             raised.exception.partial["recovery"]["status"],
-            "candidate_committed_response_lost",
+            "candidate_committed_safely_suspended",
         )
-        self.assertEqual(api.mutation_requests, 1)
+        self.assertEqual(api.mutation_requests, 2)
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertTrue(raised.exception.partial["emergency_suspend"]["safe_from_spend"])
         self.assertEqual(
             raised.exception.partial["rollback"]["status"],
-            "not_supported_for_moderation",
+            "never_resume_or_rollback_moderation",
         )
+        moderate_index = next(
+            index
+            for index, item in enumerate(api.request_log)
+            if item["mutation_kind"] == "moderate"
+        )
+        self.assertEqual(
+            (
+                api.request_log[moderate_index + 1]["version"],
+                api.request_log[moderate_index + 1]["service"],
+                api.request_log[moderate_index + 1]["method"],
+                api.request_log[moderate_index + 1]["mutation_kind"],
+            ),
+            ("v5", "campaigns", "suspend", "suspend_after_moderation"),
+        )
+
+    def test_post_moderate_get_failure_cannot_prevent_first_suspend(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.fail_first_post_moderate_campaign_get = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        mutations = [item for item in api.request_log if item["mutation_kind"]]
+        self.assertEqual(
+            [item["mutation_kind"] for item in mutations],
+            ["moderate", "suspend_after_moderation"],
+        )
+        moderate_index = api.request_log.index(mutations[0])
+        self.assertIs(api.request_log[moderate_index + 1], mutations[1])
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertEqual(len(api.suspend_payloads), 1)
+        self.assertEqual(raised.exception.partial["status"], "manual_inspection_required")
+
+    def test_post_moderate_campaign_cas_drift_cannot_prevent_suspend(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.drift_campaign_after_moderate = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        mutations = [item["mutation_kind"] for item in api.request_log if item["mutation_kind"]]
+        self.assertEqual(mutations, ["moderate", "suspend_after_moderation"])
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertEqual(len(api.suspend_payloads), 1)
+        self.assertEqual(raised.exception.partial["status"], "manual_inspection_required")
 
     def test_moderation_unknown_state_requires_manual_inspection(self):
         api = FakeApi()
@@ -1121,7 +1393,96 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
             raised.exception.partial["recovery"]["status"],
             "manual_inspection_required",
         )
-        self.assertEqual(api.mutation_requests, 1)
+        self.assertEqual(api.mutation_requests, 2)
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+
+    def test_suspend_lost_response_is_read_back_safe_but_fail_closed(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.raise_after_suspend_commit = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        partial = raised.exception.partial
+        self.assertEqual(partial["status"], "manual_inspection_required")
+        self.assertEqual(
+            partial["suspension"]["status"],
+            "suspended_readback_after_ambiguous_response",
+        )
+        self.assertTrue(partial["suspension"]["safe_from_spend"])
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertEqual(api.mutation_requests, 2)
+        self.assertEqual(len(api.suspend_payloads), 1)
+
+    def test_suspend_timeout_on_keeps_exact_recovery_and_manual_receipt(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.raise_before_suspend_commit = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        suspension = raised.exception.partial["suspension"]
+        self.assertEqual(suspension["status"], "suspended_after_recovery")
+        self.assertTrue(suspension["recovery_started"])
+        self.assertEqual(api.state_at_suspend_dispatch, ["ON", "ON"])
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertEqual(api.mutation_requests, 3)
+        self.assertEqual(api.suspend_payloads[0], api.suspend_payloads[1])
+
+    def test_suspend_unknown_state_stops_for_manual_inspection_without_resume(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.raise_after_suspend_unknown = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        partial = raised.exception.partial
+        self.assertEqual(partial["status"], "manual_inspection_required")
+        self.assertFalse(partial["suspension"]["safe_from_spend"])
+        self.assertEqual(api.campaign["State"], "UNKNOWN")
+        self.assertEqual(api.mutation_requests, 2)
+        self.assertFalse(
+            any(item["method"] in {"resume", "start"} for item in api.request_log)
+        )
+
+    def test_suspend_warning_is_preserved_fail_closed(self):
+        api = FakeApi()
+        expected_campaign = operator.sha256_json(api.campaign)
+        expected_bundle = bundle_hash(api)
+        api.suspend_warning = True
+        with self.assertRaises(operator.OperatorError) as raised:
+            operator.run_operation(
+                api,
+                "moderate",
+                expected_campaign_sha256=expected_campaign,
+                expected_ads_sha256=expected_bundle,
+                environ={operator.MODERATE_GUARD_ENV: operator.MODERATE_GUARD_VALUE},
+                lock_policy=FakeLockPolicy(),
+            )
+        self.assertEqual(raised.exception.partial["provider_warnings"][0]["Code"], 997)
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
+        self.assertEqual(api.mutation_requests, 2)
 
     def test_provider_warning_is_preserved_fail_closed_and_counter_restored(self):
         baseline = canonical_campaign(counter_ids=[123])
@@ -1154,8 +1515,9 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
                 lock_policy=FakeLockPolicy(),
             )
         self.assertEqual(raised.exception.partial["provider_warnings"][0]["Code"], 998)
-        self.assertEqual(api.mutation_requests, 1)
+        self.assertEqual(api.mutation_requests, 2)
         self.assertEqual(len(api.moderate_payloads), 1)
+        self.assertEqual(api.campaign["State"], "SUSPENDED")
 
     def test_v5_is_never_used_for_mutation(self):
         api = FakeApi()
@@ -1169,6 +1531,69 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         mutations = [item for item in api.request_log if item["mutation_kind"]]
         self.assertEqual(len(mutations), 1)
         self.assertEqual(mutations[0]["version"], "v501")
+
+    def test_cli_saves_returned_blocked_receipt_and_exits_nonzero(self):
+        blocked = {
+            "schema": 1,
+            "operator": "yandex-direct-rosomaha-rus-measurement-v1",
+            "generated_at": "2026-08-25T00:00:00+00:00",
+            "mode": "audit",
+            "status": "blocked",
+            "error": "synthetic offline block",
+            "mutation_requests": 0,
+        }
+
+        class CliFakeApi:
+            def __init__(self, token: str):
+                self.request_log: list[dict[str, Any]] = []
+
+        previous_report_root = operator.REPORT_ROOT
+        operator.REPORT_ROOT = self.evidence_dir
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with (
+                patch.object(operator, "resolve_route", return_value={"verified": True}),
+                patch.object(operator, "load_project_token", return_value="offline-token"),
+                patch.object(operator, "DirectApi", CliFakeApi),
+                patch.object(operator, "run_operation", return_value=blocked),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = operator.main(["audit"])
+        finally:
+            operator.REPORT_ROOT = previous_report_root
+
+        self.assertEqual(exit_code, 1)
+        receipts = list(self.evidence_dir.glob("ROSOMAHA_RUS_DIRECT_MEASUREMENT_audit_*.json"))
+        self.assertEqual(len(receipts), 1)
+        saved = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "blocked")
+        self.assertIn(str(receipts[0]), stdout.getvalue())
+        self.assertIn("не подтверждает безопасное завершение", stderr.getvalue())
+        self.assertNotIn("offline-token", receipts[0].read_text(encoding="utf-8"))
+
+    def test_cli_exit_code_is_fail_closed_for_failure_and_unknown_statuses(self):
+        for status in (
+            "blocked",
+            "error",
+            "failed",
+            "manual_inspection_required",
+            "in_progress",
+            "unexpected_success",
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(operator.receipt_exit_code({"status": status}), 1)
+
+    def test_cli_exit_code_zero_only_for_verified_safe_audit(self):
+        api = FakeApi()
+        receipt = operator.run_operation(api, "audit")
+        receipt["request_log"] = api.request_log
+        self.assertEqual(operator.receipt_exit_code(receipt), 0)
+
+        unsafe = copy.deepcopy(receipt)
+        unsafe["canonical_campaign"]["state"] = "ON"
+        self.assertEqual(operator.receipt_exit_code(unsafe), 1)
 
 
 if __name__ == "__main__":
