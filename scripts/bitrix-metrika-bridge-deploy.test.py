@@ -85,13 +85,18 @@ class FakeSFTP:
                 "gid": operator.EXPECTED_GID,
             }
             for path, mode in {
-                operator.HOME_ROOT: 0o755,
-                operator.SITE_ROOT: 0o755,
-                operator.PHP_INTERFACE_DIRECTORY: 0o755,
-                operator.COUNTER_DIRECTORY: 0o755,
+                operator.HOME_ROOT: 0o700,
+                operator.SITE_ROOT: 0o700,
+                operator.PHP_INTERFACE_DIRECTORY: 0o700,
+                operator.COUNTER_DIRECTORY: 0o700,
                 operator.OPERATION_PARENT: 0o700,
             }.items()
         }
+        self.dirs[operator.HOME_ROOT].update(
+            mode=stat.S_IFDIR | 0o700,
+            uid=0,
+            gid=0,
+        )
         self.calls: list[tuple] = []
         self.closed = False
 
@@ -403,6 +408,30 @@ class CandidateContractTests(unittest.TestCase):
 
 
 class ReceiptAndReadOnlyTests(unittest.TestCase):
+    def test_beget_chroot_owner_exception_is_exact_path_only(self) -> None:
+        sftp = baseline_sftp()
+        home = operator._require_pinned_parent(sftp, operator.HOME_ROOT)
+        self.assertEqual((home["uid"], home["gid"], home["mode"]), (0, 0, "0700"))
+        site = operator._require_pinned_parent(sftp, operator.SITE_ROOT)
+        self.assertEqual(
+            (site["uid"], site["gid"], site["mode"]),
+            (operator.EXPECTED_UID, operator.EXPECTED_GID, "0700"),
+        )
+        with self.assertRaisesRegex(operator.DeployError, "outside the pinned policy"):
+            operator._require_pinned_parent(sftp, operator.HOME_ROOT + "/other")
+        sftp.dirs[operator.SITE_ROOT]["uid"] = 0
+        sftp.dirs[operator.SITE_ROOT]["gid"] = 0
+        with self.assertRaisesRegex(operator.DeployError, "path-specific identity drifted"):
+            operator._require_pinned_parent(sftp, operator.SITE_ROOT)
+
+    def test_all_pinned_parent_policies_match_read_only_fixture(self) -> None:
+        observed = operator._audit_pinned_parents(baseline_sftp())
+        self.assertEqual(
+            [item["path"] for item in observed],
+            list(operator.PINNED_PARENT_POLICIES),
+        )
+        self.assertTrue(all(item["mode"] == "0700" for item in observed))
+
     def test_receipt_never_serializes_runtime_credential(self) -> None:
         value = "NeverSerializeThisCredential123456"
         payload = operator._base_receipt("dry-run", runtime(value))
@@ -457,7 +486,24 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
             mock.patch.object(operator, "load_runtime", return_value=fake_runtime),
             mock.patch.object(operator, "validate_bridge_candidate", return_value=b"bridge"),
             mock.patch.object(operator, "_candidate_lint_local", return_value={"status": "pass"}),
-            mock.patch.object(operator, "_connect_and_close", return_value=([plan], "bitrix-metrika-" + "a" * 24, options)),
+            mock.patch.object(
+                operator,
+                "_connect_and_close",
+                return_value=(
+                    [plan],
+                    "bitrix-metrika-" + "a" * 24,
+                    options,
+                    [
+                        {
+                            "path": operator.HOME_ROOT,
+                            "type": "directory_non_symlink",
+                            "uid": 0,
+                            "gid": 0,
+                            "mode": "0700",
+                        }
+                    ],
+                ),
+            ),
             mock.patch.object(operator, "write_local_receipt", return_value=Path("dry-run.json")),
             mock.patch.object(operator, "apply_remote") as apply_remote,
         ):
@@ -466,6 +512,7 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["remote_writes_requested"])
         self.assertEqual(payload["aspro_options"]["mutations"], 0)
+        self.assertEqual(payload["parent_directories"][0]["uid"], 0)
         apply_remote.assert_not_called()
 
 

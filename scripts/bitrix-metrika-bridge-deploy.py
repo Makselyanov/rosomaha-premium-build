@@ -153,6 +153,20 @@ OPERATOR_REVISION = "bitrix-metrika-bridge-pinned-v1"
 ASPRO_MODULE = "aspro.allcorp3"
 ASPRO_OPTION = "YA_COUNTER_ID"
 ASPRO_SITE_ID = "s1"
+PINNED_PARENT_POLICIES = {
+    # Beget exposes the account's SFTP chroot root as root:root/0700 even
+    # though descendants are owned by the account uid/gid.  This exception is
+    # valid for this exact path only; it is never inherited by child paths.
+    HOME_ROOT: {"uid": 0, "gid": 0, "mode": 0o700},
+    SITE_ROOT: {"uid": EXPECTED_UID, "gid": EXPECTED_GID, "mode": 0o700},
+    PHP_INTERFACE_DIRECTORY: {
+        "uid": EXPECTED_UID,
+        "gid": EXPECTED_GID,
+        "mode": 0o700,
+    },
+    COUNTER_DIRECTORY: {"uid": EXPECTED_UID, "gid": EXPECTED_GID, "mode": 0o700},
+    OPERATION_PARENT: {"uid": EXPECTED_UID, "gid": EXPECTED_GID, "mode": 0o700},
+}
 OWNED_FILES = (
     "integrations/legacy-bitrix/local/php_interface/rosomaha_crm_bridge.php",
     "scripts/bitrix-metrika-bridge-deploy.py",
@@ -603,6 +617,33 @@ def _require_directory(
     return info
 
 
+def _require_pinned_parent(sftp: Any, path: str) -> dict[str, Any]:
+    policy = PINNED_PARENT_POLICIES.get(path)
+    if policy is None:
+        raise DeployError("Remote parent path is outside the pinned policy")
+    attrs = sftp.lstat(path)
+    if not stat.S_ISDIR(attrs.st_mode):
+        raise DeployError("Pinned remote parent is not a plain directory")
+    observed = {
+        "path": path,
+        "type": "directory_non_symlink",
+        "uid": int(attrs.st_uid),
+        "gid": int(attrs.st_gid),
+        "mode": f"{stat.S_IMODE(attrs.st_mode):04o}",
+    }
+    if (
+        observed["uid"] != policy["uid"]
+        or observed["gid"] != policy["gid"]
+        or observed["mode"] != f"{policy['mode']:04o}"
+    ):
+        raise DeployError("Pinned remote parent path-specific identity drifted")
+    return observed
+
+
+def _audit_pinned_parents(sftp: Any) -> list[dict[str, Any]]:
+    return [_require_pinned_parent(sftp, path) for path in PINNED_PARENT_POLICIES]
+
+
 def read_remote_file(
     sftp: Any, path: str, *, allow_missing: bool = False, sensitive: bool = False
 ) -> tuple[bytes | None, dict[str, Any]]:
@@ -846,11 +887,7 @@ def _make_directory(sftp: Any, path: str) -> None:
 
 
 def _prepare_directories(sftp: Any, paths: Mapping[str, Any]) -> None:
-    _require_directory(sftp, HOME_ROOT)
-    _require_directory(sftp, SITE_ROOT)
-    _require_directory(sftp, PHP_INTERFACE_DIRECTORY)
-    _require_directory(sftp, COUNTER_DIRECTORY)
-    _require_directory(sftp, OPERATION_PARENT)
+    _audit_pinned_parents(sftp)
     _make_directory(sftp, OPERATION_ROOT)
     if _exists(sftp, str(paths["directory"])):
         raise DeployError("Operation directory already exists; inspect before retry")
@@ -1109,14 +1146,17 @@ def _is_candidate(plan: Mapping[str, Any]) -> bool:
     return state == "candidate"
 
 
-def _snapshot(client: Any, runtime: Mapping[str, Any], bridge: bytes) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+def _snapshot(
+    client: Any, runtime: Mapping[str, Any], bridge: bytes
+) -> tuple[list[dict[str, Any]], str, dict[str, Any], list[dict[str, Any]]]:
     sftp = client.open_sftp()
     try:
         plans, operation_id = _plans_from_remote(sftp, runtime, bridge)
+        parents = _audit_pinned_parents(sftp)
     finally:
         sftp.close()
     options = aspro_options(client, "audit", int(runtime["counter_id"]))
-    return plans, operation_id, options
+    return plans, operation_id, options, parents
 
 
 def _connect_and_close(callback: Callable[[Any], Any]) -> Any:
@@ -1698,7 +1738,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     _candidate_lint_local(bridge)
-    plans, operation_id, options = _connect_and_close(
+    plans, operation_id, options, parents = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     payload = _base_receipt("audit", runtime) | {
@@ -1707,6 +1747,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
         "read_only": True,
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
+        "parent_directories": parents,
     }
     return payload, write_local_receipt("audit", payload)
 
@@ -1715,7 +1756,7 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     lint = _candidate_lint_local(bridge)
-    plans, operation_id, options = _connect_and_close(
+    plans, operation_id, options, parents = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     ready = all(_is_baseline(plan) for plan in plans) and all(
@@ -1728,6 +1769,7 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
         "local_php_lint": lint,
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
+        "parent_directories": parents,
         "apply_guard": {"environment": APPLY_GUARD_ENV, "exact_value_required": True},
         "transaction": {
             "same_directory_atomic_renames": 3,
