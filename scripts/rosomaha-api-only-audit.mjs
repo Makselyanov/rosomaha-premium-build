@@ -8,7 +8,7 @@ const outDir = path.join(rootDir, "marketing-audits");
 const jsonDir = path.join(outDir, "api-only-snapshots");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const directLoginDefault = "rosomaha-rus999";
-const campaigns = ["708505950", "705770573", "710087376"];
+const campaigns = ["708505950", "708506873", "705770573", "710087376"];
 const counters = [
   { name: "catalog", id: "107139619", hardGoalId: "517600157", site: "xn--80aa8ahaki9a.site" },
   { name: "quiz", id: "105918356", hardGoalId: "496461698", site: "rosomaha.site" },
@@ -69,6 +69,16 @@ function numberValue(value) {
   return Number(String(value || "0").replace(",", "."));
 }
 
+function hostFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "--") return null;
+  try {
+    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function parseTsv(tsv) {
   const lines = tsv.split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length) return [];
@@ -99,28 +109,37 @@ function directJsonRequest(env, service, method, params) {
     "Content-Type: application/json; charset=utf-8",
     "--data-binary",
     body,
-    `https://api.direct.yandex.com/json/v5/${service}`,
+    `https://api.direct.yandex.com/json/v501/${service}`,
   ]);
   if (!result.ok) return result;
   if (result.data?.error) return { ok: false, error: result.data.error };
   return { ok: true, data: result.data.result };
 }
 
-function directReport(env, reportType, fields, date1, date2, extraFilter = []) {
+function directReport(env, reportType, fields, date1, date2, extraFilter = [], options = {}) {
   const token = env.YANDEX_OAUTH_TOKEN;
   const login = env.YANDEX_DIRECT_LOGIN || directLoginDefault;
   if (!token) return { ok: false, error: "missing YANDEX_OAUTH_TOKEN" };
+  const dateRangeType = options.dateRangeType || "CUSTOM_DATE";
+  const selectedCampaigns = Object.hasOwn(options, "campaigns") ? options.campaigns : campaigns;
+  const filters = [];
+  if (selectedCampaigns?.length) {
+    filters.push({ Field: "CampaignId", Operator: "IN", Values: selectedCampaigns });
+  }
+  filters.push(...extraFilter);
+  const selectionCriteria = {};
+  if (dateRangeType === "CUSTOM_DATE") {
+    selectionCriteria.DateFrom = date1;
+    selectionCriteria.DateTo = date2;
+  }
+  if (filters.length) selectionCriteria.Filter = filters;
   const body = JSON.stringify({
     params: {
-      SelectionCriteria: {
-        DateFrom: date1,
-        DateTo: date2,
-        Filter: [{ Field: "CampaignId", Operator: "IN", Values: campaigns }, ...extraFilter],
-      },
+      SelectionCriteria: selectionCriteria,
       FieldNames: fields,
       ReportName: `codex_rosomaha_${reportType}_${Date.now()}`,
       ReportType: reportType,
-      DateRangeType: "CUSTOM_DATE",
+      DateRangeType: dateRangeType,
       Format: "TSV",
       IncludeVAT: "NO",
       IncludeDiscount: "NO",
@@ -153,7 +172,7 @@ function directReport(env, reportType, fields, date1, date2, extraFilter = []) {
       "skipReportSummary: true",
       "--data-binary",
       body,
-      "https://api.direct.yandex.com/json/v5/reports",
+      "https://api.direct.yandex.com/json/v501/reports",
     ], { timeout: 60000 });
 
     if (!result.ok) return { ok: false, error: `curl exit ${result.status}`, raw: result.stdout || result.stderr };
@@ -200,13 +219,16 @@ function gscStatus(env) {
   return { ok: true, note: "GSC config present; use npm run seo:gsc for detailed Search Console report" };
 }
 
-function aggregateCampaignRows(rows) {
+function aggregateCampaignRows(rows, includeWatchedDefaults = true) {
   const totals = new Map();
   for (const row of rows) {
     const id = row.CampaignId || "unknown";
     const current = totals.get(id) || {
       campaignId: id,
       campaignName: row.CampaignName || "",
+      campaignType: row.CampaignType || "",
+      campaignUrlPath: row.CampaignUrlPath || "",
+      campaignHost: hostFromUrl(row.CampaignUrlPath),
       impressions: 0,
       clicks: 0,
       cost: 0,
@@ -218,19 +240,29 @@ function aggregateCampaignRows(rows) {
     current.conversions += numberValue(row.Conversions);
     totals.set(id, current);
   }
-  for (const id of campaigns) {
-    if (!totals.has(id)) {
-      totals.set(id, {
-        campaignId: id,
-        campaignName: "",
-        impressions: 0,
-        clicks: 0,
-        cost: 0,
-        conversions: 0,
-      });
+  if (includeWatchedDefaults) {
+    for (const id of campaigns) {
+      if (!totals.has(id)) {
+        totals.set(id, {
+          campaignId: id,
+          campaignName: "",
+          campaignType: "",
+          campaignUrlPath: "",
+          campaignHost: null,
+          impressions: 0,
+          clicks: 0,
+          cost: 0,
+          conversions: 0,
+        });
+      }
     }
   }
-  return [...totals.values()].sort((a, b) => campaigns.indexOf(a.campaignId) - campaigns.indexOf(b.campaignId));
+  return [...totals.values()].sort((a, b) => {
+    const aIndex = campaigns.indexOf(a.campaignId);
+    const bIndex = campaigns.indexOf(b.campaignId);
+    if (aIndex >= 0 || bIndex >= 0) return (aIndex >= 0 ? aIndex : Number.MAX_SAFE_INTEGER) - (bIndex >= 0 ? bIndex : Number.MAX_SAFE_INTEGER);
+    return Number(a.campaignId) - Number(b.campaignId);
+  });
 }
 
 function summarizeMetrikaRows(data) {
@@ -246,13 +278,14 @@ function buildMarkdown(report) {
   const lines = [
     `# Росомаха API-only аудит ${report.generatedAt.slice(0, 10)}`,
     "",
-    `Источник: только API/local scripts. Browser/UI запрещены для этого запуска.`,
-    `Direct login: \`${report.policy.directLogin}\``,
+    `Источник: только API и локальные сценарии. Браузер и UI не использовались.`,
+    `Логин Direct: \`${report.policy.directLogin}\``,
     "",
     "## Что проверено",
     "",
-    "- Яндекс Директ: кампании 708505950, 705770573, 710087376 через campaigns.get и Reports API.",
+    "- Яндекс Директ: управляемые ЕПК через `campaigns.get v501`; все исторически показывавшиеся кампании и их посадочные через Reports API `CampaignUrlPath`.",
     "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517600157 (crm_conversion после ответа CRM) / 496461698 за 1, 7, 30 дней. Старую DOM-цель формы 517599639 считать мягкой.",
+    "- rosomaha-rus.ru: отдельный объект; публично установлен счетчик 50606578, но API-доступ и hard goal этим запуском не переносятся с других доменов.",
     "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
     "- Google Search Console: только наличие проектного API-конфига, без браузера и OAuth UI.",
     "",
@@ -269,12 +302,12 @@ function buildMarkdown(report) {
       if (campaign) {
         lines.push(`- ${id}: State=${campaign.State || "n/a"}, Status=${campaign.Status || "n/a"}`);
       } else {
-        lines.push(`- ${id}: not returned by campaigns.get; use Reports API/Metrika as source of truth and do not mutate through an unconfirmed method`);
+        lines.push(`- ${id}: не возвращён ` + "`campaigns.get`" + `; для кампаний Мастера использовать только Reports API и не менять их через неподтверждённый метод`);
       }
     }
     lines.push("");
   } else {
-    lines.push(`- campaigns.get error: ${report.direct.campaignsSnapshot.error}`);
+    lines.push(`- Ошибка campaigns.get: ${report.direct.campaignsSnapshot.error}`);
     lines.push("");
   }
 
@@ -285,10 +318,22 @@ function buildMarkdown(report) {
       continue;
     }
     for (const row of range.totals) {
-      lines.push(`- ${row.campaignId}: ${row.cost.toFixed(2)} ₽ / ${row.clicks} кликов / ${row.impressions} показов / Direct conversions ${row.conversions}`);
+      lines.push(`- ${row.campaignId}: ${row.cost.toFixed(2)} ₽ / ${row.clicks} кликов / ${row.impressions} показов / конверсии Direct ${row.conversions} (не считать заявками)`);
     }
     lines.push("");
   }
+
+  lines.push("## Посадочные кампаний Direct за всё время");
+  lines.push("");
+  if (report.direct.accountLandingMap.ok) {
+    for (const row of report.direct.accountLandingMap.campaigns) {
+      lines.push(`- ${row.campaignId} — ${row.campaignName || "без названия"}: ${row.campaignUrlPath || "URL недоступен"} (${row.campaignType || "тип недоступен"})`);
+    }
+    lines.push(`- rosomaha-rus.ru: ${report.direct.accountLandingMap.matchesRosomahaRus.length ? "найдена кампания" : "кампания со статистикой не обнаружена"}. Черновик Мастера без показов публичный Reports API не доказывает.`);
+  } else {
+    lines.push(`- Источник недоступен: ${report.direct.accountLandingMap.error}`);
+  }
+  lines.push("");
 
   lines.push("## Метрика: hard goals");
   lines.push("");
@@ -357,17 +402,19 @@ const policy = {
   directLogin: env.YANDEX_DIRECT_LOGIN || directLoginDefault,
   catalog: "https://xn--80aa8ahaki9a.site/",
   quiz: "https://rosomaha.site/",
+  bitrix: "https://rosomaha-rus.ru/",
 };
 
 const campaignsSnapshot = directJsonRequest(env, "campaigns", "get", {
   SelectionCriteria: { Ids: campaigns.map(Number) },
   FieldNames: ["Id", "Name", "Status", "State", "Type", "StartDate", "EndDate"],
   TextCampaignFieldNames: ["BiddingStrategy", "Settings"],
+  UnifiedCampaignFieldNames: ["CounterIds"],
 });
 
 const directRanges = [1, 7, 30].map((days) => {
   const range = rangeForDays(days);
-  const result = directReport(env, "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "Impressions", "Clicks", "Cost", "Conversions"], range.date1, range.date2);
+  const result = directReport(env, "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"], range.date1, range.date2);
   return {
     ...range,
     ok: result.ok,
@@ -379,6 +426,16 @@ const directRanges = [1, 7, 30].map((days) => {
 
 const queryRange = rangeForDays(7);
 const queries = directReport(env, "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "Query", "Impressions", "Clicks", "Cost", "Conversions"], queryRange.date1, queryRange.date2);
+const accountLandingResult = directReport(
+  env,
+  "CAMPAIGN_PERFORMANCE_REPORT",
+  ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"],
+  null,
+  null,
+  [],
+  { dateRangeType: "ALL_TIME", campaigns: null },
+);
+const accountLandingCampaigns = accountLandingResult.ok ? aggregateCampaignRows(accountLandingResult.rows, false) : [];
 const metrika = {
   counters: counters.map((counter) => ({
     ...counter,
@@ -423,6 +480,12 @@ const report = {
   direct: {
     campaignsSnapshot,
     ranges: directRanges,
+    accountLandingMap: {
+      ok: accountLandingResult.ok,
+      error: accountLandingResult.error || null,
+      campaigns: accountLandingCampaigns,
+      matchesRosomahaRus: accountLandingCampaigns.filter((campaign) => ["rosomaha-rus.ru", "www.rosomaha-rus.ru"].includes(campaign.campaignHost)),
+    },
     queries: {
       ok: queries.ok,
       error: queries.error || null,
