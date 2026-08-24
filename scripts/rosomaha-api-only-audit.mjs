@@ -640,9 +640,10 @@ async function gscStatus(env) {
     });
   } catch (error) {
     const detail = String(error?.message || "");
+    const invalidGrant = detail.includes("invalid_grant") || /expired or revoked/iu.test(detail);
     return {
       ok: false,
-      reason: detail.includes("invalid_grant") ? "invalid_grant" : "gsc_oauth_failed",
+      reason: invalidGrant ? "invalid_grant" : "gsc_oauth_failed",
       detail,
     };
   }
