@@ -1738,6 +1738,10 @@ def apply_remote(
     options_state_unknown = False
     try:
         plans, operation_id = _plans_from_remote(sftp, runtime, bridge)
+        operation_paths = _paths(operation_id, plans)
+        operation_probe = _observe_operation_directory(sftp, operation_paths, plans)
+        if operation_probe.get("status") not in {"missing", "reusable_rolled_back"}:
+            raise DeployError("Existing operation directory is not an exact rolled-back transaction")
         transaction_lock = _acquire_transaction_lock(
             sftp, mode="apply", operation_id=operation_id
         )
@@ -1916,12 +1920,21 @@ def rollback_remote(
     public_verifier: Callable[[int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sftp = client.open_sftp()
+    transaction_lock: dict[str, Any] | None = None
     try:
         plans, expected_id = _plans_from_remote_for_rollback(
             sftp, operation_id, runtime, bridge
         )
         if operation_id != expected_id:
             raise DeployError("Rollback operation id does not match the pinned candidates")
+        transaction_lock = _acquire_transaction_lock(
+            sftp, mode="rollback", operation_id=operation_id
+        )
+        plans, locked_expected_id = _plans_from_remote_for_rollback(
+            sftp, operation_id, runtime, bridge
+        )
+        if locked_expected_id != operation_id:
+            raise DeployError("Rollback operation changed while acquiring transaction lock")
         paths = _paths(operation_id, plans)
         _require_directory(
             sftp,
@@ -1974,6 +1987,12 @@ def rollback_remote(
             "aspro_options": option_rollback,
             "public": public,
             "atomic_same_directory_replace": True,
+            "transaction_lock": {
+                "path": TRANSACTION_LOCK_PATH,
+                "exclusive_create": "wx",
+                "scope": "apply_and_rollback",
+                "release": "finally_exact_owner_only",
+            },
         }
         if not _exists(sftp, paths["rollback_receipt"]):
             payload["remote_receipt"] = _write_remote_receipt(
@@ -1981,7 +2000,21 @@ def rollback_remote(
             )
         return payload
     finally:
-        sftp.close()
+        primary_exc = sys.exc_info()[1]
+        try:
+            if transaction_lock is not None:
+                _release_transaction_lock(sftp, transaction_lock)
+        except Exception as lock_exc:
+            if primary_exc is not None:
+                raise DeployError(
+                    "Rollback failed and its exact owned lock could not be released: "
+                    + safe_error(lock_exc)
+                    + "; redacted primary cause: "
+                    + safe_error(primary_exc)
+                ) from primary_exc
+            raise
+        finally:
+            sftp.close()
 
 
 def _plans_from_remote_for_rollback(

@@ -537,6 +537,10 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
                         + "/bitrix-metrika-"
                         + "a" * 24,
                     },
+                    {
+                        "status": "missing",
+                        "path": operator.TRANSACTION_LOCK_PATH,
+                    },
                 ),
             ),
             mock.patch.object(operator, "write_local_receipt", return_value=Path("dry-run.json")),
@@ -549,6 +553,7 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         self.assertEqual(payload["aspro_options"]["mutations"], 0)
         self.assertEqual(payload["parent_directories"][0]["uid"], 0)
         self.assertEqual(payload["operation_directory"]["status"], "missing")
+        self.assertEqual(payload["transaction_lock"]["status"], "missing")
         apply_remote.assert_not_called()
 
 
@@ -876,8 +881,11 @@ class TransactionTests(unittest.TestCase):
                     [
                         call
                         for call in sftp.calls
-                        if call[0] in {"mkdir", "posix_rename", "remove"}
-                        or (call[0] == "open" and call[2] == "wx")
+                        if operator.TRANSACTION_LOCK_PATH not in call
+                        and (
+                            call[0] in {"mkdir", "posix_rename", "remove"}
+                            or (call[0] == "open" and call[2] == "wx")
+                        )
                     ]
                 )
                 with self.assertRaisesRegex(
@@ -893,8 +901,11 @@ class TransactionTests(unittest.TestCase):
                     [
                         call
                         for call in sftp.calls
-                        if call[0] in {"mkdir", "posix_rename", "remove"}
-                        or (call[0] == "open" and call[2] == "wx")
+                        if operator.TRANSACTION_LOCK_PATH not in call
+                        and (
+                            call[0] in {"mkdir", "posix_rename", "remove"}
+                            or (call[0] == "open" and call[2] == "wx")
+                        )
                     ]
                 )
         self.assertEqual(writes_after, writes_before)
