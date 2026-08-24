@@ -119,6 +119,26 @@ class FakeSFTP:
             raise FileNotFoundError(2, "missing", path)
         return FakeHandle(self, path, mode)
 
+    def listdir_attr(self, path: str):
+        prefix = path.rstrip("/") + "/"
+        children = []
+        for candidate, item in {**self.dirs, **self.files}.items():
+            if not candidate.startswith(prefix):
+                continue
+            name = candidate[len(prefix) :]
+            if not name or "/" in name:
+                continue
+            children.append(
+                types.SimpleNamespace(
+                    filename=name,
+                    st_size=len(item.get("data", b"")),
+                    st_mode=item["mode"],
+                    st_uid=item["uid"],
+                    st_gid=item["gid"],
+                )
+            )
+        return children
+
     def mkdir(self, path: str, mode: int = 0o777) -> None:
         self.calls.append(("mkdir", path, mode))
         if path in self.files or path in self.dirs:
@@ -445,6 +465,15 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
             with self.assertRaises(operator.DeployError):
                 operator._receipt_bytes({"safe": {key: "x"}})
 
+    def test_original_cause_is_redacted_before_receipt_serialization(self) -> None:
+        value = "NeverSerializeThisCauseValue"
+        error = operator.safe_error(
+            operator.PublicVerificationError("token=" + value)
+        )
+        body = operator._receipt_bytes({"status": "error", "error": error})
+        self.assertNotIn(value.encode(), body)
+        self.assertIn(b"token=[redacted]", body)
+
     def test_operation_id_is_independent_of_runtime_credential(self) -> None:
         goal_ids = {"crm_conversion": 1, "lead_submit": 2}
         first = operator._operation_id(
@@ -502,6 +531,12 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
                             "mode": "0700",
                         }
                     ],
+                    {
+                        "status": "missing",
+                        "path": operator.OPERATION_ROOT
+                        + "/bitrix-metrika-"
+                        + "a" * 24,
+                    },
                 ),
             ),
             mock.patch.object(operator, "write_local_receipt", return_value=Path("dry-run.json")),
@@ -513,6 +548,7 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         self.assertFalse(payload["remote_writes_requested"])
         self.assertEqual(payload["aspro_options"]["mutations"], 0)
         self.assertEqual(payload["parent_directories"][0]["uid"], 0)
+        self.assertEqual(payload["operation_directory"]["status"], "missing")
         apply_remote.assert_not_called()
 
 
@@ -554,6 +590,53 @@ class PublicContractTests(unittest.TestCase):
                 operator.TARGET_COUNTER_ID, expected="candidate", fetcher=lambda _: dual
             )
 
+    def test_public_candidate_requires_two_consecutive_cache_bypassed_reads(self) -> None:
+        bodies = iter(
+            [
+                self.html(operator.OLD_COUNTER_ID, marker=False),
+                self.html(operator.TARGET_COUNTER_ID, marker=True),
+                self.html(operator.TARGET_COUNTER_ID, marker=True),
+            ]
+        )
+        sleeps: list[float] = []
+        result = operator.verify_public_counter_converged(
+            operator.TARGET_COUNTER_ID,
+            expected="candidate",
+            fetcher=lambda _: next(bodies),
+            sleeper=sleeps.append,
+        )
+        self.assertEqual(result["attempts"], 3)
+        self.assertEqual(result["consecutive_confirmations"], 2)
+        self.assertTrue(result["cache_bypassed"])
+        self.assertEqual(sleeps, [operator.PUBLIC_VERIFY_DELAY_SECONDS] * 2)
+
+    def test_public_candidate_never_accepts_one_transient_match(self) -> None:
+        bodies = iter(
+            [
+                self.html(operator.TARGET_COUNTER_ID, marker=True),
+                self.html(operator.OLD_COUNTER_ID, marker=False),
+                self.html(operator.TARGET_COUNTER_ID, marker=True),
+                self.html(operator.OLD_COUNTER_ID, marker=False),
+            ]
+        )
+        with self.assertRaisesRegex(
+            operator.PublicVerificationError, "did not converge"
+        ):
+            operator.verify_public_counter_converged(
+                operator.TARGET_COUNTER_ID,
+                expected="candidate",
+                fetcher=lambda _: next(bodies),
+                sleeper=lambda _: None,
+            )
+
+    def test_public_urls_use_distinct_validated_cache_busters(self) -> None:
+        first = operator._public_url(operator.TARGET_COUNTER_ID)
+        second = operator._public_url(operator.TARGET_COUNTER_ID)
+        self.assertNotEqual(first, second)
+        self.assertIn("rosomaha_cache_bust=", first)
+        with self.assertRaises(ValueError):
+            operator._public_url(operator.TARGET_COUNTER_ID, "not-pinned")
+
 
 class TransactionTests(unittest.TestCase):
     def patches(self, option_state, option_calls):
@@ -566,6 +649,31 @@ class TransactionTests(unittest.TestCase):
             ),
             mock.patch.object(operator, "aspro_options", side_effect=option_stub(option_state, option_calls)),
         )
+
+    def rolled_back_sftp(self) -> FakeSFTP:
+        state = {
+            "site_s1": str(operator.OLD_COUNTER_ID),
+            "global": str(operator.OLD_COUNTER_ID),
+        }
+        calls: list[str] = []
+        sftp = baseline_sftp()
+        client = FakeClient(sftp)
+        first, second, third = self.patches(state, calls)
+        with first, second, third:
+            try:
+                operator.apply_remote(
+                    client,
+                    runtime(),
+                    FIXTURE_BRIDGE_CANDIDATE,
+                    public_verifier=lambda _: (_ for _ in ()).throw(
+                        operator.PublicVerificationError("fixture live gate failed")
+                    ),
+                )
+            except operator.DeployError:
+                pass
+            else:
+                raise AssertionError("Failed-apply fixture did not roll back")
+        return sftp
 
     def test_apply_uses_same_directory_renames_backups_and_exact_option_cas(self) -> None:
         state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
@@ -625,7 +733,7 @@ class TransactionTests(unittest.TestCase):
             client = FakeClient(sftp)
             first, second, third = self.patches(state, calls)
             with first, second, third:
-                with self.assertRaisesRegex(operator.DeployError, "were restored"):
+                with self.assertRaises(operator.DeployError) as raised:
                     operator.apply_remote(
                         client,
                         runtime(),
@@ -634,12 +742,162 @@ class TransactionTests(unittest.TestCase):
                             operator.PublicVerificationError("offline public failure")
                         ),
                     )
+        self.assertIn(
+            "redacted original cause: PublicVerificationError: offline public failure",
+            str(raised.exception),
+        )
+        self.assertIn("were restored", str(raised.exception))
         self.assertEqual(sftp.files[operator.BRIDGE_PATH]["data"], FIXTURE_BRIDGE_BASELINE)
         self.assertEqual(sftp.files[operator.INIT_PATH]["data"], FIXTURE_INIT)
         self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], FIXTURE_COUNTER_BASELINE)
         self.assertNotIn(operator.CONFIG_PATH, sftp.files)
         self.assertEqual(set(state.values()), {str(operator.OLD_COUNTER_ID)})
         self.assertEqual(calls, ["audit", "apply", "rollback"])
+
+    def test_exact_rolled_back_operation_is_reused_without_overwriting_backups(self) -> None:
+        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        calls: list[str] = []
+        with fixture_pins():
+            sftp = baseline_sftp()
+            client = FakeClient(sftp)
+            first, second, third = self.patches(state, calls)
+            with first, second, third:
+                with self.assertRaises(operator.DeployError):
+                    operator.apply_remote(
+                        client,
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda _: (_ for _ in ()).throw(
+                            operator.PublicVerificationError("first live gate failed")
+                        ),
+                    )
+                retried = operator.apply_remote(
+                    client,
+                    runtime(),
+                    FIXTURE_BRIDGE_CANDIDATE,
+                    public_verifier=lambda counter: {"status": 200, "counter_id": counter},
+                )
+        self.assertEqual(retried["status"], "applied")
+        self.assertEqual(
+            retried["operation_directory"]["status"], "reusable_rolled_back"
+        )
+        operation = operator.OPERATION_ROOT + "/" + retried["operation_id"]
+        for name in ("bridge", "init", "counter"):
+            writes = [
+                call
+                for call in sftp.calls
+                if call == ("open", operation + f"/{name}.before", "wx")
+            ]
+            self.assertEqual(len(writes), 1)
+
+    def test_reusable_operation_rejects_each_backup_type_mode_uid_and_gid_drift(self) -> None:
+        mutations = (
+            ("type", "mode", stat.S_IFLNK | 0o600),
+            ("permissions", "mode", stat.S_IFREG | 0o640),
+            ("uid", "uid", operator.EXPECTED_UID + 1),
+            ("gid", "gid", operator.EXPECTED_GID + 1),
+        )
+        for backup_name in ("bridge", "init", "counter"):
+            for case, field, value in mutations:
+                with self.subTest(backup=backup_name, case=case), fixture_pins():
+                    sftp = self.rolled_back_sftp()
+                    plans, operation_id = operator._plans_from_remote(
+                        sftp, runtime(), FIXTURE_BRIDGE_CANDIDATE
+                    )
+                    paths = operator._paths(operation_id, plans)
+                    backup = paths["items"][backup_name]["backup"]
+                    sftp.files[backup][field] = value
+                    with self.assertRaisesRegex(
+                        operator.DeployError,
+                        "type/size is unsafe|mode/ownership identity drifted|metadata drifted",
+                    ):
+                        operator._validate_reusable_rolled_back_operation(
+                            sftp, paths, plans
+                        )
+
+    def test_reusable_operation_rejects_marker_type_mode_uid_and_gid_drift(self) -> None:
+        mutations = (
+            ("type", "mode", stat.S_IFLNK | 0o600),
+            ("permissions", "mode", stat.S_IFREG | 0o640),
+            ("uid", "uid", operator.EXPECTED_UID + 1),
+            ("gid", "gid", operator.EXPECTED_GID + 1),
+        )
+        for case, field, value in mutations:
+            with self.subTest(case=case), fixture_pins():
+                sftp = self.rolled_back_sftp()
+                plans, operation_id = operator._plans_from_remote(
+                    sftp, runtime(), FIXTURE_BRIDGE_CANDIDATE
+                )
+                paths = operator._paths(operation_id, plans)
+                marker = paths["items"]["runtime_config"]["missing_marker"]
+                sftp.files[marker][field] = value
+                with self.assertRaisesRegex(
+                    operator.DeployError,
+                    "type/size is unsafe|mode/ownership identity drifted|metadata drifted",
+                ):
+                    operator._validate_reusable_rolled_back_operation(
+                        sftp, paths, plans
+                    )
+
+    def test_rolled_back_operation_with_unexpected_artifact_blocks_retry_before_write(self) -> None:
+        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        calls: list[str] = []
+        with fixture_pins():
+            sftp = baseline_sftp()
+            client = FakeClient(sftp)
+            first, second, third = self.patches(state, calls)
+            with first, second, third:
+                with self.assertRaises(operator.DeployError):
+                    operator.apply_remote(
+                        client,
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda _: (_ for _ in ()).throw(
+                            operator.PublicVerificationError("first live gate failed")
+                        ),
+                    )
+                operation_id = operator._operation_id(
+                    bridge=FIXTURE_BRIDGE_CANDIDATE,
+                    init=FIXTURE_INIT,
+                    counter=operator.build_counter_candidate(
+                        FIXTURE_COUNTER_BASELINE, operator.TARGET_COUNTER_ID
+                    ),
+                    counter_id=operator.TARGET_COUNTER_ID,
+                    goal_ids=runtime()["goal_ids"],
+                )
+                operation = operator.OPERATION_ROOT + "/" + operation_id
+                sftp.files[operation + "/unexpected"] = {
+                    "data": b"x",
+                    "mode": stat.S_IFREG | 0o600,
+                    "uid": operator.EXPECTED_UID,
+                    "gid": operator.EXPECTED_GID,
+                }
+                writes_before = len(
+                    [
+                        call
+                        for call in sftp.calls
+                        if call[0] in {"mkdir", "posix_rename", "remove"}
+                        or (call[0] == "open" and call[2] == "wx")
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    operator.DeployError, "not an exact rolled-back transaction"
+                ):
+                    operator.apply_remote(
+                        client,
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda counter: {"status": 200, "counter_id": counter},
+                    )
+                writes_after = len(
+                    [
+                        call
+                        for call in sftp.calls
+                        if call[0] in {"mkdir", "posix_rename", "remove"}
+                        or (call[0] == "open" and call[2] == "wx")
+                    ]
+                )
+        self.assertEqual(writes_after, writes_before)
 
     def test_explicit_rollback_restores_exact_baseline(self) -> None:
         state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}

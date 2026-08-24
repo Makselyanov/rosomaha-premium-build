@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -100,6 +101,9 @@ MAX_RUNTIME_BYTES = 8_192
 MAX_RECEIPT_BYTES = 1_000_000
 MAX_REMOTE_OUTPUT = 32_000
 MAX_PUBLIC_BYTES = 4_000_000
+PUBLIC_VERIFY_ATTEMPTS = 4
+PUBLIC_VERIFY_CONSECUTIVE = 2
+PUBLIC_VERIFY_DELAY_SECONDS = 2.0
 EXPECTED_PHP_SERIES = "8.2"
 PHP_CANDIDATES = (
     "/usr/local/php/cgi/8.2/bin/php",
@@ -886,14 +890,148 @@ def _make_directory(sftp: Any, path: str) -> None:
         raise DeployError("Created protected directory ownership is unsafe")
 
 
-def _prepare_directories(sftp: Any, paths: Mapping[str, Any]) -> None:
+def _expected_operation_entries(
+    paths: Mapping[str, Any], plans: Sequence[Mapping[str, Any]]
+) -> set[str]:
+    entries = set()
+    for plan in plans:
+        item = paths["items"][plan["name"]]
+        path = item["missing_marker"] if plan["baseline"] is None else item["backup"]
+        entries.add(str(path).rsplit("/", 1)[1])
+    return entries
+
+
+def _require_exact_operation_artifact_metadata(info: Mapping[str, Any]) -> None:
+    if (
+        info.get("regular_non_symlink") is not True
+        or info.get("mode") != f"{EXPECTED_FILE_MODE:04o}"
+        or info.get("uid") != EXPECTED_UID
+        or info.get("gid") != EXPECTED_GID
+    ):
+        raise DeployError("Existing operation artifact metadata drifted")
+
+
+def _validate_reusable_rolled_back_operation(
+    sftp: Any,
+    paths: Mapping[str, Any],
+    plans: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    directory = str(paths["directory"])
+    info = _require_directory(
+        sftp,
+        directory,
+        exact_mode=EXPECTED_DIRECTORY_MODE,
+        allow_group_world_read=False,
+    )
+    expected_entries = _expected_operation_entries(paths, plans)
+    observed_entries = {str(item.filename) for item in sftp.listdir_attr(directory)}
+    if observed_entries != expected_entries:
+        raise DeployError("Existing operation directory is not an exact rolled-back transaction")
+
+    for item in paths["items"].values():
+        if _exists(sftp, str(item["candidate_temp"])) or _exists(
+            sftp, str(item["rollback_temp"])
+        ):
+            raise DeployError("Existing operation has a staged or rollback temporary file")
+
+    backups = []
+    for plan in plans:
+        item = paths["items"][plan["name"]]
+        if plan["baseline"] is None:
+            marker = _receipt_bytes(
+                {"schema": 1, "state": "missing", "name": plan["name"]}
+            )
+            data, marker_info = read_remote_file(sftp, str(item["missing_marker"]))
+            _require_exact_operation_artifact_metadata(marker_info)
+            if data != marker:
+                raise DeployError("Existing operation missing-baseline marker is invalid")
+            backups.append(
+                {
+                    "name": plan["name"],
+                    "state": "missing",
+                    "marker": marker_info,
+                    "reused": True,
+                }
+            )
+            continue
+
+        data, backup_info = read_remote_file(sftp, str(item["backup"]))
+        _require_exact_operation_artifact_metadata(backup_info)
+        if (
+            data != plan["baseline"]
+            or len(data or b"") != int(plan["baseline_size"])
+            or backup_info.get("sha256") != plan["baseline_sha"]
+        ):
+            raise DeployError("Existing operation immutable backup is invalid")
+        backups.append(
+            {
+                "name": plan["name"],
+                "state": "file",
+                "file": backup_info,
+                "reused": True,
+            }
+        )
+
+    return {
+        "status": "reusable_rolled_back",
+        "path": directory,
+        "mode": info["mode"],
+        "uid": info["uid"],
+        "gid": info["gid"],
+        "entries": sorted(observed_entries),
+        "backups": backups,
+    }
+
+
+def _observe_operation_directory(
+    sftp: Any,
+    paths: Mapping[str, Any],
+    plans: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    directory = str(paths["directory"])
+    if not _exists(sftp, directory):
+        return {"status": "missing", "path": directory}
+    info = _require_directory(
+        sftp,
+        directory,
+        exact_mode=EXPECTED_DIRECTORY_MODE,
+        allow_group_world_read=False,
+    )
+    expected_entries = _expected_operation_entries(paths, plans)
+    observed_entries = {str(item.filename) for item in sftp.listdir_attr(directory)}
+    if observed_entries == expected_entries:
+        return _validate_reusable_rolled_back_operation(sftp, paths, plans)
+    return {
+        "status": "present_not_reusable",
+        "path": directory,
+        "mode": info["mode"],
+        "uid": info["uid"],
+        "gid": info["gid"],
+        "entry_count": len(observed_entries),
+        "expected_entries_only": False,
+    }
+
+
+def _prepare_directories(
+    sftp: Any,
+    paths: Mapping[str, Any],
+    plans: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
     _audit_pinned_parents(sftp)
     _make_directory(sftp, OPERATION_ROOT)
     if _exists(sftp, str(paths["directory"])):
-        raise DeployError("Operation directory already exists; inspect before retry")
-    _make_directory(sftp, str(paths["directory"]))
+        operation = _validate_reusable_rolled_back_operation(sftp, paths, plans)
+    else:
+        _make_directory(sftp, str(paths["directory"]))
+        operation = {
+            "status": "created",
+            "path": str(paths["directory"]),
+            "entries": [],
+            "backups": [],
+        }
     _make_directory(sftp, CONFIG_PARENT)
     _make_directory(sftp, CONFIG_DIRECTORY)
+    return operation
 
 
 def _exec_bounded(client: Any, command: str, *, timeout: int = 30) -> tuple[int, bytes, bytes]:
@@ -1148,15 +1286,24 @@ def _is_candidate(plan: Mapping[str, Any]) -> bool:
 
 def _snapshot(
     client: Any, runtime: Mapping[str, Any], bridge: bytes
-) -> tuple[list[dict[str, Any]], str, dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    str,
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
     sftp = client.open_sftp()
     try:
         plans, operation_id = _plans_from_remote(sftp, runtime, bridge)
         parents = _audit_pinned_parents(sftp)
+        operation = _observe_operation_directory(
+            sftp, _paths(operation_id, plans), plans
+        )
     finally:
         sftp.close()
     options = aspro_options(client, "audit", int(runtime["counter_id"]))
-    return plans, operation_id, options, parents
+    return plans, operation_id, options, parents, operation
 
 
 def _connect_and_close(callback: Callable[[Any], Any]) -> Any:
@@ -1217,8 +1364,14 @@ def require_committed_operator() -> str:
     return head
 
 
-def _public_url(counter_id: int) -> str:
-    return PUBLIC_ORIGIN + f"/?rosomaha_metrika_verify={counter_id}"
+def _public_url(counter_id: int, nonce: str | None = None) -> str:
+    value = uuid.uuid4().hex if nonce is None else nonce
+    if re.fullmatch(r"[a-f0-9]{32}", value) is None:
+        raise ValueError("Public verification nonce is invalid")
+    return (
+        PUBLIC_ORIGIN
+        + f"/?rosomaha_metrika_verify={counter_id}&rosomaha_cache_bust={value}"
+    )
 
 
 def fetch_public(counter_id: int) -> bytes:
@@ -1227,7 +1380,8 @@ def fetch_public(counter_id: int) -> bytes:
         url,
         headers={
             "Accept": "text/html",
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
             "User-Agent": "RosomahaBitrixMetrikaDeploy/1.0",
         },
     )
@@ -1288,6 +1442,42 @@ def verify_public_counter(
     }
 
 
+def verify_public_counter_converged(
+    counter_id: int,
+    *,
+    expected: str,
+    fetcher: Callable[[int], bytes] = fetch_public,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    consecutive = 0
+    last_error: str | None = None
+    result: dict[str, Any] | None = None
+    for attempt in range(1, PUBLIC_VERIFY_ATTEMPTS + 1):
+        try:
+            result = verify_public_counter(
+                counter_id, expected=expected, fetcher=fetcher
+            )
+            consecutive += 1
+            if consecutive >= PUBLIC_VERIFY_CONSECUTIVE:
+                return {
+                    **result,
+                    "cache_bypassed": True,
+                    "attempts": attempt,
+                    "consecutive_confirmations": consecutive,
+                }
+        except PublicVerificationError as exc:
+            consecutive = 0
+            last_error = safe_error(exc)
+        if attempt < PUBLIC_VERIFY_ATTEMPTS:
+            sleeper(PUBLIC_VERIFY_DELAY_SECONDS)
+
+    detail = last_error or "candidate was not confirmed consecutively"
+    raise PublicVerificationError(
+        "Public state did not converge under the pinned live gate; last observation: "
+        + detail
+    )
+
+
 def _read_plan_state(sftp: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
     if plan["sensitive"]:
         return _classify_config(sftp, plan["candidate"])[1]
@@ -1300,7 +1490,18 @@ def _read_plan_state(sftp: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
     )[1]
 
 
-def _backup_plans(sftp: Any, paths: Mapping[str, Any], plans: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _backup_plans(
+    sftp: Any,
+    paths: Mapping[str, Any],
+    plans: Sequence[Mapping[str, Any]],
+    operation: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if operation.get("status") == "reusable_rolled_back":
+        # Revalidate after directory preparation so a retry never trusts stale
+        # evidence or overwrites an immutable baseline artifact.
+        return _validate_reusable_rolled_back_operation(sftp, paths, plans)["backups"]
+    if operation.get("status") != "created":
+        raise DeployError("Operation directory is not safe for immutable backups")
     backups = []
     for plan in plans:
         item = paths["items"][plan["name"]]
@@ -1414,8 +1615,8 @@ def apply_remote(
         if not options_are_baseline:
             raise DeployError("Apply requires exact baseline Aspro counter options")
         paths = _paths(operation_id, plans)
-        _prepare_directories(sftp, paths)
-        backups = _backup_plans(sftp, paths, plans)
+        operation = _prepare_directories(sftp, paths, plans)
+        backups = _backup_plans(sftp, paths, plans, operation)
         staged = _stage_plans(sftp, paths, plans)
         lint_paths = [
             paths["items"][plan["name"]]["candidate_temp"]
@@ -1471,7 +1672,9 @@ def apply_remote(
         public = (
             public_verifier(int(runtime["counter_id"]))
             if public_verifier is not None
-            else verify_public_counter(int(runtime["counter_id"]), expected="candidate")
+            else verify_public_counter_converged(
+                int(runtime["counter_id"]), expected="candidate"
+            )
         )
         payload = {
             "schema": 1,
@@ -1480,6 +1683,10 @@ def apply_remote(
             "counter_id": int(runtime["counter_id"]),
             "goal_ids": dict(runtime["goal_ids"]),
             "backups": backups,
+            "operation_directory": {
+                key: operation[key]
+                for key in ("status", "path", "entries")
+            },
             "staged": staged,
             "php_lint": lint,
             "aspro_options": options_after,
@@ -1495,6 +1702,7 @@ def apply_remote(
         return payload
     except Exception as exc:
         if switched and plans and paths:
+            original_cause = safe_error(exc)
             try:
                 if options_switched:
                     option_rollback = aspro_options(
@@ -1508,15 +1716,21 @@ def apply_remote(
                 rollback = _restore_all(sftp, paths, plans)
             except Exception as rollback_exc:
                 raise DeployError(
-                    "Apply failed and exact automatic rollback needs manual inspection: "
+                    "Apply failed after a switch; redacted original cause: "
+                    + original_cause
+                    + "; exact automatic rollback needs manual inspection: "
                     + safe_error(rollback_exc)
                 ) from exc
             if options_state_unknown:
                 raise DeployError(
-                    "Apply failed; exact files were restored but Aspro options need read-only inspection"
+                    "Apply failed after a switch; redacted original cause: "
+                    + original_cause
+                    + "; exact files were restored but Aspro options need read-only inspection"
                 ) from exc
             raise DeployError(
-                "Apply failed after a switch; exact files and known Aspro state were restored: "
+                "Apply failed after a switch; redacted original cause: "
+                + original_cause
+                + "; exact files and known Aspro state were restored: "
                 + ",".join(item["status"] for item in rollback)
             ) from exc
         raise
@@ -1738,7 +1952,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     _candidate_lint_local(bridge)
-    plans, operation_id, options, parents = _connect_and_close(
+    plans, operation_id, options, parents, operation = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     payload = _base_receipt("audit", runtime) | {
@@ -1748,6 +1962,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
         "parent_directories": parents,
+        "operation_directory": operation,
     }
     return payload, write_local_receipt("audit", payload)
 
@@ -1756,12 +1971,12 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     lint = _candidate_lint_local(bridge)
-    plans, operation_id, options, parents = _connect_and_close(
+    plans, operation_id, options, parents, operation = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     ready = all(_is_baseline(plan) for plan in plans) and all(
         value == str(OLD_COUNTER_ID) for value in options["after"].values()
-    )
+    ) and operation["status"] in {"missing", "reusable_rolled_back"}
     payload = _base_receipt("dry-run", runtime) | {
         "status": "plan_ready" if ready else "blocked",
         "operation_id": operation_id,
@@ -1770,6 +1985,7 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
         "parent_directories": parents,
+        "operation_directory": operation,
         "apply_guard": {"environment": APPLY_GUARD_ENV, "exact_value_required": True},
         "transaction": {
             "same_directory_atomic_renames": 3,
