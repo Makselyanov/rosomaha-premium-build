@@ -693,6 +693,11 @@ test("runtime secret сохраняется атомарно отдельно о
   assert.equal(readback.measurementToken, measurementToken);
   assert.deepEqual(readback.goalIds, payload.goal_ids);
   assert.equal(JSON.stringify(evidence).includes(measurementToken), false);
+  assert.equal(evidence.permissionsVerified, true);
+  assert.equal(
+    evidence.permissionModel,
+    process.platform === "win32" ? "windows_acl_owner_system_admins" : "posix",
+  );
   assert.equal(fs.readdirSync(path.dirname(runtimePath)).some((name) => name.endsWith(".tmp")), false);
   if (process.platform !== "win32") {
     assert.equal(fs.statSync(runtimePath).mode & 0o777, 0o600);

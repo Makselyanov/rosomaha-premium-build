@@ -266,7 +266,12 @@ final class RosomahaCrmBridge
                 $hardPreparation = self::prepareMetrikaGoal(
                     self::METRIKA_HARD_ACTION,
                     (array) ($record['context'] ?? []),
-                    'CRM confirmed deal'
+                    [
+                        'crm' => [
+                            'lead_submission_id' => (string) ($record['lead_submission_id'] ?? ''),
+                            'deal_id' => (string) ($record['crm_ack']['deal_id'] ?? ''),
+                        ],
+                    ]
                 );
                 if (($hardPreparation['status'] ?? null) !== 'ready') {
                     $hardGoal = $hardPreparation;
@@ -988,7 +993,11 @@ final class RosomahaCrmBridge
         $result = self::sendMetrikaGoal(
             self::METRIKA_SOFT_ACTION,
             (array) ($record['context'] ?? []),
-            'Bitrix accepted form'
+            [
+                'form' => [
+                    'lead_submission_id' => (string) ($record['lead_submission_id'] ?? ''),
+                ],
+            ]
         );
         $record['metrika']['soft_goal'] = self::metrikaGoalState($result);
         $record['updated_at'] = date(DATE_ATOM);
@@ -997,9 +1006,9 @@ final class RosomahaCrmBridge
         return $record;
     }
 
-    private static function sendMetrikaGoal(string $action, array $context, string $title): array
+    private static function sendMetrikaGoal(string $action, array $context, array $eventParams = []): array
     {
-        $preparation = self::prepareMetrikaGoal($action, $context, $title);
+        $preparation = self::prepareMetrikaGoal($action, $context, $eventParams);
         if (($preparation['status'] ?? null) !== 'ready') {
             return $preparation;
         }
@@ -1007,7 +1016,7 @@ final class RosomahaCrmBridge
         return self::dispatchMetrikaFields((array) $preparation['fields']);
     }
 
-    private static function prepareMetrikaGoal(string $action, array $context, string $title): array
+    private static function prepareMetrikaGoal(string $action, array $context, array $eventParams = []): array
     {
         if (!in_array($action, [self::METRIKA_SOFT_ACTION, self::METRIKA_HARD_ACTION], true)) {
             return [
@@ -1050,8 +1059,8 @@ final class RosomahaCrmBridge
                 $config,
                 $clientId,
                 $action,
-                $title,
-                $pageUrl
+                $pageUrl,
+                $eventParams
             ),
         ];
     }
@@ -1101,18 +1110,75 @@ final class RosomahaCrmBridge
         array $config,
         string $clientId,
         string $action,
-        string $title,
-        string $pageUrl
+        string $pageUrl,
+        array $eventParams = []
     ): array {
-        return [
+        $fields = [
             'tid' => (string) $config['counter_id'],
             'cid' => $clientId,
             't' => 'event',
             'ea' => $action,
-            'et' => self::cleanText($title, 120),
             'dl' => $pageUrl,
-            'ms' => $config['measurement_token'],
         ];
+
+        $sanitizedParams = self::sanitizeMetrikaEventParams($eventParams);
+        if ($sanitizedParams !== []) {
+            $encodedParams = json_encode(
+                $sanitizedParams,
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
+            );
+            $fields['params'] = $encodedParams;
+        }
+
+        // Keep the server-only token last so callers can explicitly redact it
+        // without touching the public analytics fields.
+        $fields['ms'] = $config['measurement_token'];
+
+        return $fields;
+    }
+
+    private static function sanitizeMetrikaEventParams(array $params): array
+    {
+        $sanitized = [];
+        foreach (['form', 'crm'] as $scope) {
+            if (!is_array($params[$scope] ?? null)) {
+                continue;
+            }
+
+            $leadSubmissionId = self::normalizeMetrikaReference(
+                $params[$scope]['lead_submission_id'] ?? null,
+                180
+            );
+            if ($leadSubmissionId !== null) {
+                $sanitized[$scope]['lead_submission_id'] = $leadSubmissionId;
+            }
+
+            if ($scope === 'crm') {
+                $dealId = self::normalizeDealId($params[$scope]['deal_id'] ?? null);
+                if ($dealId !== null) {
+                    $sanitized[$scope]['deal_id'] = $dealId;
+                }
+            }
+        }
+
+        return $sanitized;
+    }
+
+    private static function normalizeMetrikaReference($value, int $maxLength): ?string
+    {
+        if ((!is_int($value) && !is_string($value)) || is_bool($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+        if ($value === ''
+            || mb_strlen($value) > $maxLength
+            || preg_match('/^[a-z0-9._:-]+$/iD', $value) !== 1
+        ) {
+            return null;
+        }
+
+        return $value;
     }
 
     private static function postMetrikaForm(array $fields): array

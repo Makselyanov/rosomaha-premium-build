@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -561,6 +561,71 @@ function validateRuntimePayload(payload) {
   validateMeasurementToken(payload?.measurement_token);
 }
 
+function secureRuntimeSecretPermissions(runtimePath) {
+  fs.chmodSync(runtimePath, 0o600);
+  if (process.platform !== "win32") {
+    const mode = fs.statSync(runtimePath).mode & 0o777;
+    if (mode !== 0o600) {
+      throw new SetupBlockedError(
+        "runtime_secret_permissions_failed",
+        "Runtime secret не получил обязательный POSIX mode 0600.",
+      );
+    }
+    return { permissionModel: "posix", permissionsVerified: true, mode: "0600" };
+  }
+
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [System.IO.Path]::GetFullPath($env:ROSOMAHA_RUNTIME_SECRET_PATH)
+if (-not [System.IO.File]::Exists($target)) { throw 'runtime secret is missing' }
+$ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$allowed = @($ownerSid.Value, 'S-1-5-18', 'S-1-5-32-544')
+$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl.SetOwner($ownerSid)
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($sidValue in $allowed) {
+  $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $sid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    [System.Security.AccessControl.AccessControlType]::Allow
+  )
+  [void]$acl.AddAccessRule($rule)
+}
+[System.IO.File]::SetAccessControl($target, $acl)
+$check = [System.IO.File]::GetAccessControl($target)
+$actual = @($check.Access | ForEach-Object {
+  $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+})
+$unexpected = @($actual | Where-Object { $_ -notin $allowed })
+if (-not $check.AreAccessRulesProtected -or @($check.Access | Where-Object IsInherited).Count -ne 0 -or $unexpected.Count -ne 0) {
+  throw 'runtime secret ACL verification failed'
+}
+`;
+  try {
+    const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+    execFileSync(
+      "powershell.exe",
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+        env: { ...process.env, ROSOMAHA_RUNTIME_SECRET_PATH: runtimePath },
+      },
+    );
+  } catch {
+    throw new SetupBlockedError(
+      "runtime_secret_permissions_failed",
+      "Runtime secret не получил изолированный Windows ACL.",
+    );
+  }
+  return {
+    permissionModel: "windows_acl_owner_system_admins",
+    permissionsVerified: true,
+    mode: "owner-only-equivalent",
+  };
+}
+
 export function saveRuntimeSecret(runtimePath, payload) {
   validateRuntimePayload(payload);
   const directory = path.dirname(runtimePath);
@@ -581,15 +646,16 @@ export function saveRuntimeSecret(runtimePath, payload) {
   );
   const serialized = `${JSON.stringify(payload, null, 2)}\n`;
   let fileDescriptor = null;
+  let permissionEvidence = null;
   try {
     fileDescriptor = fs.openSync(temporaryPath, "wx", 0o600);
     fs.writeFileSync(fileDescriptor, serialized, "utf8");
     fs.fsyncSync(fileDescriptor);
     fs.closeSync(fileDescriptor);
     fileDescriptor = null;
-    fs.chmodSync(temporaryPath, 0o600);
+    permissionEvidence = secureRuntimeSecretPermissions(temporaryPath);
     fs.renameSync(temporaryPath, runtimePath);
-    fs.chmodSync(runtimePath, 0o600);
+    permissionEvidence = secureRuntimeSecretPermissions(runtimePath);
   } catch (error) {
     if (fileDescriptor !== null) {
       try {
@@ -628,6 +694,7 @@ export function saveRuntimeSecret(runtimePath, payload) {
     counterId: readback.counterId,
     goalIds: readback.goalIds,
     requestedFileMode: "0600",
+    ...permissionEvidence,
   };
 }
 

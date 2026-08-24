@@ -211,9 +211,14 @@ assertNullValue(
 $metrikaFields = callPrivate('buildMetrikaFields', [[
     'counter_id' => 110600001,
     'measurement_token' => 'measurement-token_1234567890',
-], '1234567890123456789', 'crm_conversion', 'CRM confirmed deal', 'https://rosomaha-rus.ru/catalog/']);
+], '1234567890123456789', 'crm_conversion', 'https://rosomaha-rus.ru/catalog/', [
+    'crm' => [
+        'lead_submission_id' => $submissionId,
+        'deal_id' => 'D-812',
+    ],
+]]);
 assertSameValue(
-    ['tid', 'cid', 't', 'ea', 'et', 'dl', 'ms'],
+    ['tid', 'cid', 't', 'ea', 'dl', 'params', 'ms'],
     array_keys($metrikaFields),
     'Measurement Protocol field contract changed.'
 );
@@ -221,9 +226,24 @@ assertSameValue('110600001', $metrikaFields['tid'] ?? null, 'Measurement Protoco
 assertSameValue('1234567890123456789', $metrikaFields['cid'] ?? null, 'Measurement Protocol ClientID is missing.');
 assertSameValue('event', $metrikaFields['t'] ?? null, 'Measurement Protocol hit type must be event.');
 assertSameValue('crm_conversion', $metrikaFields['ea'] ?? null, 'Hard action name changed.');
-assertSameValue('CRM confirmed deal', $metrikaFields['et'] ?? null, 'Event title is missing.');
+assertTrueValue(!array_key_exists('et', $metrikaFields), 'Measurement Protocol et must not contain a title; Yandex reserves it for a Unix timestamp.');
 assertSameValue('https://rosomaha-rus.ru/catalog/', $metrikaFields['dl'] ?? null, 'Document URL is missing.');
 assertSameValue('measurement-token_1234567890', $metrikaFields['ms'] ?? null, 'Measurement Protocol secret is missing from POST fields.');
+$metrikaParams = json_decode((string) ($metrikaFields['params'] ?? ''), true);
+assertSameValue($submissionId, $metrikaParams['crm']['lead_submission_id'] ?? null, 'Hard event lost the exact lead_submission_id.');
+assertSameValue('D-812', $metrikaParams['crm']['deal_id'] ?? null, 'Hard event lost the confirmed deal_id.');
+
+$unsafeMetrikaFields = callPrivate('buildMetrikaFields', [[
+    'counter_id' => 110600001,
+    'measurement_token' => 'measurement-token_1234567890',
+], '1234567890123456789', 'crm_conversion', 'https://rosomaha-rus.ru/catalog/', [
+    'crm' => [
+        'lead_submission_id' => 'bad value with spaces',
+        'deal_id' => '<script>',
+    ],
+    'private' => ['phone' => '+79990000000'],
+]]);
+assertTrueValue(!array_key_exists('params', $unsafeMetrikaFields), 'Unsafe or unapproved event parameters reached Metrika.');
 
 assertSameValue('sent', callPrivate('classifyMetrikaResponse', [[
     'http_code' => 200,
