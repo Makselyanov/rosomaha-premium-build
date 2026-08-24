@@ -93,9 +93,13 @@ CANDIDATE_SHA256 = "075909d8e940145077a47abfa2bc5ba32fc67ead66a0fd3ce86c54c45922
 EXPECTED_MODE = 0o600
 EXPECTED_UID = 8476
 EXPECTED_GID = 601
+OPERATOR_REVISION = "paramiko-exclusive-writable-v2"
 OPERATION_ID = "bitrix-canonical-" + hashlib.sha256(
-    f"{TARGET_PATH}|{BASELINE_SHA256}|{CANDIDATE_SHA256}".encode("ascii")
+    f"{TARGET_PATH}|{BASELINE_SHA256}|{CANDIDATE_SHA256}|{OPERATOR_REVISION}".encode("ascii")
 ).hexdigest()[:24]
+LEGACY_ABORTED_OPERATION_IDS = frozenset(
+    {"bitrix-canonical-93b977ba7521678b12ffbb15"}
+)
 
 BASELINE_CANONICAL = (
     b'        <link rel="canonical" href="<?= $APPLICATION->GetCurPageParam() ?>" />'
@@ -561,8 +565,12 @@ def verify_public(expected_state: str, *, fetcher: Callable[[str], bytes] = fetc
     return results
 
 
-def _operation_paths(operation_id: str) -> dict[str, str]:
-    if operation_id != OPERATION_ID:
+def _operation_paths(
+    operation_id: str, *, allow_legacy_recover: bool = False
+) -> dict[str, str]:
+    if operation_id != OPERATION_ID and not (
+        allow_legacy_recover and operation_id in LEGACY_ABORTED_OPERATION_IDS
+    ):
         raise CanonicalOperatorError("Operation id does not match the pinned candidate")
     operation_dir = OPERATION_ROOT + "/" + operation_id
     return {
@@ -625,7 +633,9 @@ def _write_exact_file(
 ) -> dict[str, Any]:
     if _exists(sftp, path):
         raise CanonicalOperatorError("Exact remote artifact already exists")
-    with sftp.open(path, "x") as handle:
+    # Paramiko 4.0 keeps O_EXCL for ``x`` but does not imply write access.
+    # ``wx`` is both exclusive and writable; readback below remains mandatory.
+    with sftp.open(path, "wx") as handle:
         handle.write(data)
         handle.flush()
     sftp.chmod(path, mode)
@@ -791,28 +801,55 @@ def apply_remote(
         sftp.close()
 
 
+def _inspect_recovery_backup(sftp: Any, path: str) -> dict[str, Any] | None:
+    """Classify one exact backup without turning malformed evidence into an exception."""
+    if not _exists(sftp, path):
+        return None
+    attrs = sftp.lstat(path)
+    info = _attrs_dict(attrs)
+    info["valid"] = False
+    if not info["regular_non_symlink"]:
+        info["reason"] = "not_regular"
+        return info
+    if info["bytes"] == 0:
+        info["sha256"] = sha256_bytes(b"")
+        info["reason"] = "zero_length"
+        return info
+    if info["bytes"] > MAX_HEADER_BYTES:
+        info["reason"] = "size_out_of_bounds"
+        return info
+    try:
+        _, readback = read_remote_file(sftp, path)
+    except CanonicalOperatorError:
+        info["reason"] = "readback_invalid"
+        return info
+    readback["valid"] = bool(
+        readback.get("bytes") == BASELINE_BYTES
+        and readback.get("sha256") == BASELINE_SHA256
+        and readback.get("mode") == f"{EXPECTED_MODE:04o}"
+        and readback.get("uid") == EXPECTED_UID
+        and readback.get("gid") == EXPECTED_GID
+    )
+    readback["reason"] = "pinned_baseline" if readback["valid"] else "not_pinned_baseline"
+    return readback
+
+
 def recover_remote(client: Any, operation_id: str) -> dict[str, Any]:
-    paths = _operation_paths(operation_id)
+    paths = _operation_paths(operation_id, allow_legacy_recover=True)
     sftp = client.open_sftp()
     try:
         active = classify_remote_target(sftp)
         if not _exists(sftp, paths["directory"]):
             return {"classification": "not_started", "active": active, "read_only": True}
         directory = _require_directory(sftp, paths["directory"])
-        backup = None
-        if _exists(sftp, paths["backup"]):
-            _, backup = read_remote_file(sftp, paths["backup"])
+        backup = _inspect_recovery_backup(sftp, paths["backup"])
         receipt_exists = _exists(sftp, paths["receipt"])
         rollback_receipt_exists = _exists(sftp, paths["rollback_receipt"])
         temps = {
             "candidate": _exists(sftp, paths["candidate_temp"]),
             "rollback": _exists(sftp, paths["rollback_temp"]),
         }
-        backup_valid = bool(
-            backup
-            and backup.get("sha256") == BASELINE_SHA256
-            and backup.get("bytes") == BASELINE_BYTES
-        )
+        backup_valid = bool(backup and backup.get("valid") is True)
         if active["state"] == "candidate" and backup_valid and receipt_exists:
             classification = "applied"
         elif active["state"] == "candidate" and backup_valid:
@@ -821,6 +858,8 @@ def recover_remote(client: Any, operation_id: str) -> dict[str, Any]:
             classification = "rolled_back"
         elif active["state"] == "baseline" and backup_valid:
             classification = "backup_only_or_auto_rolled_back"
+        elif backup is not None and not backup_valid:
+            classification = f"{active['state']}_with_invalid_backup"
         else:
             classification = "indeterminate"
         return {
@@ -831,6 +870,7 @@ def recover_remote(client: Any, operation_id: str) -> dict[str, Any]:
             "receipt_exists": receipt_exists,
             "rollback_receipt_exists": rollback_receipt_exists,
             "temporary_files": temps,
+            "legacy_operation_read_only": operation_id in LEGACY_ABORTED_OPERATION_IDS,
             "read_only": True,
         }
     finally:
@@ -1057,6 +1097,8 @@ def run_rollback(
     source = os.environ if environ is None else environ
     if source.get(ROLLBACK_GUARD_ENV) != ROLLBACK_GUARD_VALUE:
         raise CanonicalOperatorError("Explicit rollback guard is missing")
+    # Legacy aborted operations are evidence-only and can never reach connect/write.
+    _operation_paths(operation_id)
     head = require_committed_operator()
     validate_candidate()
     pending = _receipt_base("rollback") | {

@@ -38,7 +38,7 @@ class FakeHandle:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is None and self.mode == "x":
+        if exc_type is None and self.mode == "wx":
             self.sftp.files[self.path] = {
                 "data": bytes(self.buffer),
                 "mode": stat.S_IFREG | 0o600,
@@ -97,7 +97,7 @@ class FakeSFTP:
 
     def open(self, path: str, mode: str):
         self.calls.append(("open", path, mode))
-        if mode == "x" and (path in self.files or path in self.dirs):
+        if "x" in mode and (path in self.files or path in self.dirs):
             raise FileExistsError(17, "exists", path)
         if mode == "rb" and path not in self.files:
             raise FileNotFoundError(2, "missing", path)
@@ -299,6 +299,21 @@ class PublicContractTests(unittest.TestCase):
 
 
 class RemoteLintContractTests(unittest.TestCase):
+    def test_operator_revision_changes_id_and_legacy_is_recover_only(self):
+        self.assertEqual(operator.OPERATOR_REVISION, "paramiko-exclusive-writable-v2")
+        legacy = "bitrix-canonical-93b977ba7521678b12ffbb15"
+        self.assertIn(legacy, operator.LEGACY_ABORTED_OPERATION_IDS)
+        self.assertNotEqual(operator.OPERATION_ID, legacy)
+        with self.assertRaises(operator.CanonicalOperatorError):
+            operator._operation_paths(legacy)
+        with self.assertRaises(operator.CanonicalOperatorError):
+            operator.run_rollback(
+                legacy,
+                environ={operator.ROLLBACK_GUARD_ENV: operator.ROLLBACK_GUARD_VALUE},
+            )
+        paths = operator._operation_paths(legacy, allow_legacy_recover=True)
+        self.assertTrue(paths["directory"].endswith("/" + legacy))
+
     def test_atomic_temp_paths_are_exact_same_directory_php_files(self):
         paths = operator._operation_paths(operator.OPERATION_ID)
         expected = {
@@ -365,8 +380,11 @@ class RemoteOperationTests(unittest.TestCase):
         self.assertIn(paths["receipt"], sftp.files)
         self.assertTrue(result["atomic_replace"])
         rename = next(i for i, call in enumerate(sftp.calls) if call[0] == "posix_rename")
-        backup = next(i for i, call in enumerate(sftp.calls) if call[:3] == ("open", paths["backup"], "x"))
+        backup = next(i for i, call in enumerate(sftp.calls) if call[:3] == ("open", paths["backup"], "wx"))
         self.assertLess(backup, rename)
+        write_modes = [call[2] for call in sftp.calls if call[0] == "open" and call[2] != "rb"]
+        self.assertTrue(write_modes)
+        self.assertEqual(set(write_modes), {"wx"})
 
     def test_wrong_sha_or_metadata_stops_before_operation_directory(self):
         bad = FakeSFTP(b"changed")
@@ -410,6 +428,29 @@ class RemoteOperationTests(unittest.TestCase):
         self.assertEqual(sftp.files[operator.TARGET_PATH]["data"], self.baseline)
         with self.assertRaises(operator.CanonicalOperatorError):
             operator.recover_remote(client, "bitrix-canonical-000000000000000000000000")
+
+    def test_legacy_zero_byte_backup_is_read_only_classified(self):
+        legacy = next(iter(operator.LEGACY_ABORTED_OPERATION_IDS))
+        sftp = FakeSFTP(self.baseline)
+        paths = operator._operation_paths(legacy, allow_legacy_recover=True)
+        sftp.dirs[paths["directory"]] = {
+            "mode": stat.S_IFDIR | 0o700,
+            "uid": operator.EXPECTED_UID,
+            "gid": operator.EXPECTED_GID,
+        }
+        sftp.files[paths["backup"]] = {
+            "data": b"",
+            "mode": stat.S_IFREG | 0o600,
+            "uid": operator.EXPECTED_UID,
+            "gid": operator.EXPECTED_GID,
+        }
+        recovery = operator.recover_remote(FakeClient(sftp), legacy)
+        self.assertEqual(recovery["classification"], "baseline_with_invalid_backup")
+        self.assertEqual(recovery["backup"]["reason"], "zero_length")
+        self.assertTrue(recovery["legacy_operation_read_only"])
+        self.assertTrue(recovery["read_only"])
+        self.assertFalse(any(call[0] in {"mkdir", "chmod", "chown", "remove", "posix_rename"} for call in sftp.calls))
+        self.assertFalse(any(call[0] == "open" and call[2] != "rb" for call in sftp.calls))
 
 
 class CliAndCredentialTests(unittest.TestCase):
