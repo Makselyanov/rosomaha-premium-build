@@ -8,7 +8,17 @@ const outDir = path.join(rootDir, "marketing-audits");
 const jsonDir = path.join(outDir, "api-only-snapshots");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const directLoginDefault = "rosomaha-rus999";
+const directChangesSince = "2025-01-01T00:00:00Z";
 const campaigns = ["708505950", "708506873", "705770573", "710087376"];
+const bitrixHosts = new Set(["rosomaha-rus.ru", "www.rosomaha-rus.ru"]);
+const allowedDirectJsonCalls = new Set([
+  "changes.checkCampaigns",
+  "changes.check",
+  "campaigns.get",
+  "adgroups.get",
+  "ads.get",
+  "sitelinks.get",
+]);
 const counters = [
   { name: "catalog", id: "107139619", hardGoalId: "517600157", site: "xn--80aa8ahaki9a.site" },
   { name: "quiz", id: "105918356", hardGoalId: "496461698", site: "rosomaha.site" },
@@ -79,6 +89,40 @@ function hostFromUrl(value) {
   }
 }
 
+function safeUrlWithoutQuery(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { url: null, host: null };
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return { url: `${parsed.origin}${parsed.pathname}`, host: parsed.hostname.toLowerCase() };
+  } catch {
+    return { url: null, host: "invalid" };
+  }
+}
+
+function chunks(values, size) {
+  const result = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return result;
+}
+
+function uniqueSortedNumbers(values) {
+  return [...new Set(values.map(Number).filter(Number.isFinite).filter((value) => value > 0))].sort((a, b) => a - b);
+}
+
+function errorText(value) {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function directLoginForEnv(env) {
+  return env.YANDEX_DIRECT_LOGIN || env.YANDEX_DIRECT_CLIENT_LOGIN || directLoginDefault;
+}
+
 function parseTsv(tsv) {
   const lines = tsv.split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length) return [];
@@ -90,8 +134,10 @@ function parseTsv(tsv) {
 }
 
 function directJsonRequest(env, service, method, params) {
-  const token = env.YANDEX_OAUTH_TOKEN;
-  const login = env.YANDEX_DIRECT_LOGIN || directLoginDefault;
+  const call = `${service}.${method}`;
+  if (!allowedDirectJsonCalls.has(call)) return { ok: false, error: `blocked non-read-only Direct call: ${call}` };
+  const token = env.YANDEX_DIRECT_OAUTH_TOKEN || env.YANDEX_OAUTH_TOKEN;
+  const login = directLoginForEnv(env);
   if (!token) return { ok: false, error: "missing YANDEX_OAUTH_TOKEN" };
   const body = JSON.stringify({ method, params });
   const result = jsonCurl([
@@ -116,9 +162,168 @@ function directJsonRequest(env, service, method, params) {
   return { ok: true, data: result.data.result };
 }
 
+function directBatchGet(env, service, resultKey, ids, batchSize, buildParams) {
+  const items = [];
+  for (const batch of chunks(ids, batchSize)) {
+    const result = directJsonRequest(env, service, "get", buildParams(batch));
+    if (!result.ok) return { ok: false, error: result.error, items };
+    if (result.data?.LimitedBy) return { ok: false, error: `${service}.get page truncated at ${result.data.LimitedBy}`, items };
+    items.push(...(result.data?.[resultKey] || []));
+  }
+  return { ok: true, items };
+}
+
+function directChangesInventory(env) {
+  const supportedCampaigns = directJsonRequest(env, "campaigns", "get", {
+    SelectionCriteria: {},
+    FieldNames: ["Id", "Name", "Type", "State", "Status", "StatusPayment", "StatusClarification"],
+    TextCampaignFieldNames: ["CounterIds"],
+    UnifiedCampaignFieldNames: ["CounterIds"],
+    Page: { Limit: 10000, Offset: 0 },
+  });
+  if (!supportedCampaigns.ok) return { ok: false, since: directChangesSince, error: supportedCampaigns.error };
+  if (supportedCampaigns.data?.LimitedBy) {
+    return { ok: false, since: directChangesSince, error: `campaigns.get page truncated at ${supportedCampaigns.data.LimitedBy}` };
+  }
+
+  const supportedCampaignItems = supportedCampaigns.data?.Campaigns || [];
+  const campaignIds = uniqueSortedNumbers(supportedCampaignItems.map((item) => item.Id));
+  const changed = directJsonRequest(env, "changes", "checkCampaigns", { Timestamp: directChangesSince });
+  if (!changed.ok) return { ok: false, since: directChangesSince, error: changed.error };
+
+  const campaignChanges = changed.data?.Campaigns || [];
+  const changedCampaignIds = uniqueSortedNumbers(campaignChanges.map((item) => item.CampaignId));
+  const children = changedCampaignIds.length
+    ? directJsonRequest(env, "changes", "check", {
+        CampaignIds: changedCampaignIds,
+        Timestamp: directChangesSince,
+        FieldNames: ["CampaignIds", "AdGroupIds", "AdIds"],
+      })
+    : { ok: true, data: { Modified: {} } };
+  if (!children.ok) return { ok: false, since: directChangesSince, campaignIds, error: children.error };
+
+  const modified = children.data?.Modified || {};
+  const adGroups = campaignIds.length
+    ? directBatchGet(env, "adgroups", "AdGroups", campaignIds, 10, (ids) => ({
+        SelectionCriteria: { CampaignIds: ids },
+        FieldNames: ["Id", "CampaignId", "Type", "Status", "ServingStatus"],
+        Page: { Limit: 10000, Offset: 0 },
+      }))
+    : { ok: true, items: [] };
+  if (!adGroups.ok) return { ok: false, since: directChangesSince, campaignIds, error: adGroups.error };
+
+  const ads = campaignIds.length
+    ? directBatchGet(env, "ads", "Ads", campaignIds, 10, (ids) => ({
+        SelectionCriteria: { CampaignIds: ids },
+        FieldNames: ["Id", "CampaignId", "AdGroupId", "Type", "Subtype", "State", "Status", "StatusClarification"],
+        TextAdFieldNames: ["Href", "SitelinkSetId"],
+        DynamicTextAdFieldNames: ["SitelinkSetId"],
+        TextImageAdFieldNames: ["Href"],
+        TextAdBuilderAdFieldNames: ["Href"],
+        CpcVideoAdBuilderAdFieldNames: ["Href"],
+        CpmBannerAdBuilderAdFieldNames: ["Href"],
+        CpmVideoAdBuilderAdFieldNames: ["Href"],
+        Page: { Limit: 10000, Offset: 0 },
+      }))
+    : { ok: true, items: [] };
+  if (!ads.ok) return { ok: false, since: directChangesSince, campaignIds, error: ads.error };
+
+  const safeAds = ads.items.map((ad) => {
+    const hrefs = [
+      ad.TextAd?.Href,
+      ad.TextImageAd?.Href,
+      ad.TextAdBuilderAd?.Href,
+      ad.CpcVideoAdBuilderAd?.Href,
+      ad.CpmBannerAdBuilderAd?.Href,
+      ad.CpmVideoAdBuilderAd?.Href,
+    ].filter(Boolean);
+    const urls = [...new Map(hrefs.map((href) => {
+      const safe = safeUrlWithoutQuery(href);
+      return [`${safe.host}|${safe.url}`, safe];
+    })).values()];
+    return {
+      id: Number(ad.Id),
+      campaignId: Number(ad.CampaignId),
+      adGroupId: Number(ad.AdGroupId),
+      type: ad.Type,
+      state: ad.State,
+      status: ad.Status,
+      urls,
+      sitelinkSetId: Number(ad.TextAd?.SitelinkSetId || ad.DynamicTextAd?.SitelinkSetId || 0) || null,
+    };
+  });
+
+  const sitelinkSetIds = uniqueSortedNumbers(safeAds.map((ad) => ad.sitelinkSetId));
+  const sitelinkSets = sitelinkSetIds.length
+    ? directBatchGet(env, "sitelinks", "SitelinksSets", sitelinkSetIds, 1000, (ids) => ({
+        SelectionCriteria: { Ids: ids },
+        FieldNames: ["Id"],
+        SitelinkFieldNames: ["Href"],
+        Page: { Limit: 10000, Offset: 0 },
+      }))
+    : { ok: true, items: [] };
+  if (!sitelinkSets.ok) return { ok: false, since: directChangesSince, campaignIds, error: sitelinkSets.error };
+
+  const safeSitelinkSets = sitelinkSets.items.map((set) => ({
+    id: Number(set.Id),
+    links: (set.Sitelinks || []).map((link) => safeUrlWithoutQuery(link.Href)).filter((item) => item.url),
+  }));
+  const campaignMap = new Map(supportedCampaignItems.map((campaign) => [Number(campaign.Id), campaign]));
+  const matchedFromAds = safeAds
+    .filter((ad) => ad.urls.some((item) => bitrixHosts.has(item.host)))
+    .map((ad) => ad.campaignId);
+  const matchedFromSitelinks = safeSitelinkSets
+    .filter((set) => set.links.some((item) => bitrixHosts.has(item.host)))
+    .flatMap((set) => safeAds.filter((ad) => ad.sitelinkSetId === set.id).map((ad) => ad.campaignId));
+
+  return {
+    ok: true,
+    since: directChangesSince,
+    serverTimestamp: changed.data?.Timestamp || null,
+    campaignIds,
+    changedCampaignIds,
+    unknownCampaignIds: uniqueSortedNumbers([...campaignIds, ...changedCampaignIds]).filter((id) => !campaigns.includes(String(id))),
+    campaigns: campaignIds.map((id) => {
+      const campaign = campaignMap.get(id);
+      return campaign
+        ? {
+            id,
+            name: campaign.Name,
+            type: campaign.Type,
+            state: campaign.State,
+            status: campaign.Status,
+            counterIds: campaign.TextCampaign?.CounterIds?.Items || campaign.UnifiedCampaign?.CounterIds?.Items || [],
+          }
+        : { id, unavailableViaCampaignsGet: true };
+    }),
+    adGroupCount: adGroups.items.length,
+    adCount: safeAds.length,
+    adsWithoutUrlCount: safeAds.filter((ad) => ad.urls.length === 0).length,
+    adTypes: [...new Set(safeAds.map((ad) => ad.type).filter(Boolean))].sort(),
+    ads: safeAds,
+    sitelinks: safeSitelinkSets,
+    adHosts: [...new Set(safeAds.flatMap((ad) => ad.urls.map((item) => item.host)).filter(Boolean))].sort(),
+    sitelinkHosts: [...new Set(safeSitelinkSets.flatMap((set) => set.links.map((item) => item.host)).filter(Boolean))].sort(),
+    matchingRosomahaRusCampaignIds: uniqueSortedNumbers([...matchedFromAds, ...matchedFromSitelinks]),
+    changedObjectCounts: {
+      campaigns: uniqueSortedNumbers(modified.CampaignIds || []).length,
+      adGroups: uniqueSortedNumbers(modified.AdGroupIds || []).length,
+      ads: uniqueSortedNumbers(modified.AdIds || []).length,
+    },
+    scriptMutations: 0,
+    limitations: [
+      "The unfiltered campaigns.get inventory covers only campaign types supported by that API service.",
+      "Changes API separately reports only objects changed since the requested timestamp.",
+      "Campaign Wizard objects unsupported by campaigns.get may be absent from both API inventories.",
+      "An ad with no URL returned in the requested format fields blocks a complete negative landing-domain conclusion.",
+      "URLs are stored without query strings or fragments.",
+    ],
+  };
+}
+
 function directReport(env, reportType, fields, date1, date2, extraFilter = [], options = {}) {
-  const token = env.YANDEX_OAUTH_TOKEN;
-  const login = env.YANDEX_DIRECT_LOGIN || directLoginDefault;
+  const token = env.YANDEX_DIRECT_OAUTH_TOKEN || env.YANDEX_OAUTH_TOKEN;
+  const login = directLoginForEnv(env);
   if (!token) return { ok: false, error: "missing YANDEX_OAUTH_TOKEN" };
   const dateRangeType = options.dateRangeType || "CUSTOM_DATE";
   const selectedCampaigns = Object.hasOwn(options, "campaigns") ? options.campaigns : campaigns;
@@ -283,7 +488,7 @@ function buildMarkdown(report) {
     "",
     "## Что проверено",
     "",
-    "- Яндекс Директ: управляемые ЕПК через `campaigns.get v501`; все исторически показывавшиеся кампании и их посадочные через Reports API `CampaignUrlPath`.",
+    "- Яндекс Директ: полный список поддерживаемых API типов кампаний через `campaigns.get v501` без заранее заданных ID; их текущие объявления через `Ads.get`; изменения с 2025-01-01 через `Changes.checkCampaigns`/`Changes.check`; все исторически показывавшиеся кампании и посадочные через Reports API `CampaignUrlPath`.",
     "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517600157 (crm_conversion после ответа CRM) / 496461698 за 1, 7, 30 дней. Старую DOM-цель формы 517599639 считать мягкой.",
     "- rosomaha-rus.ru: отдельный объект; публично установлен счетчик 50606578, но API-доступ и hard goal этим запуском не переносятся с других доменов.",
     "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
@@ -332,6 +537,30 @@ function buildMarkdown(report) {
     lines.push(`- rosomaha-rus.ru: ${report.direct.accountLandingMap.matchesRosomahaRus.length ? "найдена кампания" : "кампания со статистикой не обнаружена"}. Черновик Мастера без показов публичный Reports API не доказывает.`);
   } else {
     lines.push(`- Источник недоступен: ${report.direct.accountLandingMap.error}`);
+  }
+  lines.push("");
+
+  lines.push("## API-инвентаризация поддерживаемых типов кампаний");
+  lines.push("");
+  const changes = report.direct.changesInventory;
+  if (changes.ok) {
+    lines.push(`- Полный \`campaigns.get\` без фильтра ID: ${changes.campaignIds.length ? changes.campaignIds.join(", ") : "кампании поддерживаемых типов не найдены"}.`);
+    lines.push(`- Изменившиеся с ${changes.since}: ${changes.changedCampaignIds.length ? changes.changedCampaignIds.join(", ") : "не найдены"}.`);
+    lines.push(`- Текущие объявления поддерживаемых типов: ${changes.adCount}; группы: ${changes.adGroupCount}; форматы: ${changes.adTypes.length ? changes.adTypes.join(", ") : "нет"}.`);
+    lines.push(`- Покрытие URL объявлений: ${changes.adCount - changes.adsWithoutUrlCount}/${changes.adCount}.`);
+    lines.push(`- Хосты объявлений: ${changes.adHosts.length ? changes.adHosts.join(", ") : "не получены"}.`);
+    lines.push(`- Хосты быстрых ссылок: ${changes.sitelinkHosts.length ? changes.sitelinkHosts.join(", ") : "не получены"}.`);
+    if (changes.matchingRosomahaRusCampaignIds.length) {
+      lines.push(`- rosomaha-rus.ru: найдены кампании ${changes.matchingRosomahaRusCampaignIds.join(", ")}.`);
+    } else if (changes.adsWithoutUrlCount === 0) {
+      lines.push("- rosomaha-rus.ru: не найден среди текущих объявлений и быстрых ссылок кампаний поддерживаемых API типов.");
+    } else {
+      lines.push(`- rosomaha-rus.ru: не найден среди объявлений с доступным URL, но у ${changes.adsWithoutUrlCount} объявлений URL не получен; отрицательный вывод неполный.`);
+    }
+    lines.push(`- Скрипт ничего не менял: mutations=${changes.scriptMutations}. Браузер не использован.`);
+    lines.push("- Ограничение: объекты Мастера кампаний, которые не поддерживает `campaigns.get`, могут отсутствовать и остаются неподтверждёнными без отдельной UI-проверки; `Changes` отдельно ограничен указанной датой.");
+  } else {
+    lines.push(`- Источник недоступен: ${errorText(changes.error)}.`);
   }
   lines.push("");
 
@@ -396,10 +625,14 @@ function buildMarkdown(report) {
 }
 
 const env = parseEnvFile(envPath);
+const configuredDirectLogin = directLoginForEnv(env);
+if (configuredDirectLogin !== directLoginDefault) {
+  throw new Error(`Yandex account isolation mismatch: expected ${directLoginDefault}, got ${configuredDirectLogin}`);
+}
 const policy = {
   apiOnly: true,
   browserAllowed: false,
-  directLogin: env.YANDEX_DIRECT_LOGIN || directLoginDefault,
+  directLogin: configuredDirectLogin,
   catalog: "https://xn--80aa8ahaki9a.site/",
   quiz: "https://rosomaha.site/",
   bitrix: "https://rosomaha-rus.ru/",
@@ -436,6 +669,7 @@ const accountLandingResult = directReport(
   { dateRangeType: "ALL_TIME", campaigns: null },
 );
 const accountLandingCampaigns = accountLandingResult.ok ? aggregateCampaignRows(accountLandingResult.rows, false) : [];
+const changesInventory = directChangesInventory(env);
 const metrika = {
   counters: counters.map((counter) => ({
     ...counter,
@@ -484,8 +718,9 @@ const report = {
       ok: accountLandingResult.ok,
       error: accountLandingResult.error || null,
       campaigns: accountLandingCampaigns,
-      matchesRosomahaRus: accountLandingCampaigns.filter((campaign) => ["rosomaha-rus.ru", "www.rosomaha-rus.ru"].includes(campaign.campaignHost)),
+      matchesRosomahaRus: accountLandingCampaigns.filter((campaign) => bitrixHosts.has(campaign.campaignHost)),
     },
+    changesInventory,
     queries: {
       ok: queries.ok,
       error: queries.error || null,
