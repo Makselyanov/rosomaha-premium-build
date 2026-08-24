@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { LIVE4_ACCOUNT_URL, safeJsonRequest } from "./yandex-direct-balance.mjs";
 import { getAccessToken, gscRequest } from "./gsc-report.mjs";
 
@@ -11,7 +12,15 @@ const jsonDir = path.join(outDir, "api-only-snapshots");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const directLoginDefault = "rosomaha-rus999";
 const directChangesSince = "2025-01-01T00:00:00Z";
-const campaigns = ["708505950", "708506873", "705770573", "710087376"];
+export const protectedCampaignIds = Object.freeze(["708505950", "705770573", "710087376"]);
+export const targetRosomahaRusCampaignId = "713802902";
+export const campaigns = Object.freeze([
+  "708505950",
+  "708506873",
+  "705770573",
+  "710087376",
+  targetRosomahaRusCampaignId,
+]);
 const bitrixHosts = new Set(["rosomaha-rus.ru", "www.rosomaha-rus.ru"]);
 const allowedDirectJsonCalls = new Set([
   "changes.checkCampaigns",
@@ -22,10 +31,34 @@ const allowedDirectJsonCalls = new Set([
   "sitelinks.get",
 ]);
 const allowedDirectSafeJsonCalls = new Set(["clients.get", "agencyclients.get", "strategies.get"]);
-const counters = [
-  { name: "catalog", id: "107139619", hardGoalId: "517600157", site: "xn--80aa8ahaki9a.site" },
-  { name: "quiz", id: "105918356", hardGoalId: "496461698", site: "rosomaha.site" },
-];
+export const monitoredObjects = Object.freeze([
+  Object.freeze({
+    name: "catalog",
+    id: "107139619",
+    hardGoalId: "517600157",
+    hardGoalEvent: "crm_conversion",
+    softGoalId: "517599639",
+    site: "xn--80aa8ahaki9a.site",
+  }),
+  Object.freeze({
+    name: "quiz",
+    id: "105918356",
+    hardGoalId: "496461698",
+    hardGoalEvent: null,
+    softGoalId: null,
+    site: "rosomaha.site",
+  }),
+  Object.freeze({
+    name: "bitrix",
+    id: "111905412",
+    hardGoalId: "601477348",
+    hardGoalEvent: "crm_conversion",
+    softGoalId: "601477497",
+    site: "rosomaha-rus.ru",
+    directCampaignId: targetRosomahaRusCampaignId,
+  }),
+]);
+const counters = monitoredObjects;
 
 function parseEnvFile(filePath) {
   const env = {};
@@ -267,7 +300,7 @@ async function directPackageStrategies(env, accountScope) {
   }
 
   const strategies = result.data?.Strategies || [];
-  const targetCounterId = 50606578;
+  const targetCounterId = Number(monitoredObjects.find((item) => item.name === "bitrix").id);
   const bitrixStrategies = strategies
     .filter((strategy) => (strategy.CounterIds?.Items || []).map(Number).includes(targetCounterId))
     .map((strategy) => ({
@@ -614,6 +647,76 @@ function metrikaRequest(env, params) {
   return { ok: true, data: result.data };
 }
 
+function metrikaManagementRequest(env, endpoint) {
+  const token = env.YANDEX_METRIKA_TOKEN || env.YANDEX_OAUTH_TOKEN || env.YANDEX_WEBMASTER_TOKEN;
+  if (!token) return { ok: false, error: "missing Yandex token for Metrika" };
+  const result = jsonCurl([
+    "-s",
+    "-L",
+    "-H",
+    `Authorization: OAuth ${token}`,
+    `https://api-metrika.yandex.net/management/v1${endpoint}`,
+  ]);
+  if (!result.ok) return result;
+  if (result.data?.errors) return { ok: false, error: result.data.errors };
+  return { ok: true, data: result.data };
+}
+
+function normalizedHost(value) {
+  return hostFromUrl(value)?.replace(/^www\./u, "") || null;
+}
+
+function summarizeGoalDefinition(goal, expectedEvent = null) {
+  if (!goal) return null;
+  const actionEvents = (goal.conditions || [])
+    .filter((condition) => String(condition.type || "").toLowerCase() === "exact")
+    .map((condition) => String(condition.url || "").trim())
+    .filter(Boolean);
+  return {
+    id: String(goal.id || ""),
+    name: String(goal.name || "").slice(0, 250),
+    type: String(goal.type || "unknown"),
+    actionEvents,
+    expectedEvent,
+    exactEventVerified: expectedEvent == null || actionEvents.includes(expectedEvent),
+  };
+}
+
+function metrikaCounterDefinition(env, object) {
+  const metadata = metrikaManagementRequest(env, `/counter/${object.id}`);
+  const goals = metrikaManagementRequest(env, `/counter/${object.id}/goals`);
+  const counter = metadata.ok ? metadata.data?.counter || null : null;
+  const goalItems = goals.ok && Array.isArray(goals.data?.goals) ? goals.data.goals : [];
+  const hardGoal = summarizeGoalDefinition(
+    goalItems.find((goal) => String(goal.id) === object.hardGoalId),
+    object.hardGoalEvent,
+  );
+  const softGoal = object.softGoalId
+    ? summarizeGoalDefinition(goalItems.find((goal) => String(goal.id) === object.softGoalId))
+    : null;
+  return {
+    counter: metadata.ok
+      ? {
+          ok: Boolean(counter),
+          error: counter ? null : "counter payload missing",
+          id: counter ? String(counter.id || "") : null,
+          site: counter ? normalizedHost(counter.site) : null,
+          exactIdVerified: Boolean(counter && String(counter.id) === object.id),
+          exactSiteVerified: Boolean(counter && normalizedHost(counter.site) === normalizedHost(object.site)),
+        }
+      : { ok: false, error: metadata.error },
+    goals: goals.ok
+      ? {
+          ok: true,
+          hardGoal,
+          hardGoalVerified: Boolean(hardGoal && hardGoal.exactEventVerified),
+          softGoal,
+          softGoalClassification: softGoal ? "soft_signal_not_lead" : "not_configured_or_not_found",
+        }
+      : { ok: false, error: goals.error, hardGoal: null, hardGoalVerified: false, softGoal: null },
+  };
+}
+
 function webmasterRequest(env, endpoint) {
   const token = env.YANDEX_WEBMASTER_TOKEN;
   const userId = env.YANDEX_WEBMASTER_USER_ID;
@@ -730,6 +833,173 @@ function summarizeMetrikaRows(data) {
   }));
 }
 
+function readinessCheck(id, label, passed, points, evidence, nextAction) {
+  return {
+    id,
+    label,
+    passed: Boolean(passed),
+    pointsEarned: passed ? points : 0,
+    pointsPossible: points,
+    evidence,
+    nextAction: passed ? null : nextAction,
+  };
+}
+
+export function calculateReadiness(report) {
+  const campaignItems = report.direct?.campaignsSnapshot?.ok
+    ? report.direct.campaignsSnapshot.data?.Campaigns || []
+    : [];
+  const landingRows = report.direct?.accountLandingMap?.ok
+    ? report.direct.accountLandingMap.campaigns || []
+    : [];
+  const exactDirectAccount = Boolean(
+    report.direct?.accountScope?.exactLoginVerified
+      && report.direct?.accountScope?.directClientVerified,
+  );
+
+  const objects = {};
+  for (const expected of monitoredObjects) {
+    const actual = (report.metrika?.counters || []).find((counter) => counter.name === expected.name);
+    const counterDefinition = actual?.definition?.counter;
+    const goalsDefinition = actual?.definition?.goals;
+    const allRangesAvailable = Boolean(
+      actual
+        && [1, 7, 30].every((days) => actual.ranges?.some((range) => range.days === days && range.ok)),
+    );
+    const hardProofAvailable = Boolean(actual?.hardProof?.ok);
+    const hardConversions30d = hardProofAvailable ? numberValue(actual.hardProof.hardGoals) : null;
+    const exactLandingRows = landingRows.filter(
+      (campaign) => normalizedHost(campaign.campaignHost) === normalizedHost(expected.site),
+    );
+
+    const checks = [
+      readinessCheck(
+        "counter_identity",
+        "Счётчик доступен по API и принадлежит ровно этому домену",
+        counterDefinition?.ok && counterDefinition.exactIdVerified && counterDefinition.exactSiteVerified,
+        20,
+        counterDefinition || { ok: false, error: actual?.definition?.counter?.error || "источник недоступен" },
+        `Проверить API-доступ и привязку счётчика ${expected.id} только к ${expected.site}.`,
+      ),
+      readinessCheck(
+        "hard_goal_definition",
+        "Hard goal существует и соответствует ожидаемому action-событию",
+        goalsDefinition?.ok && goalsDefinition.hardGoalVerified,
+        20,
+        goalsDefinition?.hardGoal || { ok: false, error: goalsDefinition?.error || "hard goal не найден" },
+        `Восстановить точную hard goal ${expected.hardGoalId}; мягкую цель заявкой не считать.`,
+      ),
+      readinessCheck(
+        "statistics_windows",
+        "Статистика hard goal доступна раздельно за 1, 7 и 30 дней",
+        allRangesAvailable,
+        20,
+        (actual?.ranges || []).map((range) => ({ days: range.days, ok: range.ok, error: range.error || null })),
+        `Восстановить read-only статистику Метрики ${expected.id}; показатели других доменов не подставлять.`,
+      ),
+      readinessCheck(
+        "natural_hard_conversion",
+        "За 30 дней подтверждена хотя бы одна фактическая hard conversion",
+        hardProofAvailable && hardConversions30d > 0,
+        10,
+        { source: "Metrika all traffic", available: hardProofAvailable, hardConversions30d },
+        `Дождаться реальной несинтетической ${expected.hardGoalId}; soft goal и conversions Direct не являются заявками.`,
+      ),
+      readinessCheck(
+        "direct_account_isolation",
+        "Direct подтверждён как точный клиент rosomaha-rus999",
+        exactDirectAccount,
+        10,
+        {
+          exactLoginVerified: Boolean(report.direct?.accountScope?.exactLoginVerified),
+          directClientVerified: Boolean(report.direct?.accountScope?.directClientVerified),
+        },
+        "Восстановить API-доступ только в изолированном контуре rosomaha-rus999.",
+      ),
+    ];
+
+    if (expected.directCampaignId) {
+      const campaign = campaignItems.find((item) => String(item.Id) === expected.directCampaignId) || null;
+      const counterIds = (campaign?.UnifiedCampaign?.CounterIds?.Items || []).map(String);
+      const priorityGoals = campaign?.UnifiedCampaign?.PriorityGoals?.Items || [];
+      const priorityGoal = priorityGoals.find((goal) => String(goal.GoalId) === expected.hardGoalId) || null;
+      checks.push(
+        readinessCheck(
+          "target_campaign",
+          `Целевая кампания ${expected.directCampaignId} видна read-only API`,
+          Boolean(campaign),
+          5,
+          campaign
+            ? { id: String(campaign.Id), type: campaign.Type, state: campaign.State, status: campaign.Status }
+            : { ok: false, error: "кампания не возвращена API" },
+          `Проверить существование кампании ${expected.directCampaignId}, не затрагивая защищённые кампании.`,
+        ),
+        readinessCheck(
+          "target_counter_binding",
+          `Кампания ${expected.directCampaignId} привязана к счётчику ${expected.id}`,
+          counterIds.includes(expected.id),
+          5,
+          { counterIds },
+          `Привязать только счётчик ${expected.id} к кампании ${expected.directCampaignId} отдельным безопасным изменением.`,
+        ),
+        readinessCheck(
+          "hard_priority_goal",
+          `Hard goal ${expected.hardGoalId} назначена приоритетной целью кампании`,
+          Boolean(priorityGoal && numberValue(priorityGoal.Value) > 0),
+          10,
+          priorityGoal
+            ? { goalId: String(priorityGoal.GoalId), positiveBusinessValue: numberValue(priorityGoal.Value) > 0 }
+            : { ok: false, error: "приоритетная hard goal не найдена" },
+          "Получить доказанную бизнес-ценность CRM-заявки и только затем назначить hard goal приоритетной; значение не выдумывать.",
+        ),
+      );
+    } else {
+      checks.push(readinessCheck(
+        "direct_landing_domain",
+        "Direct подтверждает кампанию с посадочной ровно этого домена",
+        exactLandingRows.length > 0,
+        20,
+        {
+          sourceAvailable: Boolean(report.direct?.accountLandingMap?.ok),
+          campaignIds: exactLandingRows.map((campaign) => String(campaign.campaignId)),
+        },
+        `Проверить посадочные Direct для ${expected.site}; не переносить кампании и показатели другого домена.`,
+      ));
+    }
+
+    const score = checks.reduce((sum, check) => sum + check.pointsEarned, 0);
+    objects[expected.name] = {
+      site: expected.site,
+      counterId: expected.id,
+      hardGoalId: expected.hardGoalId,
+      softGoalId: expected.softGoalId,
+      score,
+      scale: 100,
+      status: score === 100 ? "verified_100" : score >= 90 ? "high_but_not_100" : "needs_improvement",
+      hardConversions30d,
+      checks,
+      nextActions: checks.filter((check) => !check.passed).map((check) => check.nextAction),
+      classification: {
+        hardGoal: "confirmed_lead_only",
+        softGoal: expected.softGoalId ? "soft_signal_not_lead" : "not_configured",
+        directConversions: "ad_platform_signal_not_lead",
+      },
+    };
+  }
+
+  const objectScores = Object.values(objects).map((object) => object.score);
+  return {
+    scale: 100,
+    scope: "measurement_and_attribution_evidence",
+    launchAuthorization: false,
+    overallScore: objectScores.length
+      ? Math.round(objectScores.reduce((sum, score) => sum + score, 0) / objectScores.length)
+      : 0,
+    aggregation: "Среднее только для сводки; решения, показатели и доказательства остаются раздельными по доменам.",
+    objects,
+  };
+}
+
 function buildMarkdown(report) {
   const lines = [
     `# Росомаха API-only аудит ${report.generatedAt.slice(0, 10)}`,
@@ -740,8 +1010,9 @@ function buildMarkdown(report) {
     "## Что проверено",
     "",
     "- Яндекс Директ: полный список поддерживаемых API типов кампаний через `campaigns.get v501` без заранее заданных ID; их текущие объявления через `Ads.get`; изменения с 2025-01-01 через `Changes.checkCampaigns`/`Changes.check`; все исторически показывавшиеся кампании и посадочные через Reports API `CampaignUrlPath`.",
-    "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517600157 (crm_conversion после ответа CRM) / 496461698 за 1, 7, 30 дней. Старую DOM-цель формы 517599639 считать мягкой.",
-    "- rosomaha-rus.ru: отдельный объект; публично установлен счетчик 50606578, но API-доступ и hard goal этим запуском не переносятся с других доменов.",
+    "- Метрика: три раздельных объекта — xn--80aa8ahaki9a.site (107139619 / hard 517600157), rosomaha.site (105918356 / hard 496461698), rosomaha-rus.ru (111905412 / hard 601477348 / soft 601477497).",
+    "- Заявками считаются только hard goals. Soft goals и conversions Direct сохраняются как диагностические сигналы и заявками не называются.",
+    `- Direct: кампания ${targetRosomahaRusCampaignId} наблюдается только чтением; мутации ${protectedCampaignIds.join(", ")} запрещены.`,
     "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
     "- Google Search Console: live OAuth probe без браузера; если токен недействителен, источник помечается недоступным.",
     "",
@@ -767,7 +1038,7 @@ function buildMarkdown(report) {
   }
   lines.push("");
 
-  lines.push("## Пакетные стратегии и счётчик 50606578");
+  lines.push("## Пакетные стратегии и счётчик rosomaha-rus.ru");
   lines.push("");
   const strategies = report.direct.packageStrategies;
   if (strategies.ok) {
@@ -776,7 +1047,7 @@ function buildMarkdown(report) {
       lines.push(`- StrategyId=${strategy.id}; тип=${strategy.type}; архив=${strategy.statusArchived}; цели=${strategy.priorityGoalIds.join(", ") || "не возвращены"}; название=${strategy.name || "не возвращено"}.`);
     }
     if (!strategies.bitrixStrategyCount) {
-      lines.push("- Счётчик 50606578 не найден ни в одной доступной пакетной стратегии Direct.");
+      lines.push(`- Счётчик ${strategies.targetCounterId} не найден ни в одной доступной пакетной стратегии Direct.`);
     }
     lines.push(`- Скрипт ничего не менял: mutations=${strategies.scriptMutations}.`);
     lines.push("- Ограничение: пакетная стратегия не является доказательством кампании, посадочной или фактических показов; непакетные стратегии этим методом не охватываются.");
@@ -873,13 +1144,32 @@ function buildMarkdown(report) {
   lines.push("## Метрика: hard goals");
   lines.push("");
   for (const counter of report.metrika.counters) {
-    lines.push(`### ${counter.name} ${counter.id}, цель ${counter.hardGoalId}`);
+    lines.push(`### ${counter.site} — счётчик ${counter.id}, hard goal ${counter.hardGoalId}`);
+    const definition = counter.definition || {};
+    if (definition.counter?.ok) {
+      lines.push(`- API-счётчик: ID=${definition.counter.id}; домен=${definition.counter.site}; точное совпадение=${definition.counter.exactIdVerified && definition.counter.exactSiteVerified ? "PASS" : "FAIL"}.`);
+    } else {
+      lines.push(`- API-счётчик: источник недоступен (${errorText(definition.counter?.error || "нет ответа")}); показатели других доменов не подставлены.`);
+    }
+    if (definition.goals?.hardGoalVerified) {
+      lines.push(`- Hard goal: PASS; ID=${definition.goals.hardGoal.id}; тип=${definition.goals.hardGoal.type}; action=${definition.goals.hardGoal.actionEvents.join(", ") || "API не вернул имя события"}.`);
+    } else {
+      lines.push(`- Hard goal: FAIL/недоступна; ${errorText(definition.goals?.error || "точное определение не подтверждено")}.`);
+    }
+    if (counter.softGoalId) {
+      lines.push(`- Soft goal ${counter.softGoalId}: ${definition.goals?.softGoal ? "найдена" : "не найдена/недоступна"}; это только мягкий сигнал, не заявка.`);
+    }
     for (const range of counter.ranges) {
       if (!range.ok) {
         lines.push(`- ${range.days}д: ошибка ${range.error}`);
       } else {
         lines.push(`- ${range.days}д ${range.date1}..${range.date2}: ${range.visits} визитов yandex/cpc, hard goals ${range.hardGoals}`);
       }
+    }
+    if (counter.hardProof?.ok) {
+      lines.push(`- Все источники, 30д ${counter.hardProof.date1}..${counter.hardProof.date2}: hard goals ${counter.hardProof.hardGoals}. Это единственный конверсионный показатель, используемый в readiness.`);
+    } else {
+      lines.push(`- Все источники, 30д: источник hard goal недоступен (${errorText(counter.hardProof?.error || "нет ответа")}).`);
     }
     lines.push("");
   }
@@ -918,155 +1208,211 @@ function buildMarkdown(report) {
     "",
     "## Спор ролей",
     "",
-    "- Директолог: каталоговая 708505950 не должна запускаться без заявки; квиз 705770573 можно анализировать как намеренно работающий, но чистить мусорные запросы нужно до масштабирования.",
-    "- Аналитик Метрики/CRM: заявкой считаются только 517600157 для каталога и 496461698 для квиза; DOM-цель формы 517599639, Direct conversions, телефоны, открытия квиза и мессенджеры отдельно.",
-    "- SEO/Webmaster-аудитор: основной SEO-актив только xn--80aa8ahaki9a.site; rosomaha.site остается рекламной квиз-воронкой.",
+    `- Директолог: ${targetRosomahaRusCampaignId} наблюдается отдельно и только чтением; ${protectedCampaignIds.join(", ")} этим аудитом не меняются и не запускаются.`,
+    "- Аналитик Метрики/CRM: заявкой считаются только 517600157, 496461698 и 601477348 строго в своих доменах; soft goals и Direct conversions заявками не являются.",
+    "- SEO/Webmaster-аудитор: xn--80aa8ahaki9a.site, rosomaha.site и rosomaha-rus.ru — три разных объекта; показатели, индексация и конверсионные выводы не объединяются.",
     "- Маркетолог-стратег: главный следующий шаг не бюджет, а связка spend -> hard goal -> CRM unique lead.",
     "- Критик рисков: GSC нельзя объявлять рабочим, пока project-specific refresh token не обновлён после invalid_grant; это контур доступа, а не рыночный ноль.",
     "",
-    "## Один вывод",
-    "",
-    `Готовность рекламы получать подтвержденные заявки: ${report.readinessScore}/10. Следующий безопасный шаг: владелец счётчика 50606578 даёт rosomaha-rus999 доступ на чтение либо предоставляет отдельно зарегистрированный проектный OAuth владельца; затем повторяется фиксированный read-only probe. До этого запуск или масштабирование рекламы rosomaha-rus.ru — NO-GO.`,
+    "## Evidence-based readiness по 100-балльной шкале",
     "",
   );
+
+  for (const object of monitoredObjects) {
+    const readiness = report.readiness.objects[object.name];
+    lines.push(`### ${readiness.site}: ${readiness.score}/100`);
+    lines.push(`- Hard goal: ${readiness.hardGoalId}; hard conversions за 30 дней: ${readiness.hardConversions30d ?? "источник недоступен"}.`);
+    if (readiness.softGoalId) lines.push(`- Soft goal ${readiness.softGoalId}: только сигнал, не заявка и не баллы readiness.`);
+    for (const check of readiness.checks) {
+      lines.push(`- ${check.passed ? "PASS" : "FAIL"} ${check.pointsEarned}/${check.pointsPossible}: ${check.label}.`);
+    }
+    if (readiness.nextActions.length) {
+      lines.push(`- Следующий безопасный шаг: ${readiness.nextActions[0]}`);
+    }
+    lines.push("");
+  }
+  lines.push(`Сводная арифметическая оценка: ${report.readiness.overallScore}/100. ${report.readiness.aggregation}`);
+  lines.push("Оценка проверяет измерение и атрибуцию; она не разрешает запуск, не подтверждает собственные деньги и никогда не разрешает овердрафт.");
+  lines.push("");
 
   return `${lines.join("\n")}\n`;
 }
 
-const env = parseEnvFile(envPath);
-const configuredDirectLogin = directLoginForEnv(env);
-if (configuredDirectLogin !== directLoginDefault) {
-  throw new Error(`Yandex account isolation mismatch: expected ${directLoginDefault}, got ${configuredDirectLogin}`);
-}
-const policy = {
-  apiOnly: true,
-  browserAllowed: false,
-  directLogin: configuredDirectLogin,
-  catalog: "https://xn--80aa8ahaki9a.site/",
-  quiz: "https://rosomaha.site/",
-  bitrix: "https://rosomaha-rus.ru/",
-};
-
-const campaignsSnapshot = directJsonRequest(env, "campaigns", "get", {
-  SelectionCriteria: { Ids: campaigns.map(Number) },
-  FieldNames: ["Id", "Name", "Status", "State", "Type", "StartDate", "EndDate"],
-  TextCampaignFieldNames: ["BiddingStrategy", "Settings"],
-  UnifiedCampaignFieldNames: ["CounterIds"],
-});
-const accountScope = await directAccountScope(env);
-const packageStrategies = await directPackageStrategies(env, accountScope);
-const accessibleMetrikaGoals = await directAccessibleMetrikaGoals(env, accountScope);
-
-const directRanges = [1, 7, 30].map((days) => {
-  const range = rangeForDays(days);
-  const result = directReport(env, "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"], range.date1, range.date2);
-  return {
-    ...range,
-    ok: result.ok,
-    error: result.error || null,
-    totals: result.ok ? aggregateCampaignRows(result.rows) : [],
-    rows: result.ok ? result.rows : [],
+export async function runAudit() {
+  const env = parseEnvFile(envPath);
+  const configuredDirectLogin = directLoginForEnv(env);
+  if (configuredDirectLogin !== directLoginDefault) {
+    throw new Error(`Yandex account isolation mismatch: expected ${directLoginDefault}, got ${configuredDirectLogin}`);
+  }
+  const policy = {
+    apiOnly: true,
+    browserAllowed: false,
+    directLogin: configuredDirectLogin,
+    readOnly: true,
+    overdraftUseAllowed: false,
+    launchAuthorizedByAudit: false,
+    protectedCampaignIds,
+    monitoredCampaignIds: campaigns,
+    targetRosomahaRusCampaignId,
+    domainMetricsSeparated: true,
+    catalog: "https://xn--80aa8ahaki9a.site/",
+    quiz: "https://rosomaha.site/",
+    bitrix: "https://rosomaha-rus.ru/",
   };
-});
 
-const queryRange = rangeForDays(7);
-const queries = directReport(env, "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "Query", "Impressions", "Clicks", "Cost", "Conversions"], queryRange.date1, queryRange.date2);
-const accountLandingResult = directReport(
-  env,
-  "CAMPAIGN_PERFORMANCE_REPORT",
-  ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"],
-  null,
-  null,
-  [],
-  { dateRangeType: "ALL_TIME", campaigns: null },
-);
-const accountLandingCampaigns = accountLandingResult.ok ? aggregateCampaignRows(accountLandingResult.rows, false) : [];
-const changesInventory = directChangesInventory(env);
-const metrika = {
-  counters: counters.map((counter) => ({
-    ...counter,
-    ranges: [1, 7, 30].map((days) => {
-      const range = rangeForDays(days);
-      const result = metrikaRequest(env, {
+  const campaignsSnapshot = directJsonRequest(env, "campaigns", "get", {
+    SelectionCriteria: { Ids: campaigns.map(Number) },
+    FieldNames: ["Id", "Name", "Status", "State", "Type", "StartDate", "EndDate"],
+    TextCampaignFieldNames: ["BiddingStrategy", "Settings", "CounterIds"],
+    UnifiedCampaignFieldNames: ["CounterIds", "PriorityGoals"],
+  });
+  const accountScope = await directAccountScope(env);
+  const packageStrategies = await directPackageStrategies(env, accountScope);
+  const accessibleMetrikaGoals = await directAccessibleMetrikaGoals(env, accountScope);
+
+  const directRanges = [1, 7, 30].map((days) => {
+    const range = rangeForDays(days);
+    const result = directReport(env, "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"], range.date1, range.date2);
+    return {
+      ...range,
+      ok: result.ok,
+      error: result.error || null,
+      totals: result.ok ? aggregateCampaignRows(result.rows) : [],
+      rows: result.ok ? result.rows : [],
+    };
+  });
+
+  const queryRange = rangeForDays(7);
+  const queries = directReport(env, "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "CampaignName", "Query", "Impressions", "Clicks", "Cost", "Conversions"], queryRange.date1, queryRange.date2);
+  const accountLandingResult = directReport(
+    env,
+    "CAMPAIGN_PERFORMANCE_REPORT",
+    ["CampaignId", "CampaignName", "CampaignType", "CampaignUrlPath", "Impressions", "Clicks", "Cost", "Conversions"],
+    null,
+    null,
+    [],
+    { dateRangeType: "ALL_TIME", campaigns: null },
+  );
+  const accountLandingCampaigns = accountLandingResult.ok ? aggregateCampaignRows(accountLandingResult.rows, false) : [];
+  const changesInventory = directChangesInventory(env);
+  const metrika = {
+    counters: counters.map((counter) => {
+      const proofRange = rangeForDays(30);
+      const proofResult = metrikaRequest(env, {
         ids: counter.id,
-        date1: range.date1,
-        date2: range.date2,
+        date1: proofRange.date1,
+        date2: proofRange.date2,
         metrics: `ym:s:visits,ym:s:goal${counter.hardGoalId}reaches`,
-        dimensions: "ym:s:UTMSource,ym:s:UTMMedium,ym:s:UTMCampaign",
-        filters: "ym:s:UTMSource=='yandex' AND ym:s:UTMMedium=='cpc'",
         accuracy: "full",
-        limit: 100,
+        limit: 1,
       });
-      const rows = result.ok ? summarizeMetrikaRows(result.data) : [];
+      const proofRows = proofResult.ok ? summarizeMetrikaRows(proofResult.data) : [];
       return {
-        ...range,
-        ok: result.ok,
-        error: result.error || null,
-        visits: rows.reduce((sum, row) => sum + row.visits, 0),
-        hardGoals: rows.reduce((sum, row) => sum + row.hardGoals, 0),
-        rows,
+        ...counter,
+        definition: metrikaCounterDefinition(env, counter),
+        hardProof: {
+          ...proofRange,
+          scope: "all_traffic",
+          ok: proofResult.ok,
+          error: proofResult.error || null,
+          visits: proofRows.reduce((sum, row) => sum + row.visits, 0),
+          hardGoals: proofRows.reduce((sum, row) => sum + row.hardGoals, 0),
+        },
+        ranges: [1, 7, 30].map((days) => {
+          const range = rangeForDays(days);
+          const result = metrikaRequest(env, {
+            ids: counter.id,
+            date1: range.date1,
+            date2: range.date2,
+            metrics: `ym:s:visits,ym:s:goal${counter.hardGoalId}reaches`,
+            dimensions: "ym:s:UTMSource,ym:s:UTMMedium,ym:s:UTMCampaign",
+            filters: "ym:s:UTMSource=='yandex' AND ym:s:UTMMedium=='cpc'",
+            accuracy: "full",
+            limit: 100,
+          });
+          const rows = result.ok ? summarizeMetrikaRows(result.data) : [];
+          return {
+            ...range,
+            scope: "yandex_cpc",
+            ok: result.ok,
+            error: result.error || null,
+            visits: rows.reduce((sum, row) => sum + row.visits, 0),
+            hardGoals: rows.reduce((sum, row) => sum + row.hardGoals, 0),
+            rows,
+          };
+        }),
       };
     }),
-  })),
-};
+  };
 
-const webmaster = {
-  summary: webmasterRequest(env, "/summary/"),
-  diagnostics: webmasterRequest(env, "/diagnostics/"),
-  sitemaps: webmasterRequest(env, "/sitemaps/"),
-  queries: webmasterRequest(
-    env,
-    "/search-queries/popular/?order_by=TOTAL_SHOWS&query_indicator=TOTAL_SHOWS&query_indicator=TOTAL_CLICKS&query_indicator=AVG_SHOW_POSITION&query_indicator=AVG_CLICK_POSITION&limit=500",
-  ),
-};
+  const webmaster = {
+    summary: webmasterRequest(env, "/summary/"),
+    diagnostics: webmasterRequest(env, "/diagnostics/"),
+    sitemaps: webmasterRequest(env, "/sitemaps/"),
+    queries: webmasterRequest(
+      env,
+      "/search-queries/popular/?order_by=TOTAL_SHOWS&query_indicator=TOTAL_SHOWS&query_indicator=TOTAL_CLICKS&query_indicator=AVG_SHOW_POSITION&query_indicator=AVG_CLICK_POSITION&limit=500",
+    ),
+  };
 
-const report = {
-  generatedAt: new Date().toISOString(),
-  policy,
-  direct: {
-    accountScope,
-    packageStrategies,
-    accessibleMetrikaGoals,
-    campaignsSnapshot,
-    ranges: directRanges,
-    accountLandingMap: {
-      ok: accountLandingResult.ok,
-      error: accountLandingResult.error || null,
-      campaigns: accountLandingCampaigns,
-      matchesRosomahaRus: accountLandingCampaigns.filter((campaign) => bitrixHosts.has(campaign.campaignHost)),
+  const report = {
+    generatedAt: new Date().toISOString(),
+    policy,
+    direct: {
+      accountScope,
+      packageStrategies,
+      accessibleMetrikaGoals,
+      campaignsSnapshot,
+      ranges: directRanges,
+      accountLandingMap: {
+        ok: accountLandingResult.ok,
+        error: accountLandingResult.error || null,
+        campaigns: accountLandingCampaigns,
+        matchesRosomahaRus: accountLandingCampaigns.filter((campaign) => bitrixHosts.has(campaign.campaignHost)),
+      },
+      changesInventory,
+      queries: {
+        ok: queries.ok,
+        error: queries.error || null,
+        range: queryRange,
+        rows: queries.ok
+          ? queries.rows
+              .map((row) => ({
+                campaignId: row.CampaignId,
+                query: row.Query,
+                impressions: numberValue(row.Impressions),
+                clicks: numberValue(row.Clicks),
+                cost: money(row.Cost),
+                conversions: numberValue(row.Conversions),
+                classification: "ad_platform_signal_not_lead",
+              }))
+              .sort((a, b) => b.cost - a.cost)
+              .slice(0, 100)
+          : [],
+      },
     },
-    changesInventory,
-    queries: {
-      ok: queries.ok,
-      error: queries.error || null,
-      range: queryRange,
-      rows: queries.ok
-        ? queries.rows
-            .map((row) => ({
-              campaignId: row.CampaignId,
-              query: row.Query,
-              impressions: numberValue(row.Impressions),
-              clicks: numberValue(row.Clicks),
-              cost: money(row.Cost),
-              conversions: numberValue(row.Conversions),
-            }))
-            .sort((a, b) => b.cost - a.cost)
-            .slice(0, 100)
-        : [],
-    },
-  },
-  metrika,
-  webmaster,
-  gsc: await gscStatus(env),
-  readinessScore: 4,
-};
+    metrika,
+    webmaster,
+    gsc: await gscStatus(env),
+  };
+  report.readiness = calculateReadiness(report);
 
-fs.mkdirSync(outDir, { recursive: true });
-fs.mkdirSync(jsonDir, { recursive: true });
-const jsonPath = path.join(jsonDir, `ROSOMAHA_API_ONLY_AUDIT_${stamp}.json`);
-const mdPath = path.join(outDir, `ROSOMAHA_API_ONLY_MARKETING_AUDIT_${new Date().toISOString().slice(0, 10)}_API_FIXED.md`);
-fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-fs.writeFileSync(mdPath, buildMarkdown(report), "utf8");
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(jsonDir, { recursive: true });
+  const jsonPath = path.join(jsonDir, `ROSOMAHA_API_ONLY_AUDIT_${stamp}.json`);
+  const mdPath = path.join(outDir, `ROSOMAHA_API_ONLY_MARKETING_AUDIT_${new Date().toISOString().slice(0, 10)}_API_FIXED.md`);
+  fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.writeFileSync(mdPath, buildMarkdown(report), "utf8");
 
-console.log(mdPath);
-console.log(jsonPath);
+  console.log(mdPath);
+  console.log(jsonPath);
+  return { report, mdPath, jsonPath };
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  runAudit().catch((error) => {
+    console.error(error?.message || error);
+    process.exitCode = 1;
+  });
+}

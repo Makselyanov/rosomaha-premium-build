@@ -1,0 +1,1936 @@
+#!/usr/bin/env python3
+"""Fail-closed Direct operator for rosomaha-rus.ru measurement.
+
+The writable scope is deliberately tiny: the canonical v501 representation of
+campaign 713802902 may receive only counter 111905412 and hard goal 601477348,
+or its five draft ads may be submitted for moderation.  The operator never
+starts a campaign, changes spend, or touches the three protected campaigns.
+
+Python's arbitrary precision integers are required here because Direct ad IDs
+can exceed JavaScript's exact integer range.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REGISTRY_PATH = PROJECT_ROOT.parent / "accounts" / "yandex-accounts.yaml"
+ENV_PATH = PROJECT_ROOT / ".env.seo.local"
+REPORT_ROOT = PROJECT_ROOT / "marketing-audits" / "yandex-direct"
+BROWSER_LOCK_ROOT = PROJECT_ROOT.parent / "browser-locks"
+BROWSER_LOCK_PATHS = (
+    BROWSER_LOCK_ROOT / "client-rosomaha.lock",
+    BROWSER_LOCK_ROOT / "rosomaha-yandex.lock",
+)
+MUTATION_LOCK_PATH = BROWSER_LOCK_ROOT / "rosomaha-direct-713802902.mutation.lock"
+
+ACCOUNT_SLUG = "rosomaha-yandex"
+EXPECTED_LOGIN = "rosomaha-rus999"
+EXPECTED_PROJECT = "rosomaha"
+EXPECTED_SERVICE = "yandex-suite"
+TARGET_CAMPAIGN_ID = 713_802_902
+TARGET_COUNTER_ID = 111_905_412
+HARD_GOAL_ID = 601_477_348
+PROTECTED_CAMPAIGN_IDS = (708_505_950, 705_770_573, 710_087_376)
+EXPECTED_AD_COUNT = 5
+
+CANONICAL_API_VERSION = "v501"
+LEGACY_API_VERSION = "v5"
+API_ORIGIN = "https://api.direct.yandex.com/json"
+MAX_RESPONSE_BYTES = 4_000_000
+MAX_EVIDENCE_BYTES = 1_000_000
+MAX_RECEIPT_BYTES = 2_000_000
+
+APPLY_GUARD_ENV = "ROSOMAHA_DIRECT_APPLY_MEASUREMENT"
+APPLY_GUARD_VALUE = "APPLY_713802902_COUNTER_111905412_GOAL_601477348"
+COUNTER_GUARD_ENV = "ROSOMAHA_DIRECT_APPLY_COUNTER"
+COUNTER_GUARD_VALUE = "APPLY_713802902_COUNTER_111905412_ONLY"
+MODERATE_GUARD_ENV = "ROSOMAHA_DIRECT_MODERATE"
+MODERATE_GUARD_VALUE = "MODERATE_EXACT_5_DRAFT_ADS_713802902"
+VALUE_GUARD_ENV = "ROSOMAHA_DIRECT_GOAL_VALUE_MICROS"
+EVIDENCE_GUARD_ENV = "ROSOMAHA_DIRECT_GOAL_VALUE_EVIDENCE_SHA256"
+EVIDENCE_SCHEMA = "rosomaha-direct-goal-value-v1"
+EVIDENCE_OWNER = "ООО ТПК Росомаха"
+
+CLIENT_FIELDS = ("ClientId", "Login", "Type", "Archived", "AvailableCampaignTypes")
+CAMPAIGN_FIELDS = (
+    "Id",
+    "Name",
+    "Status",
+    "State",
+    "Type",
+    "StartDate",
+    "EndDate",
+    "StatusPayment",
+    "StatusClarification",
+    "ClientInfo",
+    "SourceId",
+    "Currency",
+    "DailyBudget",
+    "NegativeKeywords",
+    "BlockedIps",
+    "ExcludedSites",
+    "Notification",
+    "TimeTargeting",
+    "TimeZone",
+    "RepresentedBy",
+)
+TEXT_CAMPAIGN_FIELDS = (
+    "CounterIds",
+    "PriorityGoals",
+    "BiddingStrategy",
+    "PackageBiddingStrategy",
+    "AttributionModel",
+    "Settings",
+)
+LEGACY_TEXT_CAMPAIGN_FIELDS = (
+    "CounterIds",
+    "PriorityGoals",
+    "BiddingStrategy",
+    "AttributionModel",
+    "Settings",
+)
+UNIFIED_CAMPAIGN_FIELDS = (*TEXT_CAMPAIGN_FIELDS, "TrackingParams")
+TEXT_SEARCH_PLACEMENT_FIELDS = ("SearchResults", "ProductGallery", "DynamicPlaces")
+UNIFIED_SEARCH_PLACEMENT_FIELDS = (
+    "SearchResults",
+    "ProductGallery",
+    "DynamicPlaces",
+    "Maps",
+    "SearchOrganizationList",
+)
+UNIFIED_PACKAGE_PLACEMENT_FIELDS = (
+    "SearchResult",
+    "ProductGallery",
+    "Maps",
+    "SearchOrganizationList",
+    "Network",
+    "DynamicPlaces",
+)
+AD_FIELDS = (
+    "Id",
+    "CampaignId",
+    "AdGroupId",
+    "Status",
+    "State",
+    "StatusClarification",
+    "Type",
+    "Subtype",
+)
+TEXT_AD_FIELDS = (
+    "Title",
+    "Title2",
+    "Text",
+    "Mobile",
+    "Href",
+    "DisplayUrlPath",
+    "VCardId",
+    "SitelinkSetId",
+    "AdImageHash",
+    "AdExtensions",
+    "BusinessId",
+)
+RESPONSIVE_AD_FIELDS = (
+    "Titles",
+    "Texts",
+    "Mobile",
+    "Href",
+    "DisplayDomain",
+    "DisplayUrlPath",
+    "AdImages",
+    "SitelinkSetId",
+    "AdExtensions",
+    "BusinessId",
+)
+ADGROUP_FIELDS = (
+    "Id",
+    "Name",
+    "CampaignId",
+    "Status",
+    "ServingStatus",
+    "Type",
+    "NegativeKeywords",
+)
+KEYWORD_FIELDS = (
+    "Id",
+    "Keyword",
+    "AdGroupId",
+    "CampaignId",
+    "State",
+    "Status",
+    "ServingStatus",
+    "AutotargetingCategories",
+    "AutotargetingBrandOptions",
+)
+
+
+class OperatorError(RuntimeError):
+    """Bounded error safe enough for a redacted receipt."""
+
+    def __init__(self, message: str, *, partial: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.partial = dict(partial or {})
+
+
+class ProviderError(OperatorError):
+    pass
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise ProviderError("Direct API unexpectedly redirected")
+
+
+class MutationLockPolicy:
+    """Cross-task mutation exclusion independent of browser profile ownership."""
+
+    def __init__(
+        self,
+        *,
+        browser_locks: Sequence[Path] = BROWSER_LOCK_PATHS,
+        mutation_lock: Path = MUTATION_LOCK_PATH,
+    ) -> None:
+        self.browser_locks = tuple(Path(path) for path in browser_locks)
+        self.mutation_lock = Path(mutation_lock)
+
+    def _assert_browser_unlocked(self) -> None:
+        occupied = [str(path) for path in self.browser_locks if path.exists() or path.is_symlink()]
+        if occupied:
+            raise OperatorError(
+                "Yandex mutation заблокирована активным owner/browser lock: "
+                + ", ".join(occupied)
+            )
+
+    @contextmanager
+    def hold(self):
+        self._assert_browser_unlocked()
+        self.mutation_lock.parent.mkdir(parents=True, exist_ok=True)
+        payload = canonical_bytes(
+            {
+                "schema": 1,
+                "owner": "yandex-direct-rosomaha-rus-measurement",
+                "campaign_id": TARGET_CAMPAIGN_ID,
+                "pid": os.getpid(),
+                "created_at": utc_now(),
+            }
+        ) + b"\n"
+        try:
+            descriptor = os.open(
+                self.mutation_lock,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            raise OperatorError("Yandex mutation lock уже занят другой задачей") from None
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        acquired = self.mutation_lock.stat()
+        evidence = {
+            "path": str(self.mutation_lock),
+            "atomic_create": True,
+            "browser_locks_checked": [str(path) for path in self.browser_locks],
+            "released": False,
+        }
+        try:
+            # Close the race where a browser owner appeared after the first check.
+            self._assert_browser_unlocked()
+            yield evidence
+        finally:
+            try:
+                current = self.mutation_lock.lstat()
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and not self.mutation_lock.is_symlink()
+                    and current.st_dev == acquired.st_dev
+                    and current.st_ino == acquired.st_ino
+                ):
+                    self.mutation_lock.unlink()
+                    evidence["released"] = True
+                else:
+                    evidence["release_error"] = "mutation lock identity changed"
+            except FileNotFoundError:
+                evidence["release_error"] = "mutation lock disappeared"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _exact_int(value: Any, label: str, *, positive: bool = True) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OperatorError(f"{label}: ожидалось точное целое число")
+    if positive and value <= 0:
+        raise OperatorError(f"{label}: значение должно быть положительным")
+    return value
+
+
+def _parse_cli_int(value: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]*", value or ""):
+        raise argparse.ArgumentTypeError("ожидалось положительное целое число в микросах")
+    return int(value, 10)
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sha256_json(value: Any) -> str:
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _safe_text(value: Any, secrets: Sequence[str] = ()) -> str:
+    text = str(value or type(value).__name__)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)Bearer\s+[^\s\"',}]+", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"(?i)(?:oauth[_ -]?token|authorization|secret|password)\s*[=:]\s*\S+",
+        "credential=[REDACTED]",
+        text,
+    )
+    return text[:700]
+
+
+def _strip_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if value[0] in {"'", '"'}:
+        if len(value) < 2 or value[-1] != value[0]:
+            raise OperatorError("Registry YAML содержит незакрытую кавычку")
+        return value[1:-1].replace("''", "'") if value[0] == "'" else value[1:-1]
+    return value.split(" #", 1)[0].strip()
+
+
+def _yaml_inline_list(value: str) -> list[str]:
+    value = value.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        raise OperatorError("Registry YAML: ожидался inline-массив")
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+    return [_strip_yaml_scalar(item) for item in inner.split(",")]
+
+
+def _registry_account(text: str, slug: str = ACCOUNT_SLUG) -> dict[str, Any]:
+    in_accounts = False
+    current: str | None = None
+    accounts: dict[str, dict[str, Any]] = {}
+    for raw in text.splitlines():
+        if "\t" in raw:
+            raise OperatorError("Registry YAML: табуляция запрещена")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not in_accounts:
+            if stripped == "accounts:":
+                in_accounts = True
+            continue
+        match_account = re.fullmatch(r"  ([A-Za-z0-9][A-Za-z0-9._-]*):\s*", raw)
+        if match_account:
+            current = match_account.group(1)
+            if current in accounts:
+                raise OperatorError("Registry YAML содержит дублирующий account slug")
+            accounts[current] = {}
+            continue
+        if not raw.startswith(" "):
+            break
+        match_property = re.fullmatch(r"    ([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)", raw)
+        if not match_property or current is None:
+            raise OperatorError("Registry YAML имеет неподдерживаемую структуру")
+        key, raw_value = match_property.groups()
+        if key in accounts[current]:
+            raise OperatorError("Registry YAML содержит дублирующее свойство")
+        accounts[current][key] = (
+            _yaml_inline_list(raw_value)
+            if raw_value.strip().startswith("[")
+            else _strip_yaml_scalar(raw_value)
+        )
+    if slug not in accounts:
+        raise OperatorError(f"Registry не содержит точный маршрут {slug}")
+    return accounts[slug]
+
+
+def resolve_route(
+    *, registry_path: Path = REGISTRY_PATH, env_path: Path = ENV_PATH
+) -> dict[str, Any]:
+    if not registry_path.is_file():
+        raise OperatorError("Yandex account registry недоступен")
+    account = _registry_account(registry_path.read_text(encoding="utf-8-sig"))
+    services = account.get("services")
+    allowed = account.get("allowed_projects")
+    configured_env = Path(str(account.get("api_env", "")))
+    if account.get("service") != EXPECTED_SERVICE:
+        raise OperatorError("Yandex route: неверный service")
+    if not isinstance(services, list) or "direct" not in services:
+        raise OperatorError("Yandex route: Direct не разрешён")
+    if account.get("project") != EXPECTED_PROJECT:
+        raise OperatorError("Yandex route: неверный project")
+    if not isinstance(allowed, list) or EXPECTED_PROJECT not in allowed or "rosomaha-rus.ru" not in allowed:
+        raise OperatorError("Yandex route: проект или домен не разрешён")
+    if account.get("direct_login") != EXPECTED_LOGIN:
+        raise OperatorError("Yandex route: неверный Direct login")
+    if os.path.normcase(str(configured_env)) != os.path.normcase(str(env_path)):
+        raise OperatorError("Yandex route: разрешён только закреплённый project env")
+    return {
+        "status": "verified",
+        "account_slug": ACCOUNT_SLUG,
+        "project": EXPECTED_PROJECT,
+        "direct_login": EXPECTED_LOGIN,
+        "api_env": str(env_path),
+    }
+
+
+def parse_project_token(text: str) -> str:
+    matches: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        if key.strip() == "YANDEX_OAUTH_TOKEN":
+            matches.append(value.strip().strip("'\""))
+    if len(matches) != 1 or not re.fullmatch(r"[A-Za-z0-9._~-]+", matches[0] or ""):
+        raise OperatorError("Закреплённый project env должен содержать один корректный YANDEX_OAUTH_TOKEN")
+    return matches[0]
+
+
+def load_project_token(env_path: Path = ENV_PATH) -> str:
+    if not env_path.is_file() or env_path.is_symlink():
+        raise OperatorError("Закреплённый project env недоступен или является ссылкой")
+    return parse_project_token(env_path.read_text(encoding="utf-8-sig"))
+
+
+def endpoint(version: str, service: str) -> str:
+    if version not in {CANONICAL_API_VERSION, LEGACY_API_VERSION}:
+        raise OperatorError("Direct API version не входит в allowlist v5/v501")
+    if service not in {"clients", "campaigns", "ads", "adgroups", "keywords", "sitelinks"}:
+        raise OperatorError("Direct API service не входит в allowlist")
+    return f"{API_ORIGIN}/{version}/{service}"
+
+
+def _header(headers: Any, name: str) -> str | None:
+    value = headers.get(name) if headers is not None else None
+    return str(value).strip() if value else None
+
+
+class DirectApi:
+    def __init__(self, token: str, *, timeout: float = 20.0) -> None:
+        if not token:
+            raise OperatorError("Пустой OAuth token")
+        self._token = token
+        self.timeout = timeout
+        self.request_log: list[dict[str, Any]] = []
+        self.mutation_requests = 0
+        self._opener = build_opener(RejectRedirects())
+
+    def call(
+        self,
+        version: str,
+        service: str,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        use_client_login: bool,
+        mutation_kind: str | None = None,
+    ) -> dict[str, Any]:
+        _assert_request_contract(
+            version,
+            service,
+            method,
+            params,
+            use_client_login=use_client_login,
+            mutation_kind=mutation_kind,
+        )
+        mutating = mutation_kind is not None
+        self.request_log.append(
+            {
+                "version": version,
+                "service": service,
+                "method": method,
+                "client_login": EXPECTED_LOGIN if use_client_login else None,
+                "mutation_kind": mutation_kind,
+            }
+        )
+        if mutating:
+            self.mutation_requests += 1
+
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept-Language": "ru",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        if use_client_login:
+            headers["Client-Login"] = EXPECTED_LOGIN
+        body = canonical_bytes({"method": method, "params": dict(params)})
+        request = Request(endpoint(version, service), data=body, headers=headers, method="POST")
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ProviderError("Direct API response превысил безопасный предел")
+                response_headers = response.headers
+        except HTTPError as exc:
+            raw = exc.read(MAX_RESPONSE_BYTES + 1)
+            detail = _safe_text(raw.decode("utf-8", errors="replace"), (self._token,))
+            raise ProviderError(f"Direct API HTTP {exc.code}: {detail}") from None
+        except (URLError, TimeoutError, OSError) as exc:
+            raise ProviderError(f"Direct API transport: {_safe_text(exc, (self._token,))}") from None
+
+        units_login = _header(response_headers, "Units-Used-Login")
+        if use_client_login and units_login and units_login != EXPECTED_LOGIN:
+            raise OperatorError("Direct API ответил единицами другого логина")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ProviderError("Direct API вернул невалидный JSON") from None
+        if not isinstance(payload, dict):
+            raise ProviderError("Direct API вернул JSON неожиданного типа")
+        if payload.get("error"):
+            error = payload["error"] if isinstance(payload["error"], dict) else {}
+            code = error.get("error_code")
+            text = _safe_text(error.get("error_string") or error.get("error_detail") or "provider error", (self._token,))
+            raise ProviderError(f"Direct API error_code={code}: {text}")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ProviderError("Direct API response не содержит result object")
+        return result
+
+
+def _assert_request_contract(
+    version: str,
+    service: str,
+    method: str,
+    params: Mapping[str, Any],
+    *,
+    use_client_login: bool,
+    mutation_kind: str | None,
+) -> None:
+    endpoint(version, service)
+    allowed_reads = {
+        ("clients", "get"),
+        ("campaigns", "get"),
+        ("ads", "get"),
+        ("adgroups", "get"),
+        ("keywords", "get"),
+        ("sitelinks", "get"),
+    }
+    if mutation_kind is None:
+        if (service, method) not in allowed_reads:
+            raise OperatorError("Read-only request не входит в allowlist")
+        if service == "clients" and use_client_login:
+            raise OperatorError("Clients.get обязан выполняться без Client-Login")
+        if service != "clients" and not use_client_login:
+            raise OperatorError("Client-scoped read обязан использовать точный Client-Login")
+        if service == "campaigns":
+            _assert_campaign_get_contract(params, version)
+        elif service == "ads":
+            _assert_ads_get_contract(params)
+        return
+    if version != CANONICAL_API_VERSION or not use_client_login:
+        raise OperatorError("Любая мутация разрешена только через v501 и точный Client-Login")
+    if mutation_kind in {
+        "apply_counter",
+        "restore_counter",
+        "apply_measurement",
+        "restore_measurement",
+    }:
+        if (service, method) != ("campaigns", "update"):
+            raise OperatorError("Measurement mutation разрешает только campaigns.update")
+        assert_measurement_update_scope(params, mutation_kind=mutation_kind)
+        return
+    if mutation_kind == "moderate":
+        if (service, method) != ("ads", "moderate"):
+            raise OperatorError("Moderation mutation разрешает только ads.moderate")
+        ids = params.get("SelectionCriteria", {}).get("Ids") if isinstance(params, Mapping) else None
+        _assert_exact_ad_ids(ids)
+        return
+    raise OperatorError("Неизвестный mutation kind")
+
+
+def _assert_campaign_get_contract(params: Mapping[str, Any], version: str) -> None:
+    if version == LEGACY_API_VERSION:
+        if params.get("TextCampaignFieldNames") != list(LEGACY_TEXT_CAMPAIGN_FIELDS):
+            raise OperatorError("Legacy TextCampaignFieldNames не совпал с allowlist")
+        if any(
+            key in params
+            for key in (
+                "UnifiedCampaignFieldNames",
+                "TextCampaignSearchStrategyPlacementTypesFieldNames",
+                "UnifiedCampaignSearchStrategyPlacementTypesFieldNames",
+                "UnifiedCampaignPackageBiddingStrategyPlatformsFieldNames",
+            )
+        ):
+            raise OperatorError("Legacy campaigns.get не должен запрашивать unified-only поля")
+        return
+    if params.get("TextCampaignFieldNames") != list(TEXT_CAMPAIGN_FIELDS):
+        raise OperatorError("TextCampaignFieldNames не совпал с отдельным enum allowlist")
+    if "TrackingParams" in params.get("TextCampaignFieldNames", []):
+        raise OperatorError("TrackingParams запрещён в TextCampaignFieldNames этого оператора")
+    if params.get("UnifiedCampaignFieldNames") != list(UNIFIED_CAMPAIGN_FIELDS):
+        raise OperatorError("UnifiedCampaignFieldNames не совпал с enum allowlist")
+    if params.get("TextCampaignSearchStrategyPlacementTypesFieldNames") != list(TEXT_SEARCH_PLACEMENT_FIELDS):
+        raise OperatorError("Text campaign placement fields неполны")
+    if params.get("UnifiedCampaignSearchStrategyPlacementTypesFieldNames") != list(UNIFIED_SEARCH_PLACEMENT_FIELDS):
+        raise OperatorError("Unified campaign placement fields неполны")
+    if params.get("UnifiedCampaignPackageBiddingStrategyPlatformsFieldNames") != list(UNIFIED_PACKAGE_PLACEMENT_FIELDS):
+        raise OperatorError("Unified package placement fields неполны")
+
+
+def _assert_ads_get_contract(params: Mapping[str, Any]) -> None:
+    text_fields = params.get("TextAdFieldNames")
+    responsive_fields = params.get("ResponsiveAdFieldNames")
+    if text_fields is None and responsive_fields is None:
+        return
+    if text_fields != list(TEXT_AD_FIELDS):
+        raise OperatorError("TextAdFieldNames не совпал с creative CAS allowlist")
+    if responsive_fields != list(RESPONSIVE_AD_FIELDS):
+        raise OperatorError("ResponsiveAdFieldNames не совпал с creative CAS allowlist")
+
+
+def assert_measurement_update_scope(params: Mapping[str, Any], *, mutation_kind: str) -> None:
+    if set(params) != {"Campaigns"} or not isinstance(params.get("Campaigns"), list) or len(params["Campaigns"]) != 1:
+        raise OperatorError("Campaigns.update обязан содержать ровно одну кампанию")
+    item = params["Campaigns"][0]
+    if not isinstance(item, Mapping) or set(item) != {"Id", "UnifiedCampaign"}:
+        raise OperatorError("Campaigns.update содержит лишние поля")
+    campaign_id = _exact_int(item.get("Id"), "Campaign Id")
+    if campaign_id in PROTECTED_CAMPAIGN_IDS:
+        raise OperatorError("Защищённая кампания не может быть целью мутации")
+    if campaign_id != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Разрешена только кампания 713802902")
+    unified = item.get("UnifiedCampaign")
+    if not isinstance(unified, Mapping):
+        raise OperatorError("UnifiedCampaign update имеет неверную структуру")
+    counter_only = mutation_kind in {"apply_counter", "restore_counter"}
+    expected_fields = {"CounterIds"} if counter_only else {"CounterIds", "PriorityGoals"}
+    if set(unified) != expected_fields:
+        raise OperatorError("UnifiedCampaign update содержит лишние или пропущенные поля")
+    counters = unified.get("CounterIds")
+    goals = unified.get("PriorityGoals") if not counter_only else None
+    restore = mutation_kind in {"restore_counter", "restore_measurement"}
+    if restore:
+        if counters is not None:
+            _validate_counter_structure(counters, exact_target=False)
+        if not counter_only and goals is not None:
+            _validate_update_goals(goals, exact_hard=False)
+    else:
+        _validate_counter_structure(counters, exact_target=True)
+        if not counter_only:
+            _validate_update_goals(goals, exact_hard=True)
+
+
+def _validate_counter_structure(value: Any, *, exact_target: bool) -> list[int]:
+    if not isinstance(value, Mapping) or set(value) != {"Items"} or not isinstance(value["Items"], list):
+        raise OperatorError("CounterIds имеет неверную структуру")
+    ids = [_exact_int(item, "Counter Id") for item in value["Items"]]
+    if len(ids) != len(set(ids)):
+        raise OperatorError("CounterIds содержит дубли")
+    if exact_target and ids != [TARGET_COUNTER_ID]:
+        raise OperatorError("CounterIds обязан содержать только 111905412")
+    return ids
+
+
+def _validate_update_goals(value: Any, *, exact_hard: bool) -> list[dict[str, Any]]:
+    if not isinstance(value, Mapping) or set(value) != {"Items"} or not isinstance(value["Items"], list):
+        raise OperatorError("PriorityGoals имеет неверную структуру")
+    normalized: list[dict[str, Any]] = []
+    for item in value["Items"]:
+        if not isinstance(item, Mapping) or not {"GoalId", "Value", "Operation"}.issubset(item):
+            raise OperatorError("PriorityGoals item имеет неверную структуру")
+        if set(item) - {"GoalId", "Value", "Operation", "IsMetrikaSourceOfValue"}:
+            raise OperatorError("PriorityGoals item содержит лишние поля")
+        goal_id = _exact_int(item.get("GoalId"), "Goal Id")
+        goal_value = _exact_int(item.get("Value"), "Goal Value")
+        if item.get("Operation") != "SET":
+            raise OperatorError("PriorityGoals Operation обязан быть SET")
+        source = item.get("IsMetrikaSourceOfValue")
+        if source is not None and source not in {"YES", "NO"}:
+            raise OperatorError("Некорректный IsMetrikaSourceOfValue")
+        normalized.append({"GoalId": goal_id, "Value": goal_value})
+    if len({item["GoalId"] for item in normalized}) != len(normalized):
+        raise OperatorError("PriorityGoals содержит дубли целей")
+    if exact_hard and (len(normalized) != 1 or normalized[0]["GoalId"] != HARD_GOAL_ID):
+        raise OperatorError("PriorityGoals обязан содержать только hard goal 601477348")
+    return normalized
+
+
+def _assert_exact_ad_ids(ids: Any) -> list[int]:
+    if not isinstance(ids, list) or len(ids) != EXPECTED_AD_COUNT:
+        raise OperatorError("Модерация требует ровно пять объявлений")
+    normalized = [_exact_int(item, "Ad Id") for item in ids]
+    if len(set(normalized)) != EXPECTED_AD_COUNT:
+        raise OperatorError("Модерация требует пять различных объявлений")
+    return normalized
+
+
+def campaign_get_params(ids: Sequence[int], *, version: str) -> dict[str, Any]:
+    normalized = [_exact_int(item, "Campaign Id") for item in ids]
+    if len(normalized) != len(set(normalized)):
+        raise OperatorError("Campaign selection содержит дубли")
+    params = {
+        "SelectionCriteria": {"Ids": normalized},
+        "FieldNames": list(CAMPAIGN_FIELDS),
+        "Page": {"Limit": 1000, "Offset": 0},
+    }
+    if version == LEGACY_API_VERSION:
+        params["TextCampaignFieldNames"] = list(LEGACY_TEXT_CAMPAIGN_FIELDS)
+        return params
+    params["TextCampaignFieldNames"] = list(TEXT_CAMPAIGN_FIELDS)
+    params["UnifiedCampaignFieldNames"] = list(UNIFIED_CAMPAIGN_FIELDS)
+    params["TextCampaignSearchStrategyPlacementTypesFieldNames"] = list(TEXT_SEARCH_PLACEMENT_FIELDS)
+    params["UnifiedCampaignSearchStrategyPlacementTypesFieldNames"] = list(UNIFIED_SEARCH_PLACEMENT_FIELDS)
+    params["UnifiedCampaignPackageBiddingStrategyPlatformsFieldNames"] = list(UNIFIED_PACKAGE_PLACEMENT_FIELDS)
+    return params
+
+
+def _items_from_result(result: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+    if result.get("LimitedBy") not in {None, ""}:
+        raise OperatorError(f"{key}.get result был усечён")
+    items = result.get(key)
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise OperatorError(f"{key}.get вернул неверную структуру")
+    return copy.deepcopy(items)
+
+
+def prove_identity(api: Any) -> dict[str, Any]:
+    result = api.call(
+        CANONICAL_API_VERSION,
+        "clients",
+        "get",
+        {"FieldNames": list(CLIENT_FIELDS)},
+        use_client_login=False,
+    )
+    clients = _items_from_result(result, "Clients")
+    if len(clients) != 1:
+        raise OperatorError("Clients.get должен вернуть ровно одного клиента")
+    client = clients[0]
+    if client.get("Login") != EXPECTED_LOGIN or client.get("Type") != "CLIENT":
+        raise OperatorError("OAuth identity не совпадает с прямым клиентом rosomaha-rus999")
+    if client.get("Archived") not in {"NO", None}:
+        raise OperatorError("Direct client архивирован")
+    return {
+        "login": EXPECTED_LOGIN,
+        "type": "CLIENT",
+        "client_id": _exact_int(client.get("ClientId"), "Client Id"),
+        "verified_via": "v501 Clients.get without Client-Login",
+    }
+
+
+def read_campaign(api: Any, version: str, campaign_id: int = TARGET_CAMPAIGN_ID) -> dict[str, Any]:
+    result = api.call(
+        version,
+        "campaigns",
+        "get",
+        campaign_get_params([campaign_id], version=version),
+        use_client_login=True,
+    )
+    campaigns = _items_from_result(result, "Campaigns")
+    if len(campaigns) != 1 or _exact_int(campaigns[0].get("Id"), "Campaign Id") != campaign_id:
+        raise OperatorError("campaigns.get не вернул точную единственную кампанию")
+    return campaigns[0]
+
+
+def validate_canonical_campaign(
+    campaign: Mapping[str, Any], *, require_draft: bool, require_off: bool = True
+) -> dict[str, Any]:
+    if _exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Получена другая кампания")
+    if campaign.get("Type") != "UNIFIED_CAMPAIGN":
+        raise OperatorError("v501 обязан вернуть UNIFIED_CAMPAIGN; legacy TEXT view не разрешает запись")
+    if require_off and campaign.get("State") != "OFF":
+        raise OperatorError("Кампания обязана оставаться в State=OFF")
+    if require_draft and campaign.get("Status") != "DRAFT":
+        raise OperatorError("Перед мутацией кампания обязана иметь Status=DRAFT")
+    unified = campaign.get("UnifiedCampaign")
+    if not isinstance(unified, Mapping):
+        raise OperatorError("v501 не вернул UnifiedCampaign object")
+    if "PackageBiddingStrategy" not in unified:
+        raise OperatorError("v501 не доказал отсутствие пакетной стратегии")
+    if unified.get("PackageBiddingStrategy") is not None:
+        raise OperatorError("Кампания связана с пакетной стратегией; изменение заблокировано")
+    return dict(unified)
+
+
+def _sorted_by_id(items: Sequence[Mapping[str, Any]], label: str) -> list[dict[str, Any]]:
+    copied = [copy.deepcopy(dict(item)) for item in items]
+    ids = [_exact_int(item.get("Id"), f"{label} Id") for item in copied]
+    if len(ids) != len(set(ids)):
+        raise OperatorError(f"{label}: обнаружены дубли ID")
+    return sorted(copied, key=lambda item: item["Id"])
+
+
+def read_protected_snapshot(api: Any) -> dict[str, Any]:
+    views: dict[str, list[dict[str, Any]]] = {}
+    actual_ids: set[int] = set()
+    for version in (CANONICAL_API_VERSION,):
+        result = api.call(
+            version,
+            "campaigns",
+            "get",
+            campaign_get_params(PROTECTED_CAMPAIGN_IDS, version=version),
+            use_client_login=True,
+        )
+        campaigns = _sorted_by_id(
+            _items_from_result(result, "Campaigns"), f"Protected campaign {version}"
+        )
+        version_ids = {item["Id"] for item in campaigns}
+        unexpected = version_ids - set(PROTECTED_CAMPAIGN_IDS)
+        if unexpected:
+            raise OperatorError(
+                f"Protected snapshot {version} вернул неожиданные IDs={sorted(unexpected)}"
+            )
+        actual_ids.update(version_ids)
+        views[version] = campaigns
+    missing = sorted(set(PROTECTED_CAMPAIGN_IDS) - actual_ids)
+    canonical = canonical_bytes(views)
+    return {
+        "campaigns": views,
+        "covered_ids": sorted(actual_ids),
+        "missing_ids": missing,
+        "missing_semantics": "not_visible_in_exact_login_on_v501_or_v5",
+        "canonical_sha256": hashlib.sha256(canonical).hexdigest(),
+        "canonical_bytes": len(canonical),
+        "semantic_sha256": sha256_json(views),
+    }
+
+
+def assert_protected_equal(before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
+    if (
+        before.get("canonical_sha256") != after.get("canonical_sha256")
+        or before.get("canonical_bytes") != after.get("canonical_bytes")
+        or before.get("semantic_sha256") != after.get("semantic_sha256")
+    ):
+        raise OperatorError("Защищённые кампании изменились; postflight остановлен")
+
+
+def _counter_ids(container: Mapping[str, Any]) -> list[int]:
+    value = container.get("CounterIds")
+    if value is None:
+        return []
+    return _validate_counter_structure(value, exact_target=False)
+
+
+def _goal_items(container: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    value = container.get("PriorityGoals")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"Items"} or not isinstance(value["Items"], list):
+        raise OperatorError("PriorityGoals readback имеет неверную структуру")
+    normalized: list[dict[str, Any]] = []
+    for item in value["Items"]:
+        if not isinstance(item, Mapping):
+            raise OperatorError("PriorityGoals readback item имеет неверную структуру")
+        goal = {
+            "GoalId": _exact_int(item.get("GoalId"), "Goal Id"),
+            "Value": _exact_int(item.get("Value"), "Goal Value"),
+        }
+        source = item.get("IsMetrikaSourceOfValue", "NO")
+        if source not in {"YES", "NO"}:
+            raise OperatorError("PriorityGoals readback source некорректен")
+        goal["IsMetrikaSourceOfValue"] = source
+        normalized.append(goal)
+    if len({item["GoalId"] for item in normalized}) != len(normalized):
+        raise OperatorError("PriorityGoals readback содержит дубли")
+    return sorted(normalized, key=lambda item: item["GoalId"])
+
+
+def measurement(campaign: Mapping[str, Any]) -> dict[str, Any]:
+    unified = validate_canonical_campaign(campaign, require_draft=False)
+    return {"CounterIds": _counter_ids(unified), "PriorityGoals": _goal_items(unified)}
+
+
+def desired_measurement(goal_value_micros: int) -> dict[str, Any]:
+    value = _exact_int(goal_value_micros, "Goal Value")
+    return {
+        "CounterIds": [TARGET_COUNTER_ID],
+        "PriorityGoals": [
+            {
+                "GoalId": HARD_GOAL_ID,
+                "Value": value,
+                "IsMetrikaSourceOfValue": "NO",
+            }
+        ],
+    }
+
+
+def measurement_update(goal_value_micros: int) -> dict[str, Any]:
+    desired = desired_measurement(goal_value_micros)
+    return {
+        "Campaigns": [
+            {
+                "Id": TARGET_CAMPAIGN_ID,
+                "UnifiedCampaign": {
+                    "CounterIds": {"Items": desired["CounterIds"]},
+                    "PriorityGoals": {
+                        "Items": [
+                            {
+                                "GoalId": HARD_GOAL_ID,
+                                "Value": goal_value_micros,
+                                "Operation": "SET",
+                                "IsMetrikaSourceOfValue": "NO",
+                            }
+                        ]
+                    },
+                },
+            }
+        ]
+    }
+
+
+def counter_update(counter_ids: list[int] | None = None) -> dict[str, Any]:
+    counters = [TARGET_COUNTER_ID] if counter_ids is None else list(counter_ids)
+    counter_payload = None if not counters else {"Items": counters}
+    return {
+        "Campaigns": [
+            {
+                "Id": TARGET_CAMPAIGN_ID,
+                "UnifiedCampaign": {"CounterIds": counter_payload},
+            }
+        ]
+    }
+
+
+def restore_counter_update(original: list[int] | None) -> dict[str, Any]:
+    counters = [] if original is None else list(original)
+    return {
+        "Campaigns": [
+            {
+                "Id": TARGET_CAMPAIGN_ID,
+                "UnifiedCampaign": {
+                    "CounterIds": None if not counters else {"Items": counters}
+                },
+            }
+        ]
+    }
+
+
+def restore_update(original: Mapping[str, Any]) -> dict[str, Any]:
+    counters = list(original.get("CounterIds") or [])
+    goals = original.get("PriorityGoals")
+    counter_payload = None if not counters else {"Items": counters}
+    if goals is None:
+        goal_payload = None
+    else:
+        update_items = []
+        for goal in goals:
+            item = {
+                "GoalId": _exact_int(goal.get("GoalId"), "Goal Id"),
+                "Value": _exact_int(goal.get("Value"), "Goal Value"),
+                "Operation": "SET",
+            }
+            if goal.get("IsMetrikaSourceOfValue") is not None:
+                item["IsMetrikaSourceOfValue"] = goal["IsMetrikaSourceOfValue"]
+            update_items.append(item)
+        goal_payload = {"Items": update_items}
+    return {
+        "Campaigns": [
+            {
+                "Id": TARGET_CAMPAIGN_ID,
+                "UnifiedCampaign": {
+                    "CounterIds": counter_payload,
+                    "PriorityGoals": goal_payload,
+                },
+            }
+        ]
+    }
+
+
+def _campaign_without_measurement(campaign: Mapping[str, Any]) -> dict[str, Any]:
+    value = copy.deepcopy(dict(campaign))
+    unified = value.get("UnifiedCampaign")
+    if isinstance(unified, dict):
+        unified.pop("CounterIds", None)
+        unified.pop("PriorityGoals", None)
+    return value
+
+
+def _campaign_without_moderation_status(campaign: Mapping[str, Any]) -> dict[str, Any]:
+    value = copy.deepcopy(dict(campaign))
+    value.pop("Status", None)
+    value.pop("StatusClarification", None)
+    return value
+
+
+def _safe_notifications(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise OperatorError("Direct notification list имеет неверную структуру")
+    safe: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise OperatorError("Direct notification item имеет неверную структуру")
+        safe.append(
+            {
+                "Code": item.get("Code"),
+                "Message": _safe_text(item.get("Message")),
+                "Details": _safe_text(item.get("Details")) if item.get("Details") else None,
+            }
+        )
+    return safe
+
+
+def _assert_action_results(result: Mapping[str, Any], key: str, expected_ids: Sequence[int]) -> None:
+    rows = result.get(key)
+    if not isinstance(rows, list) or len(rows) != len(expected_ids):
+        raise OperatorError(f"Direct mutation не вернула точный {key}")
+    actual: list[int] = []
+    warnings = _safe_notifications(result.get("Warnings"))
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("Errors"):
+            raise OperatorError(f"Direct mutation вернула Errors в {key}")
+        warnings.extend(_safe_notifications(row.get("Warnings")))
+        actual.append(_exact_int(row.get("Id"), f"{key} Id"))
+    if sorted(actual) != sorted(expected_ids) or len(set(actual)) != len(actual):
+        raise OperatorError(f"Direct mutation вернула другие ID в {key}")
+    if warnings:
+        raise OperatorError(
+            "Direct mutation вернула Warnings; результат принят fail-closed",
+            partial={"provider_warnings": warnings},
+        )
+
+
+def ads_get_params(*, include_creatives: bool = False) -> dict[str, Any]:
+    params = {
+        "SelectionCriteria": {"CampaignIds": [TARGET_CAMPAIGN_ID]},
+        "FieldNames": list(AD_FIELDS),
+        "Page": {"Limit": 10000, "Offset": 0},
+    }
+    if include_creatives:
+        params["TextAdFieldNames"] = list(TEXT_AD_FIELDS)
+        params["ResponsiveAdFieldNames"] = list(RESPONSIVE_AD_FIELDS)
+    return params
+
+
+def read_ads(api: Any, *, include_creatives: bool = False) -> list[dict[str, Any]]:
+    result = api.call(
+        CANONICAL_API_VERSION,
+        "ads",
+        "get",
+        ads_get_params(include_creatives=include_creatives),
+        use_client_login=True,
+    )
+    ads = _sorted_by_id(_items_from_result(result, "Ads"), "Ad")
+    for ad in ads:
+        if _exact_int(ad.get("CampaignId"), "Ad CampaignId") != TARGET_CAMPAIGN_ID:
+            raise OperatorError("ads.get вернул объявление другой кампании")
+    return ads
+
+
+def read_adgroups(api: Any) -> list[dict[str, Any]]:
+    result = api.call(
+        CANONICAL_API_VERSION,
+        "adgroups",
+        "get",
+        {
+            "SelectionCriteria": {"CampaignIds": [TARGET_CAMPAIGN_ID]},
+            "FieldNames": list(ADGROUP_FIELDS),
+            "Page": {"Limit": 10000, "Offset": 0},
+        },
+        use_client_login=True,
+    )
+    groups = _sorted_by_id(_items_from_result(result, "AdGroups"), "AdGroup")
+    for group in groups:
+        if _exact_int(group.get("CampaignId"), "AdGroup CampaignId") != TARGET_CAMPAIGN_ID:
+            raise OperatorError("adgroups.get вернул группу другой кампании")
+    return groups
+
+
+def read_keywords(api: Any) -> list[dict[str, Any]]:
+    result = api.call(
+        CANONICAL_API_VERSION,
+        "keywords",
+        "get",
+        {
+            "SelectionCriteria": {"CampaignIds": [TARGET_CAMPAIGN_ID]},
+            "FieldNames": list(KEYWORD_FIELDS),
+            "Page": {"Limit": 10000, "Offset": 0},
+        },
+        use_client_login=True,
+    )
+    keywords = _sorted_by_id(_items_from_result(result, "Keywords"), "Keyword")
+    for keyword in keywords:
+        if _exact_int(keyword.get("CampaignId"), "Keyword CampaignId") != TARGET_CAMPAIGN_ID:
+            raise OperatorError("keywords.get вернул условие другой кампании")
+        _exact_int(keyword.get("AdGroupId"), "Keyword AdGroupId")
+        if not isinstance(keyword.get("Keyword"), str) or not keyword["Keyword"].strip():
+            raise OperatorError("keywords.get вернул пустое условие показа")
+    return keywords
+
+
+def _sitelink_ids(ads: Sequence[Mapping[str, Any]]) -> list[int]:
+    found: set[int] = set()
+    for ad in ads:
+        for container_name in ("TextAd", "ResponsiveAd"):
+            container = ad.get(container_name)
+            if not isinstance(container, Mapping):
+                continue
+            value = container.get("SitelinkSetId")
+            if value is not None:
+                found.add(_exact_int(value, "SitelinkSetId"))
+    return sorted(found)
+
+
+def read_sitelinks(api: Any, ids: Sequence[int]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    result = api.call(
+        CANONICAL_API_VERSION,
+        "sitelinks",
+        "get",
+        {
+            "SelectionCriteria": {"Ids": list(ids)},
+            "FieldNames": ["Id", "Sitelinks"],
+            "SitelinkFieldNames": ["Title", "Href", "Description", "TurboPageId"],
+            "Page": {"Limit": 10000, "Offset": 0},
+        },
+        use_client_login=True,
+    )
+    sets = _sorted_by_id(_items_from_result(result, "SitelinksSets"), "SitelinksSet")
+    if {item["Id"] for item in sets} != set(ids):
+        raise OperatorError("sitelinks.get не вернул все creative sitelink sets")
+    return sets
+
+
+def validate_display_conditions(
+    ads: Sequence[Mapping[str, Any]],
+    groups: Sequence[Mapping[str, Any]],
+    keywords: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if len(groups) != EXPECTED_AD_COUNT:
+        raise OperatorError("Moderation CAS требует ровно пять групп")
+    group_ids = {_exact_int(group.get("Id"), "AdGroup Id") for group in groups}
+    ad_group_ids = {_exact_int(ad.get("AdGroupId"), "Ad AdGroupId") for ad in ads}
+    if len(ad_group_ids) != EXPECTED_AD_COUNT or ad_group_ids != group_ids:
+        raise OperatorError("Пять объявлений должны однозначно покрывать пять групп")
+    conditions_by_group = {group_id: 0 for group_id in group_ids}
+    auto_by_group = {group_id: 0 for group_id in group_ids}
+    for keyword in keywords:
+        group_id = _exact_int(keyword.get("AdGroupId"), "Keyword AdGroupId")
+        if group_id not in group_ids:
+            raise OperatorError("Условие показа ссылается на неизвестную группу")
+        conditions_by_group[group_id] += 1
+        if keyword.get("Keyword") == "---autotargeting":
+            auto_by_group[group_id] += 1
+    if any(count < 1 for count in conditions_by_group.values()):
+        raise OperatorError("В каждой из пяти групп требуется хотя бы одно условие показа")
+    return {
+        "group_count": len(group_ids),
+        "condition_count": len(keywords),
+        "autotargeting_count": sum(auto_by_group.values()),
+        "groups_with_conditions": sum(count > 0 for count in conditions_by_group.values()),
+    }
+
+
+def read_moderation_bundle(api: Any) -> dict[str, Any]:
+    ads = read_ads(api, include_creatives=True)
+    groups = read_adgroups(api)
+    keywords = read_keywords(api)
+    conditions = validate_display_conditions(ads, groups, keywords)
+    sitelinks = read_sitelinks(api, _sitelink_ids(ads))
+    return {
+        "ads": ads,
+        "adgroups": groups,
+        "keywords": keywords,
+        "sitelinks": sitelinks,
+        "display_conditions": conditions,
+    }
+
+
+def _without_moderation_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_without_moderation_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _without_moderation_fields(child)
+            for key, child in value.items()
+            if key not in {"Status", "StatusClarification", "ServingStatus"}
+            and "Moderation" not in key
+        }
+    return value
+
+
+def validate_five_draft_ads(ads: Sequence[Mapping[str, Any]]) -> list[int]:
+    if len(ads) != EXPECTED_AD_COUNT:
+        raise OperatorError("Кампания должна содержать ровно пять объявлений")
+    ids = _assert_exact_ad_ids([ad.get("Id") for ad in ads])
+    if any(ad.get("Status") != "DRAFT" for ad in ads):
+        raise OperatorError("Все пять объявлений обязаны иметь Status=DRAFT")
+    return ids
+
+
+def validate_moderated_readback(ads: Sequence[Mapping[str, Any]], expected_ids: Sequence[int]) -> None:
+    ids = _assert_exact_ad_ids([ad.get("Id") for ad in ads])
+    if sorted(ids) != sorted(expected_ids):
+        raise OperatorError("Post-moderation readback вернул другие объявления")
+    accepted_statuses = {"MODERATION", "PREACCEPTED", "ACCEPTED", "REJECTED"}
+    if any(ad.get("Status") not in accepted_statuses for ad in ads):
+        raise OperatorError("Post-moderation readback не подтвердил выход объявлений из DRAFT")
+
+
+@dataclass(frozen=True)
+class GoalValueEvidence:
+    value_micros: int
+    sha256: str
+    approved: bool
+    path: str
+    source: str
+    owner: str
+    currency: str
+    calculation_sha256: str
+
+
+def load_goal_value_evidence(
+    path: Path, *, expected_sha256: str, expected_value_micros: int
+) -> GoalValueEvidence:
+    value = _exact_int(expected_value_micros, "Goal Value")
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256 or ""):
+        raise OperatorError("Evidence SHA-256 имеет неверный формат")
+    resolved = path.resolve(strict=True)
+    allowed_roots = ((PROJECT_ROOT / "marketing-audits").resolve(), (PROJECT_ROOT / ".local-artifacts").resolve())
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        raise OperatorError("Goal value evidence разрешён только в ignored audit/artifact directories")
+    if path.is_symlink() or not resolved.is_file():
+        raise OperatorError("Goal value evidence должен быть обычным файлом")
+    raw = resolved.read_bytes()
+    if not raw or len(raw) > MAX_EVIDENCE_BYTES:
+        raise OperatorError("Goal value evidence имеет недопустимый размер")
+    actual_hash = hashlib.sha256(raw).hexdigest()
+    if actual_hash != expected_sha256:
+        raise OperatorError("Goal value evidence SHA-256 не совпал")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Goal value evidence должен быть UTF-8 JSON") from None
+    required = {
+        "schema": EVIDENCE_SCHEMA,
+        "account_login": EXPECTED_LOGIN,
+        "campaign_id": TARGET_CAMPAIGN_ID,
+        "counter_id": TARGET_COUNTER_ID,
+        "goal_id": HARD_GOAL_ID,
+        "value_micros": value,
+        "approved": True,
+        "owner": EVIDENCE_OWNER,
+        "currency": "RUB",
+    }
+    if not isinstance(payload, dict) or any(payload.get(key) != expected for key, expected in required.items()):
+        raise OperatorError("Goal value evidence не доказывает точный аккаунт, кампанию, цель и value")
+    source = payload.get("source")
+    calculation = payload.get("calculation")
+    if not isinstance(source, str) or not source.strip() or len(source) > 240:
+        raise OperatorError("Goal value evidence требует непустой source")
+    if not isinstance(calculation, dict):
+        raise OperatorError("Goal value evidence требует calculation object")
+    description = calculation.get("description")
+    if not isinstance(description, str) or not description.strip() or len(description) > 2000:
+        raise OperatorError("Goal value evidence calculation требует осмысленное описание")
+    if calculation.get("result_micros") != value:
+        raise OperatorError("Goal value evidence calculation.result_micros не совпал с value")
+    return GoalValueEvidence(
+        value,
+        actual_hash,
+        True,
+        str(resolved),
+        source.strip(),
+        EVIDENCE_OWNER,
+        "RUB",
+        sha256_json(calculation),
+    )
+
+
+def revalidate_goal_value_evidence(evidence: GoalValueEvidence) -> GoalValueEvidence:
+    if evidence.approved is not True:
+        raise OperatorError("Goal value evidence не имеет approved=true")
+    try:
+        path = Path(evidence.path)
+    except TypeError:
+        raise OperatorError("Goal value evidence path некорректен") from None
+    fresh = load_goal_value_evidence(
+        path,
+        expected_sha256=evidence.sha256,
+        expected_value_micros=evidence.value_micros,
+    )
+    if fresh != evidence:
+        raise OperatorError("Goal value evidence изменился между CLI preflight и mutation core")
+    return fresh
+
+
+def verify_apply_guards(evidence: GoalValueEvidence, environ: Mapping[str, str]) -> None:
+    if environ.get(APPLY_GUARD_ENV) != APPLY_GUARD_VALUE:
+        raise OperatorError("Apply measurement заблокирован: отсутствует точный mutation guard")
+    if environ.get(VALUE_GUARD_ENV) != str(evidence.value_micros):
+        raise OperatorError("Apply measurement заблокирован: value guard не совпал")
+    if environ.get(EVIDENCE_GUARD_ENV) != evidence.sha256:
+        raise OperatorError("Apply measurement заблокирован: evidence guard не совпал")
+
+
+def verify_counter_guard(environ: Mapping[str, str]) -> None:
+    if environ.get(COUNTER_GUARD_ENV) != COUNTER_GUARD_VALUE:
+        raise OperatorError("Apply counter заблокирован: отсутствует точный mutation guard")
+
+
+def verify_moderate_guard(environ: Mapping[str, str]) -> None:
+    if environ.get(MODERATE_GUARD_ENV) != MODERATE_GUARD_VALUE:
+        raise OperatorError("Moderation заблокирована: отсутствует точный mutation guard")
+
+
+def _legacy_view(api: Any) -> dict[str, Any]:
+    try:
+        campaign = read_campaign(api, LEGACY_API_VERSION)
+        return {
+            "available": True,
+            "type": campaign.get("Type"),
+            "snapshot_sha256": sha256_json(campaign),
+            "write_authority": False,
+        }
+    except Exception as exc:  # read-only diagnostic must not override v501 truth
+        return {"available": False, "error": _safe_text(exc), "write_authority": False}
+
+
+def _base_receipt(mode: str, identity: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": 1,
+        "operator": "yandex-direct-rosomaha-rus-measurement-v1",
+        "generated_at": utc_now(),
+        "mode": mode,
+        "status": "in_progress",
+        "account": dict(identity),
+        "scope": {
+            "campaign_id": TARGET_CAMPAIGN_ID,
+            "counter_id": TARGET_COUNTER_ID,
+            "hard_goal_id": HARD_GOAL_ID,
+            "protected_campaign_ids": list(PROTECTED_CAMPAIGN_IDS),
+            "launch_or_spend_methods_allowed": False,
+            "canonical_write_api": CANONICAL_API_VERSION,
+        },
+    }
+
+
+def _assert_expected_hash(actual: str, expected: str | None, label: str) -> None:
+    if not expected or not re.fullmatch(r"[a-f0-9]{64}", expected):
+        raise OperatorError(f"{label}: требуется точный expected SHA-256 из свежего audit")
+    if actual != expected:
+        raise OperatorError(f"{label}: CAS snapshot не совпал")
+
+
+def _attempt_measurement_restore(
+    api: Any, original: Mapping[str, Any], desired: Mapping[str, Any]
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {"status": "not_safe", "mutation_requests": 0}
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    try:
+        current = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(current, require_draft=True)
+        current_measurement = measurement(current)
+        if current_measurement == dict(original):
+            receipt.update(status="baseline_intact", reason="mutation was not committed")
+            return receipt
+        if current_measurement != dict(desired):
+            receipt.update(
+                status="manual_inspection_required",
+                reason="current measurement is neither exact baseline nor exact candidate",
+                current_measurement_sha256=sha256_json(current_measurement),
+            )
+            return receipt
+        payload = restore_update(original)
+        result = api.call(
+            CANONICAL_API_VERSION,
+            "campaigns",
+            "update",
+            payload,
+            use_client_login=True,
+            mutation_kind="restore_measurement",
+        )
+        _assert_action_results(result, "UpdateResults", [TARGET_CAMPAIGN_ID])
+        restored = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(restored, require_draft=True)
+        if measurement(restored) != dict(original):
+            raise OperatorError("Restore readback не совпал с точным preimage")
+        receipt.update(status="restored", restored_measurement_sha256=sha256_json(original))
+    except Exception as exc:
+        receipt.update(status="manual_inspection_required", error=_safe_text(exc))
+        if isinstance(exc, OperatorError) and exc.partial:
+            receipt.update(exc.partial)
+    receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) - mutations_before
+    return receipt
+
+
+def _attempt_counter_restore(
+    api: Any, original: list[int], desired: list[int]
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {"status": "not_safe", "mutation_requests": 0}
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    try:
+        current = read_campaign(api, CANONICAL_API_VERSION)
+        unified = validate_canonical_campaign(current, require_draft=True)
+        current_counter = _counter_ids(unified)
+        if current_counter == original:
+            receipt.update(status="baseline_intact", reason="mutation was not committed")
+            return receipt
+        if current_counter != desired:
+            receipt.update(
+                status="manual_inspection_required",
+                reason="current counter is neither exact baseline nor exact candidate",
+                current_counter_ids=current_counter,
+            )
+            return receipt
+        result = api.call(
+            CANONICAL_API_VERSION,
+            "campaigns",
+            "update",
+            restore_counter_update(original),
+            use_client_login=True,
+            mutation_kind="restore_counter",
+        )
+        _assert_action_results(result, "UpdateResults", [TARGET_CAMPAIGN_ID])
+        restored = read_campaign(api, CANONICAL_API_VERSION)
+        restored_unified = validate_canonical_campaign(restored, require_draft=True)
+        if _counter_ids(restored_unified) != original:
+            raise OperatorError("Counter restore readback не совпал с точным preimage")
+        receipt.update(status="restored", restored_counter_ids=original)
+    except Exception as exc:
+        receipt.update(status="manual_inspection_required", error=_safe_text(exc))
+        if isinstance(exc, OperatorError) and exc.partial:
+            receipt.update(exc.partial)
+    receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) - mutations_before
+    return receipt
+
+
+def _classify_ambiguous_moderation(
+    api: Any,
+    baseline_bundle: Mapping[str, Any],
+    expected_ids: Sequence[int],
+) -> dict[str, Any]:
+    try:
+        current_bundle = read_moderation_bundle(api)
+        current_ads = current_bundle["ads"]
+        campaign = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(campaign, require_draft=False)
+        if sha256_json(current_bundle) == sha256_json(baseline_bundle):
+            return {"status": "baseline_intact", "reason": "moderation was not committed"}
+        try:
+            validate_moderated_readback(current_ads, expected_ids)
+        except OperatorError:
+            return {
+                "status": "manual_inspection_required",
+                "reason": "moderation state is neither exact baseline nor complete candidate",
+                "current_bundle_sha256": sha256_json(current_bundle),
+            }
+        if (
+            campaign.get("State") == "OFF"
+            and _without_moderation_fields(current_bundle)
+            == _without_moderation_fields(baseline_bundle)
+        ):
+            return {
+                "status": "candidate_committed_response_lost",
+                "reason": "five ads left DRAFT while campaign remained OFF",
+                "current_bundle_sha256": sha256_json(current_bundle),
+            }
+        return {
+            "status": "manual_inspection_required",
+            "reason": "candidate ads exist but campaign or creative CAS changed",
+        }
+    except Exception as exc:
+        return {"status": "manual_inspection_required", "error": _safe_text(exc)}
+
+
+def _run_operation_core(
+    api: Any,
+    mode: str,
+    *,
+    dry_run_action: str | None = None,
+    evidence: GoalValueEvidence | None = None,
+    expected_campaign_sha256: str | None = None,
+    expected_ads_sha256: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    if mode not in {"audit", "dry-run", "apply-counter", "apply-measurement", "moderate"}:
+        raise OperatorError("Неизвестный режим")
+    if mode == "dry-run" and dry_run_action not in {"apply-counter", "apply-measurement", "moderate"}:
+        raise OperatorError("dry-run требует --dry-run-action")
+    env = os.environ if environ is None else environ
+    mutations_at_start = int(getattr(api, "mutation_requests", 0))
+
+    identity = prove_identity(api)
+    canonical = read_campaign(api, CANONICAL_API_VERSION)
+    unified = validate_canonical_campaign(canonical, require_draft=False)
+    legacy = _legacy_view(api)
+    protected_before = read_protected_snapshot(api)
+    ads = read_ads(api)
+    receipt = _base_receipt(mode, identity)
+    receipt.update(
+        canonical_campaign={
+            "type": canonical.get("Type"),
+            "status": canonical.get("Status"),
+            "state": canonical.get("State"),
+            "snapshot_sha256": sha256_json(canonical),
+            "package_strategy": unified.get("PackageBiddingStrategy"),
+            "measurement": measurement(canonical),
+        },
+        legacy_v5_view=legacy,
+        ads={
+            "count": len(ads),
+            "snapshot_sha256": sha256_json(ads),
+        },
+        protected_before={key: value for key, value in protected_before.items() if key != "campaigns"},
+    )
+
+    if mode == "audit":
+        receipt["status"] = "ok"
+        receipt["ready_for_measurement_mutation"] = (
+            canonical.get("Status") == "DRAFT"
+            and canonical.get("State") == "OFF"
+            and unified.get("PackageBiddingStrategy") is None
+        )
+        receipt["ready_for_moderation"] = (
+            receipt["ready_for_measurement_mutation"]
+            and len(ads) == EXPECTED_AD_COUNT
+            and len({ad.get("Id") for ad in ads}) == EXPECTED_AD_COUNT
+            and all(ad.get("Status") == "DRAFT" for ad in ads)
+        )
+        if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
+            raise OperatorError("Audit выполнил mutation request")
+        receipt["mutation_requests"] = 0
+        return receipt
+
+    action = dry_run_action if mode == "dry-run" else mode
+    validate_canonical_campaign(canonical, require_draft=True)
+    campaign_hash = sha256_json(canonical)
+    if mode != "dry-run":
+        _assert_expected_hash(campaign_hash, expected_campaign_sha256, "Campaign")
+
+    if action == "apply-counter":
+        desired_counter = [TARGET_COUNTER_ID]
+        receipt["planned_counter_ids"] = desired_counter
+        if mode == "dry-run":
+            receipt.update(status="ready", mutation_requests=0)
+            if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
+                raise OperatorError("Dry-run выполнил mutation request")
+            return receipt
+
+        verify_counter_guard(env)
+        fresh = read_campaign(api, CANONICAL_API_VERSION)
+        fresh_unified = validate_canonical_campaign(fresh, require_draft=True)
+        if sha256_json(fresh) != campaign_hash:
+            raise OperatorError("Campaign CAS изменился между preflight и counter mutation")
+        original_counter = _counter_ids(fresh_unified)
+        if original_counter == desired_counter:
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="already_exact",
+                mutation_requests=0,
+                protected_unchanged=True,
+                post_campaign_state="OFF",
+            )
+            return receipt
+
+        mutation_started = False
+        try:
+            mutation_started = True
+            result = api.call(
+                CANONICAL_API_VERSION,
+                "campaigns",
+                "update",
+                counter_update(),
+                use_client_login=True,
+                mutation_kind="apply_counter",
+            )
+            _assert_action_results(result, "UpdateResults", [TARGET_CAMPAIGN_ID])
+            post = read_campaign(api, CANONICAL_API_VERSION)
+            post_unified = validate_canonical_campaign(post, require_draft=True)
+            if _counter_ids(post_unified) != desired_counter:
+                raise OperatorError("Counter post-readback не совпал с exact candidate")
+            before_without_counter = copy.deepcopy(fresh)
+            after_without_counter = copy.deepcopy(post)
+            before_without_counter["UnifiedCampaign"].pop("CounterIds", None)
+            after_without_counter["UnifiedCampaign"].pop("CounterIds", None)
+            if before_without_counter != after_without_counter:
+                raise OperatorError("Campaign post-readback обнаружил изменение вне CounterIds")
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+        except Exception as exc:
+            rollback = (
+                _attempt_counter_restore(api, original_counter, desired_counter)
+                if mutation_started
+                else {"status": "not_needed", "mutation_requests": 0}
+            )
+            partial = dict(receipt)
+            if isinstance(exc, OperatorError) and exc.partial:
+                partial.update(exc.partial)
+            partial.update(
+                status="failed",
+                error=_safe_text(exc),
+                rollback=rollback,
+                mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            )
+            try:
+                protected_after = read_protected_snapshot(api)
+                assert_protected_equal(protected_before, protected_after)
+                partial["protected_unchanged"] = True
+            except Exception as protected_exc:
+                partial["protected_unchanged"] = False
+                partial["protected_error"] = _safe_text(protected_exc)
+            raise OperatorError("Counter apply не прошёл postflight", partial=partial) from None
+
+        receipt.update(
+            status="applied",
+            mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            protected_unchanged=True,
+            post_campaign_state="OFF",
+            post_counter_ids=desired_counter,
+        )
+        return receipt
+
+    if action == "apply-measurement":
+        if evidence is None:
+            raise OperatorError("Не представлено evidence-backed значение hard goal")
+        desired = desired_measurement(evidence.value_micros)
+        receipt["goal_value_evidence"] = {
+            "sha256": evidence.sha256,
+            "value_micros": evidence.value_micros,
+            "approved": evidence.approved,
+            "source": evidence.source,
+            "owner": evidence.owner,
+            "currency": evidence.currency,
+            "calculation_sha256": evidence.calculation_sha256,
+        }
+        receipt["planned_measurement"] = desired
+        if mode == "dry-run":
+            receipt.update(status="ready", mutation_requests=0)
+            if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
+                raise OperatorError("Dry-run выполнил mutation request")
+            return receipt
+
+        verify_apply_guards(evidence, env)
+        fresh = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(fresh, require_draft=True)
+        if sha256_json(fresh) != campaign_hash:
+            raise OperatorError("Campaign CAS изменился между preflight и mutation")
+        original = measurement(fresh)
+        if original == desired:
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="already_exact",
+                mutation_requests=0,
+                protected_unchanged=True,
+                post_campaign_state="OFF",
+            )
+            return receipt
+
+        mutation_started = False
+        try:
+            # Re-open and re-hash the exact evidence inside the mutation core,
+            # immediately before constructing the only authorized update.
+            evidence = revalidate_goal_value_evidence(evidence)
+            payload = measurement_update(evidence.value_micros)
+            mutation_started = True
+            result = api.call(
+                CANONICAL_API_VERSION,
+                "campaigns",
+                "update",
+                payload,
+                use_client_login=True,
+                mutation_kind="apply_measurement",
+            )
+            _assert_action_results(result, "UpdateResults", [TARGET_CAMPAIGN_ID])
+            post = read_campaign(api, CANONICAL_API_VERSION)
+            validate_canonical_campaign(post, require_draft=True)
+            if measurement(post) != desired:
+                raise OperatorError("Measurement post-readback не совпал с exact candidate")
+            if _campaign_without_measurement(post) != _campaign_without_measurement(fresh):
+                raise OperatorError("Campaign post-readback обнаружил изменение вне measurement")
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+        except Exception as exc:
+            rollback = (
+                _attempt_measurement_restore(api, original, desired)
+                if mutation_started
+                else {"status": "not_needed", "mutation_requests": 0}
+            )
+            partial = dict(receipt)
+            if isinstance(exc, OperatorError) and exc.partial:
+                partial.update(exc.partial)
+            partial.update(
+                status="failed",
+                error=_safe_text(exc),
+                rollback=rollback,
+                mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            )
+            try:
+                protected_after = read_protected_snapshot(api)
+                assert_protected_equal(protected_before, protected_after)
+                partial["protected_unchanged"] = True
+            except Exception as protected_exc:
+                partial["protected_unchanged"] = False
+                partial["protected_error"] = _safe_text(protected_exc)
+            raise OperatorError("Measurement apply не прошёл postflight", partial=partial) from None
+
+        receipt.update(
+            status="applied",
+            mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            protected_unchanged=True,
+            post_campaign_state="OFF",
+            post_measurement=measurement(post),
+        )
+        return receipt
+
+    if action == "moderate":
+        moderation_bundle = read_moderation_bundle(api)
+        ad_ids = validate_five_draft_ads(moderation_bundle["ads"])
+        ads_hash = sha256_json(moderation_bundle)
+        receipt["planned_ad_ids"] = ad_ids
+        if mode == "dry-run":
+            receipt.update(status="ready", mutation_requests=0)
+            if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
+                raise OperatorError("Dry-run выполнил mutation request")
+            return receipt
+
+        _assert_expected_hash(ads_hash, expected_ads_sha256, "Ads")
+        verify_moderate_guard(env)
+        fresh_campaign = read_campaign(api, CANONICAL_API_VERSION)
+        validate_canonical_campaign(fresh_campaign, require_draft=True)
+        if sha256_json(fresh_campaign) != campaign_hash:
+            raise OperatorError("Campaign CAS изменился перед moderation")
+        fresh_bundle = read_moderation_bundle(api)
+        fresh_ads = fresh_bundle["ads"]
+        validate_five_draft_ads(fresh_ads)
+        if sha256_json(fresh_bundle) != ads_hash:
+            raise OperatorError("Full creative/display-condition CAS изменился перед moderation")
+        mutation_started = False
+        try:
+            mutation_started = True
+            result = api.call(
+                CANONICAL_API_VERSION,
+                "ads",
+                "moderate",
+                {"SelectionCriteria": {"Ids": ad_ids}},
+                use_client_login=True,
+                mutation_kind="moderate",
+            )
+            _assert_action_results(result, "ModerateResults", ad_ids)
+            post_bundle = read_moderation_bundle(api)
+            post_ads = post_bundle["ads"]
+            validate_moderated_readback(post_ads, ad_ids)
+            if _without_moderation_fields(post_bundle) != _without_moderation_fields(fresh_bundle):
+                raise OperatorError("Moderation postflight обнаружил изменение creative/display-condition CAS")
+            post_campaign = read_campaign(api, CANONICAL_API_VERSION)
+            validate_canonical_campaign(post_campaign, require_draft=False)
+            if post_campaign.get("State") != "OFF":
+                raise OperatorError("Moderation postflight: кампания перестала быть OFF")
+            if _campaign_without_moderation_status(post_campaign) != _campaign_without_moderation_status(fresh_campaign):
+                raise OperatorError("Moderation postflight обнаружил изменение кампании вне статуса модерации")
+            protected_after = read_protected_snapshot(api)
+            assert_protected_equal(protected_before, protected_after)
+        except Exception as exc:
+            recovery = (
+                _classify_ambiguous_moderation(api, fresh_bundle, ad_ids)
+                if mutation_started
+                else {"status": "not_needed"}
+            )
+            partial = dict(receipt)
+            if isinstance(exc, OperatorError) and exc.partial:
+                partial.update(exc.partial)
+            partial.update(
+                status="failed",
+                error=_safe_text(exc),
+                mutation_started=mutation_started,
+                recovery=recovery,
+                rollback={"status": "not_supported_for_moderation" if mutation_started else "not_needed"},
+                mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            )
+            try:
+                protected_after = read_protected_snapshot(api)
+                assert_protected_equal(protected_before, protected_after)
+                partial["protected_unchanged"] = True
+            except Exception as protected_exc:
+                partial["protected_unchanged"] = False
+                partial["protected_error"] = _safe_text(protected_exc)
+            raise OperatorError("Moderation не прошла postflight", partial=partial) from None
+        receipt.update(
+            status="submitted",
+            mutation_requests=int(getattr(api, "mutation_requests", 0)) - mutations_at_start,
+            protected_unchanged=True,
+            post_campaign_state="OFF",
+            post_ad_statuses={str(ad["Id"]): ad.get("Status") for ad in post_ads},
+        )
+        return receipt
+
+    raise OperatorError("Внутренняя ошибка выбора действия")
+
+
+def run_operation(
+    api: Any,
+    mode: str,
+    *,
+    dry_run_action: str | None = None,
+    evidence: GoalValueEvidence | None = None,
+    expected_campaign_sha256: str | None = None,
+    expected_ads_sha256: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    lock_policy: Any | None = None,
+) -> dict[str, Any]:
+    arguments = {
+        "dry_run_action": dry_run_action,
+        "evidence": evidence,
+        "expected_campaign_sha256": expected_campaign_sha256,
+        "expected_ads_sha256": expected_ads_sha256,
+        "environ": environ,
+    }
+    if mode not in {"apply-counter", "apply-measurement", "moderate"}:
+        return _run_operation_core(api, mode, **arguments)
+
+    policy = MutationLockPolicy() if lock_policy is None else lock_policy
+    lease: dict[str, Any] | None = None
+    try:
+        with policy.hold() as acquired:
+            lease = acquired
+            result = _run_operation_core(api, mode, **arguments)
+    except OperatorError as exc:
+        partial = dict(exc.partial)
+        if lease is not None:
+            partial["mutation_lock"] = dict(lease)
+        raise OperatorError(str(exc), partial=partial) from None
+    if lease is None or lease.get("released") is not True:
+        partial = dict(result)
+        partial["mutation_lock"] = dict(lease or {})
+        raise OperatorError("Mutation lock не был безопасно освобождён", partial=partial)
+    result["mutation_lock"] = dict(lease)
+    return result
+
+
+def _receipt_path(mode: str, generated_at: str) -> Path:
+    stamp = generated_at.replace(":", "-").replace(".", "-").replace("+", "_")
+    return REPORT_ROOT / f"ROSOMAHA_RUS_DIRECT_MEASUREMENT_{mode}_{stamp}.json"
+
+
+def save_receipt(receipt: Mapping[str, Any], *, secrets: Sequence[str] = ()) -> Path:
+    safe = copy.deepcopy(dict(receipt))
+    raw = canonical_bytes(safe) + b"\n"
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise OperatorError("Receipt превысил безопасный предел")
+    for secret in secrets:
+        if secret and secret.encode("utf-8") in raw:
+            raise OperatorError("Receipt содержит секрет; запись заблокирована")
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    path = _receipt_path(str(safe.get("mode", "unknown")), str(safe.get("generated_at", utc_now())))
+    with path.open("xb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Безопасная привязка Метрики и модерация только кампании 713802902"
+    )
+    parser.add_argument("mode", choices=("audit", "dry-run", "apply-counter", "apply-measurement", "moderate"))
+    parser.add_argument("--dry-run-action", choices=("apply-counter", "apply-measurement", "moderate"))
+    parser.add_argument("--expected-campaign-sha256")
+    parser.add_argument("--expected-ads-sha256")
+    parser.add_argument("--goal-value-micros", type=_parse_cli_int)
+    parser.add_argument("--goal-value-evidence", type=Path)
+    parser.add_argument("--goal-value-evidence-sha256")
+    return parser
+
+
+def _evidence_for_args(args: argparse.Namespace) -> GoalValueEvidence | None:
+    action = args.dry_run_action if args.mode == "dry-run" else args.mode
+    if action != "apply-measurement":
+        if any(
+            value is not None
+            for value in (
+                args.goal_value_micros,
+                args.goal_value_evidence,
+                args.goal_value_evidence_sha256,
+            )
+        ):
+            raise OperatorError("Goal value arguments разрешены только для apply-measurement")
+        return None
+    if None in (
+        args.goal_value_micros,
+        args.goal_value_evidence,
+        args.goal_value_evidence_sha256,
+    ):
+        raise OperatorError("Apply measurement требует value, evidence file и evidence SHA-256")
+    return load_goal_value_evidence(
+        args.goal_value_evidence,
+        expected_sha256=args.goal_value_evidence_sha256,
+        expected_value_micros=args.goal_value_micros,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    token = ""
+    api: DirectApi | None = None
+    generated_at = utc_now()
+    try:
+        route = resolve_route()
+        token = load_project_token()
+        evidence = _evidence_for_args(args)
+        api = DirectApi(token)
+        receipt = run_operation(
+            api,
+            args.mode,
+            dry_run_action=args.dry_run_action,
+            evidence=evidence,
+            expected_campaign_sha256=args.expected_campaign_sha256,
+            expected_ads_sha256=args.expected_ads_sha256,
+            environ=os.environ,
+        )
+        receipt["routing"] = route
+        receipt["request_log"] = api.request_log
+    except Exception as exc:
+        partial = exc.partial if isinstance(exc, OperatorError) else {}
+        receipt = {
+            **partial,
+            "schema": 1,
+            "operator": "yandex-direct-rosomaha-rus-measurement-v1",
+            "generated_at": generated_at,
+            "mode": args.mode,
+            "status": "blocked",
+            "error": _safe_text(exc, (token,)),
+        }
+        if api is not None:
+            receipt["request_log"] = api.request_log
+        path = save_receipt(receipt, secrets=(token,))
+        print(path)
+        print("Операция заблокирована; кампания не запускалась.", file=sys.stderr)
+        return 1
+    path = save_receipt(receipt, secrets=(token,))
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
