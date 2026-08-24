@@ -12,8 +12,18 @@ const jsonDir = path.join(outDir, "api-only-snapshots");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const directLoginDefault = "rosomaha-rus999";
 const directChangesSince = "2025-01-01T00:00:00Z";
+const webmasterMainHost = "xn--80aa8ahaki9a.site";
+const webmasterRosomahaRusHost = "rosomaha-rus.ru";
+const publicHttpBodyLimit = 2_000_000;
 export const protectedCampaignIds = Object.freeze(["708505950", "705770573", "710087376"]);
 export const targetRosomahaRusCampaignId = "713802902";
+export const rosomahaRusPublicTargets = Object.freeze([
+  Object.freeze({ id: "httpRoot", kind: "html", url: "http://rosomaha-rus.ru/" }),
+  Object.freeze({ id: "root", kind: "html", url: "https://rosomaha-rus.ru/" }),
+  Object.freeze({ id: "robots", kind: "robots", url: "https://rosomaha-rus.ru/robots.txt" }),
+  Object.freeze({ id: "sitemap", kind: "sitemap", url: "https://rosomaha-rus.ru/sitemap.xml" }),
+  Object.freeze({ id: "keyProduct", kind: "html", url: "https://rosomaha-rus.ru/product/extrime-s-1-5l-dvs-1nz-fe/?oid=812" }),
+]);
 export const campaigns = Object.freeze([
   "708505950",
   "708506873",
@@ -134,6 +144,291 @@ function safeUrlWithoutQuery(value) {
   } catch {
     return { url: null, host: "invalid" };
   }
+}
+
+function headerValue(headers, name) {
+  if (typeof headers?.get === "function") return headers.get(name);
+  const expected = name.toLowerCase();
+  const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === expected);
+  return entry ? String(entry[1]) : null;
+}
+
+function parseTagAttributes(tag) {
+  const attributes = {};
+  const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+)))?/gu;
+  for (const match of tag.matchAll(pattern)) {
+    const key = match[1].toLowerCase();
+    if (key === "link" || key === "meta") continue;
+    attributes[key] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return attributes;
+}
+
+function resolveHttpUrl(value, baseUrl) {
+  try {
+    const resolved = new URL(value, baseUrl);
+    return /^https?:$/u.test(resolved.protocol) ? resolved.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function comparablePublicUrl(value) {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = "";
+    parsed.hostname = parsed.hostname.toLowerCase();
+    parsed.searchParams.sort();
+    if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function extractHtmlSeoSignals(html, finalUrl) {
+  const source = String(html || "");
+  const linkTags = source.match(/<link\b[^>]*>/giu) || [];
+  const metaTags = source.match(/<meta\b[^>]*>/giu) || [];
+  const canonicalTag = linkTags
+    .map(parseTagAttributes)
+    .find((attributes) => String(attributes.rel || "").toLowerCase().split(/\s+/u).includes("canonical"));
+  const canonical = canonicalTag?.href
+    ? resolveHttpUrl(decodeXmlText(canonicalTag.href), finalUrl)
+    : null;
+  const robotsDirectives = metaTags
+    .map(parseTagAttributes)
+    .filter((attributes) => ["robots", "yandex"].includes(String(attributes.name || "").toLowerCase()))
+    .map((attributes) => String(attributes.content || "").trim())
+    .filter(Boolean);
+
+  return {
+    canonical,
+    canonicalHost: hostFromUrl(canonical),
+    canonicalMatchesFinal: Boolean(
+      canonical
+        && comparablePublicUrl(canonical) === comparablePublicUrl(finalUrl),
+    ),
+    metaRobots: robotsDirectives,
+    metaNoindex: robotsDirectives.some((value) => /(?:^|,|\s)noindex(?:$|,|\s)/iu.test(value)),
+  };
+}
+
+export function extractRobotsSignals(body) {
+  const rows = String(body || "")
+    .split(/\r?\n/u)
+    .map((line) => line.replace(/\s*#.*$/u, "").trim())
+    .filter(Boolean);
+  const sitemapUrls = [];
+  let activeAgents = [];
+  let directivesStarted = false;
+  let disallowAll = false;
+
+  for (const row of rows) {
+    const separator = row.indexOf(":");
+    if (separator < 0) continue;
+    const key = row.slice(0, separator).trim().toLowerCase();
+    const value = row.slice(separator + 1).trim();
+    if (key === "user-agent") {
+      if (directivesStarted) activeAgents = [];
+      activeAgents.push(value.toLowerCase());
+      directivesStarted = false;
+      continue;
+    }
+    if (key === "sitemap") {
+      const sitemapUrl = resolveHttpUrl(value, "https://rosomaha-rus.ru/");
+      if (sitemapUrl) sitemapUrls.push(sitemapUrl);
+      continue;
+    }
+    if (key === "allow" || key === "disallow") {
+      directivesStarted = true;
+      if (key === "disallow" && value === "/" && activeAgents.includes("*")) disallowAll = true;
+    }
+  }
+
+  return {
+    userAgentPresent: rows.some((row) => /^user-agent\s*:/iu.test(row)),
+    sitemapUrls: [...new Set(sitemapUrls)],
+    sitemapHosts: [...new Set(sitemapUrls.map(hostFromUrl).filter(Boolean))].sort(),
+    disallowAll,
+  };
+}
+
+function decodeXmlText(value) {
+  return String(value || "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'");
+}
+
+export function extractSitemapSignals(body, keyProductUrl) {
+  const source = String(body || "");
+  const locations = [...source.matchAll(/<loc\b[^>]*>([\s\S]*?)<\/loc>/giu)]
+    .map((match) => decodeXmlText(match[1]).trim())
+    .filter(Boolean);
+  const locationHosts = [...new Set(locations.map(hostFromUrl).filter(Boolean))].sort();
+  const comparableKeyProductUrl = comparablePublicUrl(keyProductUrl);
+  return {
+    type: /<sitemapindex\b/iu.test(source)
+      ? "sitemapindex"
+      : /<urlset\b/iu.test(source)
+        ? "urlset"
+        : "unknown",
+    locCount: locations.length,
+    locationHosts,
+    allLocationsOnTargetHost: locationHosts.length > 0
+      && locationHosts.every((host) => host === webmasterRosomahaRusHost),
+    keyProductListed: Boolean(
+      comparableKeyProductUrl
+        && locations.some((location) => comparablePublicUrl(location) === comparableKeyProductUrl),
+    ),
+  };
+}
+
+export function analyzePublicHttpResponse(target, response) {
+  const finalUrl = String(response.finalUrl || target.url);
+  const status = Number(response.status || 0);
+  const contentType = headerValue(response.headers, "content-type");
+  const xRobotsTag = headerValue(response.headers, "x-robots-tag");
+  const common = {
+    id: target.id,
+    kind: target.kind,
+    requestedUrl: target.url,
+    ok: status >= 200 && status < 400,
+    sourceStatus: status > 0 ? "available" : "source_unavailable",
+    status,
+    redirects: response.redirects || [],
+    redirectCount: (response.redirects || []).length,
+    finalUrl,
+    finalHost: hostFromUrl(finalUrl),
+    exactFinalHost: hostFromUrl(finalUrl) === webmasterRosomahaRusHost,
+    contentType,
+    xRobotsTag,
+    headerNoindex: /(?:^|,|\s)noindex(?:$|,|\s)/iu.test(String(xRobotsTag || "")),
+    bodyBytes: Number(response.bodyBytes || 0),
+    bodyTruncated: Boolean(response.bodyTruncated),
+  };
+
+  if (target.kind === "html") {
+    return {
+      ...common,
+      html: extractHtmlSeoSignals(response.body, finalUrl),
+    };
+  }
+  if (target.kind === "robots") {
+    return {
+      ...common,
+      robots: extractRobotsSignals(response.body),
+    };
+  }
+  if (target.kind === "sitemap") {
+    const keyProductUrl = rosomahaRusPublicTargets.find((item) => item.id === "keyProduct").url;
+    return {
+      ...common,
+      sitemap: extractSitemapSignals(response.body, keyProductUrl),
+    };
+  }
+  return common;
+}
+
+async function fetchPublicHttpTarget(target, fetchImpl) {
+  const redirects = [];
+  let currentUrl = target.url;
+  try {
+    for (let attempt = 0; attempt <= 8; attempt += 1) {
+      const response = await fetchImpl(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: target.kind === "html"
+            ? "text/html,application/xhtml+xml"
+            : "text/plain,application/xml,text/xml;q=0.9,*/*;q=0.5",
+          "User-Agent": "RosomahaApiOnlyAudit/1.0",
+        },
+        signal: AbortSignal.timeout(45_000),
+      });
+      const location = headerValue(response.headers, "location");
+      if (response.status >= 300 && response.status < 400 && location) {
+        const nextUrl = resolveHttpUrl(location, currentUrl);
+        if (!nextUrl) throw new Error("redirect location is not an HTTP URL");
+        redirects.push({ status: response.status, from: currentUrl, to: nextUrl });
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      const fullBody = await response.text();
+      const bodyBytes = Buffer.byteLength(fullBody, "utf8");
+      return analyzePublicHttpResponse(target, {
+        status: response.status,
+        redirects,
+        finalUrl: currentUrl,
+        headers: response.headers,
+        body: fullBody.slice(0, publicHttpBodyLimit),
+        bodyBytes,
+        bodyTruncated: bodyBytes > publicHttpBodyLimit,
+      });
+    }
+    throw new Error("too many redirects");
+  } catch (error) {
+    return {
+      id: target.id,
+      kind: target.kind,
+      requestedUrl: target.url,
+      ok: false,
+      sourceStatus: "source_unavailable",
+      status: null,
+      redirects,
+      redirectCount: redirects.length,
+      finalUrl: currentUrl,
+      finalHost: hostFromUrl(currentUrl),
+      exactFinalHost: false,
+      error: String(error?.message || error),
+    };
+  }
+}
+
+export async function auditRosomahaRusPublicHttp(fetchImpl = globalThis.fetch) {
+  if (typeof fetchImpl !== "function") {
+    return {
+      targetHost: webmasterRosomahaRusHost,
+      sourceStatus: "source_unavailable",
+      error: "fetch unavailable",
+      targets: {},
+    };
+  }
+  const targetResults = await Promise.all(
+    rosomahaRusPublicTargets.map((target) => fetchPublicHttpTarget(target, fetchImpl)),
+  );
+  const targets = Object.fromEntries(targetResults.map((result) => [result.id, result]));
+  const availableCount = targetResults.filter((result) => result.sourceStatus === "available").length;
+  return {
+    targetHost: webmasterRosomahaRusHost,
+    sourceStatus: availableCount === targetResults.length
+      ? "available"
+      : availableCount > 0
+        ? "partial"
+        : "source_unavailable",
+    keyProductUrl: rosomahaRusPublicTargets.find((target) => target.id === "keyProduct").url,
+    targets,
+    checks: {
+      httpsRoot200: targets.root?.status === 200 && targets.root?.exactFinalHost,
+      httpRootRedirectsToHttps: targets.httpRoot?.redirects?.some((redirect) => (
+        redirect.from.startsWith("http://")
+        && redirect.to.startsWith("https://")
+      )) && targets.httpRoot?.status === 200 && targets.httpRoot?.exactFinalHost,
+      robots200AndOpen: targets.robots?.status === 200
+        && targets.robots?.robots?.userAgentPresent
+        && !targets.robots?.robots?.disallowAll,
+      sitemap200AndXml: targets.sitemap?.status === 200
+        && ["urlset", "sitemapindex"].includes(targets.sitemap?.sitemap?.type),
+      keyProduct200SelfCanonical: targets.keyProduct?.status === 200
+        && targets.keyProduct?.html?.canonicalMatchesFinal
+        && !targets.keyProduct?.html?.metaNoindex
+        && !targets.keyProduct?.headerNoindex,
+    },
+  };
 }
 
 function chunks(values, size) {
@@ -729,9 +1024,226 @@ function webmasterRequest(env, endpoint) {
   return { ok: true, data: result.data };
 }
 
+function exactHostFromWebmasterProperty(property) {
+  for (const value of [property?.ascii_host_url, property?.unicode_host_url, property?.host_url]) {
+    const host = hostFromUrl(value);
+    if (host) return host;
+  }
+  const hostId = String(property?.host_id || "");
+  const match = hostId.match(/^[^:]+:([^:]+):\d+$/u);
+  return match ? match[1].toLowerCase() : null;
+}
+
+export function selectExactWebmasterProperty(hosts, targetHost) {
+  const expected = String(targetHost || "").toLowerCase();
+  return (Array.isArray(hosts) ? hosts : []).find(
+    (property) => exactHostFromWebmasterProperty(property) === expected,
+  ) || null;
+}
+
+function unavailableWebmasterEndpoints(reason) {
+  return Object.fromEntries(
+    ["summary", "indexing", "excluded", "diagnostics", "sitemaps", "queries"]
+      .map((name) => [name, {
+        ok: false,
+        sourceStatus: "source_unavailable",
+        reason,
+      }]),
+  );
+}
+
+async function webmasterApiGet(env, url) {
+  const token = env.YANDEX_WEBMASTER_TOKEN;
+  try {
+    const response = await safeJsonRequest(
+      url,
+      {
+        method: "GET",
+        headers: {
+          Authorization: "OAuth " + token,
+          Accept: "application/json",
+        },
+      },
+      { secrets: [token] },
+    );
+    const providerError = response.data?.error_code || response.data?.error?.error_code;
+    if (!response.ok || providerError) {
+      return {
+        ok: false,
+        sourceStatus: "source_unavailable",
+        httpStatus: response.status,
+        errorCode: providerError || null,
+        error: response.data?.error_message
+          || response.data?.error?.error_string
+          || "Webmaster HTTP " + response.status,
+        requestId: response.providerMeta?.requestId || null,
+      };
+    }
+    return {
+      ok: true,
+      sourceStatus: "available",
+      data: response.data,
+      requestId: response.providerMeta?.requestId || null,
+    };
+  } catch (error) {
+    const detail = String(error?.message || error)
+      .replace("Оба сетевых транспорта Яндекс Директа недоступны:", "Сетевой транспорт Webmaster недоступен:")
+      .replace("Яндекс Директ вернул не JSON", "Webmaster вернул не JSON");
+    return {
+      ok: false,
+      sourceStatus: "source_unavailable",
+      error: detail,
+    };
+  }
+}
+
+export async function webmasterExactHostReport(
+  env,
+  targetHost = webmasterRosomahaRusHost,
+  request = webmasterApiGet,
+) {
+  const token = env.YANDEX_WEBMASTER_TOKEN;
+  const userId = env.YANDEX_WEBMASTER_USER_ID;
+  const missing = [
+    ["YANDEX_WEBMASTER_TOKEN", token],
+    ["YANDEX_WEBMASTER_USER_ID", userId],
+  ].filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length) {
+    const reason = "missing " + missing.join(", ");
+    return {
+      targetHost,
+      sourceStatus: "source_unavailable",
+      propertyAvailable: false,
+      reason,
+      inventory: { ok: false, sourceStatus: "source_unavailable", reason },
+      endpoints: unavailableWebmasterEndpoints(reason),
+    };
+  }
+
+  const userBase = "https://api.webmaster.yandex.net/v4/user/" + encodeURIComponent(userId);
+  const inventory = await request(env, userBase + "/hosts/");
+  if (!inventory.ok) {
+    const reason = "webmaster_host_inventory_unavailable";
+    return {
+      targetHost,
+      sourceStatus: "source_unavailable",
+      propertyAvailable: false,
+      reason,
+      inventory,
+      endpoints: unavailableWebmasterEndpoints(reason),
+    };
+  }
+
+  const properties = Array.isArray(inventory.data?.hosts) ? inventory.data.hosts : [];
+  const property = selectExactWebmasterProperty(properties, targetHost);
+  if (!property) {
+    const reason = "exact_host_property_not_available";
+    return {
+      targetHost,
+      sourceStatus: "source_unavailable",
+      propertyAvailable: false,
+      reason,
+      inventory: {
+        ok: true,
+        sourceStatus: "available",
+        propertyCount: properties.length,
+        exactMatchCount: 0,
+        requestId: inventory.requestId || null,
+      },
+      endpoints: unavailableWebmasterEndpoints(reason),
+    };
+  }
+
+  const hostId = String(property.host_id || "");
+  if (!hostId) {
+    const reason = "exact_host_property_has_no_host_id";
+    return {
+      targetHost,
+      sourceStatus: "source_unavailable",
+      propertyAvailable: false,
+      reason,
+      inventory: {
+        ok: true,
+        sourceStatus: "available",
+        propertyCount: properties.length,
+        exactMatchCount: 1,
+        requestId: inventory.requestId || null,
+      },
+      endpoints: unavailableWebmasterEndpoints(reason),
+    };
+  }
+
+  const hostBase = userBase + "/hosts/" + encodeURIComponent(hostId);
+  const popularQueries = new URLSearchParams({
+    order_by: "TOTAL_SHOWS",
+    limit: "500",
+  });
+  for (const indicator of ["TOTAL_SHOWS", "TOTAL_CLICKS", "AVG_SHOW_POSITION", "AVG_CLICK_POSITION"]) {
+    popularQueries.append("query_indicator", indicator);
+  }
+  const definitions = {
+    summary: "/summary/",
+    indexing: "/indexing/history/",
+    excluded: "/excluded-urls/samples/",
+    diagnostics: "/diagnostics/",
+    sitemaps: "/sitemaps/",
+    queries: "/search-queries/popular/?" + popularQueries.toString(),
+  };
+  const endpointEntries = await Promise.all(
+    Object.entries(definitions).map(async ([name, endpoint]) => [
+      name,
+      await request(env, hostBase + endpoint),
+    ]),
+  );
+  const endpoints = Object.fromEntries(endpointEntries);
+  const availableEndpointCount = Object.values(endpoints).filter((result) => result.ok).length;
+  return {
+    targetHost,
+    sourceStatus: availableEndpointCount === endpointEntries.length
+      ? "available"
+      : availableEndpointCount > 0
+        ? "partial"
+        : "source_unavailable",
+    propertyAvailable: true,
+    reason: null,
+    property: {
+      hostId,
+      host: exactHostFromWebmasterProperty(property),
+      verified: typeof property.verified === "boolean" ? property.verified : null,
+      asciiHostUrl: property.ascii_host_url || null,
+    },
+    inventory: {
+      ok: true,
+      sourceStatus: "available",
+      propertyCount: properties.length,
+      exactMatchCount: 1,
+      requestId: inventory.requestId || null,
+    },
+    endpoints,
+  };
+}
+
+export function classifyGscOAuthFailure(error) {
+  const detail = String(error?.message || error || "");
+  const invalidGrant = detail.includes("invalid_grant") || /expired or revoked/iu.test(detail);
+  return {
+    ok: false,
+    sourceStatus: "source_unavailable",
+    reason: invalidGrant ? "invalid_grant" : "gsc_oauth_failed",
+    detail,
+  };
+}
+
 async function gscStatus(env) {
   const missing = ["GSC_CLIENT_ID", "GSC_REFRESH_TOKEN", "GSC_SITE_URL"].filter((key) => !env[key]);
-  if (missing.length) return { ok: false, missing, reason: "missing_project_gsc_oauth_config" };
+  if (missing.length) {
+    return {
+      ok: false,
+      sourceStatus: "source_unavailable",
+      missing,
+      reason: "missing_project_gsc_oauth_config",
+    };
+  }
 
   const siteUrl = env.GSC_SITE_URL;
   let accessToken;
@@ -742,13 +1254,7 @@ async function gscStatus(env) {
       refreshToken: env.GSC_REFRESH_TOKEN,
     });
   } catch (error) {
-    const detail = String(error?.message || "");
-    const invalidGrant = detail.includes("invalid_grant") || /expired or revoked/iu.test(detail);
-    return {
-      ok: false,
-      reason: invalidGrant ? "invalid_grant" : "gsc_oauth_failed",
-      detail,
-    };
+    return classifyGscOAuthFailure(error);
   }
 
   let sitesResult;
@@ -757,6 +1263,7 @@ async function gscStatus(env) {
   } catch (error) {
     return {
       ok: false,
+      sourceStatus: "source_unavailable",
       reason: "gsc_sites_request_failed",
       detail: String(error?.message || error),
     };
@@ -766,6 +1273,7 @@ async function gscStatus(env) {
   if (!siteEntry) {
     return {
       ok: false,
+      sourceStatus: "source_unavailable",
       reason: "token_valid_but_site_not_in_account",
       siteUrl,
     };
@@ -773,6 +1281,7 @@ async function gscStatus(env) {
 
   return {
     ok: true,
+    sourceStatus: "available",
     siteUrl,
     permissionLevel: siteEntry.permissionLevel || null,
   };
@@ -1013,7 +1522,8 @@ function buildMarkdown(report) {
     "- Метрика: три раздельных объекта — xn--80aa8ahaki9a.site (107139619 / hard 517600157), rosomaha.site (105918356 / hard 496461698), rosomaha-rus.ru (111905412 / hard 601477348 / soft 601477497).",
     "- Заявками считаются только hard goals. Soft goals и conversions Direct сохраняются как диагностические сигналы и заявками не называются.",
     `- Direct: кампания ${targetRosomahaRusCampaignId} наблюдается только чтением; мутации ${protectedCampaignIds.join(", ")} запрещены.`,
-    "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
+    "- Публичный HTTP rosomaha-rus.ru: HTTPS root, HTTP→HTTPS, robots.txt, sitemap.xml и точный ключевой https://rosomaha-rus.ru/product/extrime-s-1-5l-dvs-1nz-fe/?oid=812 со status, redirect chain, final host, canonical и robots/sitemap-признаками.",
+    "- Yandex Webmaster: основной host xn--80aa8ahaki9a.site остаётся отдельным; rosomaha-rus.ru собирается только после точного совпадения в inventory hosts, иначе source_unavailable без подстановки данных основного домена.",
     "- Google Search Console: live OAuth probe без браузера; если токен недействителен, источник помечается недоступным.",
     "",
     "## Свежие цифры Direct",
@@ -1174,8 +1684,62 @@ function buildMarkdown(report) {
     lines.push("");
   }
 
+  const publicEvidence = report.publicHttp?.bitrix;
+  lines.push("## Публичный HTTP: rosomaha-rus.ru");
+  lines.push("");
+  if (!publicEvidence || publicEvidence.sourceStatus === "source_unavailable") {
+    lines.push("- Источник недоступен; прошлые HTTP-результаты не подставлены.");
+  } else {
+    const publicLabels = {
+      httpRoot: "HTTP root",
+      root: "HTTPS root",
+      robots: "robots.txt",
+      sitemap: "sitemap.xml",
+      keyProduct: "ключевой https://rosomaha-rus.ru/product/extrime-s-1-5l-dvs-1nz-fe/?oid=812",
+    };
+    for (const target of rosomahaRusPublicTargets) {
+      const evidence = publicEvidence.targets?.[target.id];
+      if (!evidence || evidence.sourceStatus === "source_unavailable") {
+        lines.push("- " + publicLabels[target.id] + ": source_unavailable"
+          + (evidence?.error ? "; " + evidence.error : "") + ".");
+        continue;
+      }
+      const redirectChain = evidence.redirects?.length
+        ? evidence.redirects.map((item) => item.status + " " + item.from + " → " + item.to).join(" | ")
+        : "нет";
+      lines.push("- " + publicLabels[target.id] + ": status=" + evidence.status
+        + "; redirects=" + redirectChain
+        + "; final=" + evidence.finalUrl
+        + "; final host=" + evidence.finalHost
+        + "; exact host=" + (evidence.exactFinalHost ? "PASS" : "FAIL") + ".");
+      if (evidence.html) {
+        lines.push("  - canonical=" + (evidence.html.canonical || "не найден")
+          + "; self-canonical=" + (evidence.html.canonicalMatchesFinal ? "PASS" : "FAIL")
+          + "; meta/header noindex=" + (evidence.html.metaNoindex || evidence.headerNoindex ? "да" : "нет") + ".");
+      }
+      if (evidence.robots) {
+        lines.push("  - User-agent=" + (evidence.robots.userAgentPresent ? "найден" : "не найден")
+          + "; Disallow / для *=" + (evidence.robots.disallowAll ? "да" : "нет")
+          + "; Sitemap=" + (evidence.robots.sitemapUrls.join(", ") || "не указан") + ".");
+      }
+      if (evidence.sitemap) {
+        lines.push("  - тип=" + evidence.sitemap.type
+          + "; loc=" + evidence.sitemap.locCount
+          + "; хосты=" + (evidence.sitemap.locationHosts.join(", ") || "не извлечены")
+          + "; ключевой URL в этом файле=" + (evidence.sitemap.keyProductListed ? "да" : "не доказан") + ".");
+      }
+    }
+    lines.push("- Автоматические проверки: HTTPS root 200=" + (publicEvidence.checks.httpsRoot200 ? "PASS" : "FAIL")
+      + "; HTTP→HTTPS=" + (publicEvidence.checks.httpRootRedirectsToHttps ? "PASS" : "FAIL")
+      + "; robots открыт=" + (publicEvidence.checks.robots200AndOpen ? "PASS" : "FAIL")
+      + "; sitemap XML=" + (publicEvidence.checks.sitemap200AndXml ? "PASS" : "FAIL")
+      + "; ключевой URL 200/self-canonical/indexable="
+      + (publicEvidence.checks.keyProduct200SelfCanonical ? "PASS" : "FAIL") + ".");
+  }
+  lines.push("");
+
   const w = report.webmaster;
-  lines.push("## SEO / Webmaster");
+  lines.push("## SEO / Webmaster: xn--80aa8ahaki9a.site");
   if (w.summary.ok) {
     lines.push(`- Searchable pages: ${w.summary.data.searchable_pages_count ?? "n/a"}`);
     lines.push(`- SQI: ${w.summary.data.sqi ?? "n/a"}`);
@@ -1192,6 +1756,96 @@ function buildMarkdown(report) {
   }
   if (w.queries.ok) {
     lines.push(`- Popular queries rows: ${(w.queries.data.queries || []).length}`);
+  }
+
+  lines.push("", "## SEO / Webmaster: rosomaha-rus.ru");
+  const bitrixWebmaster = report.webmasterByDomain?.bitrix;
+  const bitrixEndpointLabels = {
+    summary: "Summary",
+    indexing: "Indexing",
+    excluded: "Excluded URLs",
+    diagnostics: "Diagnostics",
+    sitemaps: "Sitemaps",
+    queries: "Popular queries",
+  };
+  if (!bitrixWebmaster?.propertyAvailable) {
+    lines.push("- Inventory: "
+      + (bitrixWebmaster?.inventory?.sourceStatus || "source_unavailable")
+      + "; " + (bitrixWebmaster?.inventory?.error || bitrixWebmaster?.reason || "нет ответа") + ".");
+    lines.push("- Property: source_unavailable; точное свойство rosomaha-rus.ru не подтверждено ("
+      + (bitrixWebmaster?.reason || "нет ответа inventory") + ").");
+    lines.push("- SourceStatus: " + (bitrixWebmaster?.sourceStatus || "source_unavailable") + ".");
+    for (const [name, label] of Object.entries(bitrixEndpointLabels)) {
+      const endpoint = bitrixWebmaster?.endpoints?.[name];
+      lines.push("- " + label + ": source_unavailable; "
+        + errorText(endpoint?.error || endpoint?.reason || bitrixWebmaster?.reason || "нет ответа") + ".");
+    }
+    lines.push("- Данные xn--80aa8ahaki9a.site не подставлялись и не используются как данные rosomaha-rus.ru.");
+  } else {
+    lines.push("- Inventory: " + bitrixWebmaster.inventory.sourceStatus
+      + "; properties=" + bitrixWebmaster.inventory.propertyCount
+      + "; exact matches=" + bitrixWebmaster.inventory.exactMatchCount + ".");
+    lines.push("- SourceStatus: " + bitrixWebmaster.sourceStatus + ".");
+    lines.push("- Точное свойство: host=" + bitrixWebmaster.property.host
+      + "; host_id=" + bitrixWebmaster.property.hostId
+      + "; verified=" + (bitrixWebmaster.property.verified ?? "API не вернуло")
+      + ".");
+    const bitrixEndpoints = bitrixWebmaster.endpoints || {};
+    if (bitrixEndpoints.summary?.ok) {
+      lines.push("- Summary: searchable="
+        + (bitrixEndpoints.summary.data?.searchable_pages_count ?? "n/a")
+        + "; excluded=" + (bitrixEndpoints.summary.data?.excluded_pages_count ?? "n/a")
+        + "; SQI=" + (bitrixEndpoints.summary.data?.sqi ?? "n/a") + ".");
+    } else {
+      lines.push("- Summary: source_unavailable; "
+        + errorText(bitrixEndpoints.summary?.error || bitrixEndpoints.summary?.reason || "нет ответа") + ".");
+    }
+    if (bitrixEndpoints.indexing?.ok) {
+      const latestIndicators = Object.entries(bitrixEndpoints.indexing.data?.indicators || {})
+        .map(([name, samples]) => {
+          const latest = Array.isArray(samples) ? samples.at(-1) : null;
+          return name + "=" + (latest?.value ?? "n/a");
+        });
+      lines.push("- Indexing: " + (latestIndicators.join(", ") || "API доступно, индикаторы не возвращены") + ".");
+    } else {
+      lines.push("- Indexing: source_unavailable; "
+        + errorText(bitrixEndpoints.indexing?.error || bitrixEndpoints.indexing?.reason || "нет ответа") + ".");
+    }
+    if (bitrixEndpoints.excluded?.ok) {
+      lines.push("- Excluded URLs: samples="
+        + (bitrixEndpoints.excluded.data?.samples?.length
+          ?? bitrixEndpoints.excluded.data?.count
+          ?? 0) + ".");
+    } else {
+      lines.push("- Excluded URLs: source_unavailable; "
+        + errorText(bitrixEndpoints.excluded?.error || bitrixEndpoints.excluded?.reason || "нет ответа") + ".");
+    }
+    if (bitrixEndpoints.diagnostics?.ok) {
+      const present = Object.entries(bitrixEndpoints.diagnostics.data?.problems || {})
+        .filter(([, value]) => value.state === "PRESENT")
+        .map(([code]) => code);
+      lines.push("- Diagnostics: " + (present.join(", ") || "активных проблем нет") + ".");
+    } else {
+      lines.push("- Diagnostics: source_unavailable; "
+        + errorText(bitrixEndpoints.diagnostics?.error || bitrixEndpoints.diagnostics?.reason || "нет ответа") + ".");
+    }
+    if (bitrixEndpoints.sitemaps?.ok) {
+      const sitemaps = bitrixEndpoints.sitemaps.data?.sitemaps || [];
+      lines.push("- Sitemaps: " + sitemaps.length + "; errors total="
+        + sitemaps.reduce((sum, item) => sum + Number(item.errors_count || 0), 0) + ".");
+    } else {
+      lines.push("- Sitemaps: source_unavailable; "
+        + errorText(bitrixEndpoints.sitemaps?.error || bitrixEndpoints.sitemaps?.reason || "нет ответа") + ".");
+    }
+    if (bitrixEndpoints.queries?.ok) {
+      lines.push("- Popular queries: "
+        + (bitrixEndpoints.queries.data?.count
+          ?? bitrixEndpoints.queries.data?.queries?.length
+          ?? 0) + " строк.");
+    } else {
+      lines.push("- Popular queries: source_unavailable; "
+        + errorText(bitrixEndpoints.queries?.error || bitrixEndpoints.queries?.reason || "нет ответа") + ".");
+    }
   }
 
   lines.push("", "## GSC API");
@@ -1346,6 +2000,8 @@ export async function runAudit() {
   };
 
   const webmaster = {
+    targetHost: webmasterMainHost,
+    hostId: env.YANDEX_WEBMASTER_HOST_ID || null,
     summary: webmasterRequest(env, "/summary/"),
     diagnostics: webmasterRequest(env, "/diagnostics/"),
     sitemaps: webmasterRequest(env, "/sitemaps/"),
@@ -1354,6 +2010,17 @@ export async function runAudit() {
       "/search-queries/popular/?order_by=TOTAL_SHOWS&query_indicator=TOTAL_SHOWS&query_indicator=TOTAL_CLICKS&query_indicator=AVG_SHOW_POSITION&query_indicator=AVG_CLICK_POSITION&limit=500",
     ),
   };
+  webmaster.sourceStatus = Object.values(webmaster)
+    .filter((value) => value && typeof value === "object" && Object.hasOwn(value, "ok"))
+    .every((value) => value.ok)
+    ? "available"
+    : "partial";
+
+  const [rosomahaRusPublicHttp, rosomahaRusWebmaster, gsc] = await Promise.all([
+    auditRosomahaRusPublicHttp(),
+    webmasterExactHostReport(env),
+    gscStatus(env),
+  ]);
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -1393,7 +2060,14 @@ export async function runAudit() {
     },
     metrika,
     webmaster,
-    gsc: await gscStatus(env),
+    webmasterByDomain: {
+      catalog: webmaster,
+      bitrix: rosomahaRusWebmaster,
+    },
+    publicHttp: {
+      bitrix: rosomahaRusPublicHttp,
+    },
+    gsc,
   };
   report.readiness = calculateReadiness(report);
 
