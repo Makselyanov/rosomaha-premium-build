@@ -274,6 +274,7 @@ class FakeApi:
         self.mutation_requests = 0
         self.update_payloads: list[dict[str, Any]] = []
         self.moderate_payloads: list[dict[str, Any]] = []
+        self.sitelinks_get_payloads: list[dict[str, Any]] = []
         self.glitch_next_target_read_after_update = False
         self._glitch_armed = False
         self.raise_after_update_commit = False
@@ -422,6 +423,7 @@ class FakeApi:
             return {"Keywords": copy.deepcopy(self.keywords)}
 
         if (service, method) == ("sitelinks", "get"):
+            self.sitelinks_get_payloads.append(copy.deepcopy(dict(params)))
             selected = set(params["SelectionCriteria"]["Ids"])
             return {
                 "SitelinksSets": [
@@ -554,6 +556,34 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         self.assertEqual(set(unified), {"CounterIds"})
         self.assertEqual(unified["CounterIds"]["Items"], [operator.TARGET_COUNTER_ID])
         self.assertEqual(api.campaign["UnifiedCampaign"]["PriorityGoals"]["Items"], existing_goals)
+
+    def test_existing_exact_counter_is_idempotent_for_audit_dry_run_and_apply(self):
+        api = FakeApi(
+            campaign=canonical_campaign(counter_ids=[operator.TARGET_COUNTER_ID])
+        )
+        first_audit = operator.run_operation(api, "audit")
+        second_audit = operator.run_operation(api, "audit")
+        self.assertEqual(
+            first_audit["canonical_campaign"]["measurement"],
+            second_audit["canonical_campaign"]["measurement"],
+        )
+        for _ in range(2):
+            dry = operator.run_operation(
+                api,
+                "dry-run",
+                dry_run_action="apply-counter",
+            )
+            self.assertEqual(dry["status"], "ready")
+        applied = operator.run_operation(
+            api,
+            "apply-counter",
+            expected_campaign_sha256=operator.sha256_json(api.campaign),
+            environ={operator.COUNTER_GUARD_ENV: operator.COUNTER_GUARD_VALUE},
+            lock_policy=FakeLockPolicy(),
+        )
+        self.assertEqual(applied["status"], "already_exact")
+        self.assertEqual(api.mutation_requests, 0)
+        self.assertEqual(api.update_payloads, [])
 
     def test_apply_measurement_uses_exact_counter_goal_and_explicit_big_value(self):
         value = 9_007_199_254_740_993
@@ -1021,6 +1051,18 @@ class DirectMeasurementOperatorTests(unittest.TestCase):
         baseline = bundle_hash(text_api)
         text_api.ads[0]["TextAd"]["AdImageHash"] = "changed-text-image"
         self.assertNotEqual(bundle_hash(text_api), baseline)
+
+    def test_sitelinks_get_uses_provider_exclusive_field_contract(self):
+        api = FakeApi()
+        operator.read_moderation_bundle(api)
+        self.assertEqual(len(api.sitelinks_get_payloads), 1)
+        request = api.sitelinks_get_payloads[0]
+        self.assertEqual(request["FieldNames"], ["Id"])
+        self.assertEqual(
+            request["SitelinkFieldNames"],
+            ["Title", "Href", "Description", "TurboPageId"],
+        )
+        self.assertNotIn("Sitelinks", request["FieldNames"])
 
     def test_moderation_requires_five_groups_and_a_condition_per_group(self):
         api = FakeApi()

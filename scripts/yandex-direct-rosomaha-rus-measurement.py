@@ -1126,6 +1126,72 @@ def _sitelink_ids(ads: Sequence[Mapping[str, Any]]) -> list[int]:
     return sorted(found)
 
 
+def validate_creative_cas(ads: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Prove that href, image and sitelink references are in the preimage."""
+
+    counts = {"TextAd": 0, "ResponsiveAd": 0, "images": 0, "sitelinks": 0}
+    for ad in ads:
+        ad_id = _exact_int(ad.get("Id"), "Ad Id")
+        variants = [
+            (name, ad.get(name))
+            for name in ("TextAd", "ResponsiveAd")
+            if isinstance(ad.get(name), Mapping)
+        ]
+        if len(variants) != 1:
+            raise OperatorError(f"Ad {ad_id}: требуется один полный TextAd/ResponsiveAd creative")
+        name, creative = variants[0]
+        counts[name] += 1
+        for field in ("Href", "SitelinkSetId", "AdExtensions", "BusinessId"):
+            if field not in creative:
+                raise OperatorError(f"Ad {ad_id}: creative CAS не вернул {field}")
+        href = creative.get("Href")
+        if not isinstance(href, str) or not re.match(r"^https?://[^\s]+$", href):
+            raise OperatorError(f"Ad {ad_id}: creative Href отсутствует или некорректен")
+        if creative.get("SitelinkSetId") is not None:
+            _exact_int(creative["SitelinkSetId"], f"Ad {ad_id} SitelinkSetId")
+            counts["sitelinks"] += 1
+        if creative.get("BusinessId") is not None:
+            _exact_int(creative["BusinessId"], f"Ad {ad_id} BusinessId")
+        extensions = creative.get("AdExtensions")
+        if not isinstance(extensions, list):
+            raise OperatorError(f"Ad {ad_id}: AdExtensions CAS отсутствует")
+        for extension in extensions:
+            if not isinstance(extension, Mapping):
+                raise OperatorError(f"Ad {ad_id}: AdExtensions CAS некорректен")
+            _exact_int(extension.get("AdExtensionId"), "AdExtensionId")
+        if name == "TextAd":
+            for field in ("Title", "Title2", "Text", "AdImageHash", "VCardId"):
+                if field not in creative:
+                    raise OperatorError(f"Ad {ad_id}: TextAd CAS не вернул {field}")
+            if not isinstance(creative.get("Title"), str) or not creative["Title"].strip():
+                raise OperatorError(f"Ad {ad_id}: TextAd Title пуст")
+            if not isinstance(creative.get("Text"), str) or not creative["Text"].strip():
+                raise OperatorError(f"Ad {ad_id}: TextAd Text пуст")
+            if creative.get("AdImageHash") is not None:
+                if not isinstance(creative["AdImageHash"], str) or not creative["AdImageHash"]:
+                    raise OperatorError(f"Ad {ad_id}: AdImageHash некорректен")
+                counts["images"] += 1
+            if creative.get("VCardId") is not None:
+                _exact_int(creative["VCardId"], f"Ad {ad_id} VCardId")
+        else:
+            for field in ("Titles", "Texts", "AdImages"):
+                if field not in creative:
+                    raise OperatorError(f"Ad {ad_id}: ResponsiveAd CAS не вернул {field}")
+            if not isinstance(creative["Titles"], list) or not creative["Titles"]:
+                raise OperatorError(f"Ad {ad_id}: ResponsiveAd Titles пуст")
+            if not isinstance(creative["Texts"], list) or not creative["Texts"]:
+                raise OperatorError(f"Ad {ad_id}: ResponsiveAd Texts пуст")
+            images = creative.get("AdImages")
+            if images is not None:
+                if not isinstance(images, Mapping) or not isinstance(images.get("Items"), list):
+                    raise OperatorError(f"Ad {ad_id}: ResponsiveAd AdImages некорректен")
+                for image in images["Items"]:
+                    if not isinstance(image, Mapping) or not isinstance(image.get("ImageHash"), str):
+                        raise OperatorError(f"Ad {ad_id}: ResponsiveAd ImageHash некорректен")
+                    counts["images"] += 1
+    return counts
+
+
 def read_sitelinks(api: Any, ids: Sequence[int]) -> list[dict[str, Any]]:
     if not ids:
         return []
@@ -1135,7 +1201,9 @@ def read_sitelinks(api: Any, ids: Sequence[int]) -> list[dict[str, Any]]:
         "get",
         {
             "SelectionCriteria": {"Ids": list(ids)},
-            "FieldNames": ["Id", "Sitelinks"],
+            # Provider contract: when SitelinkFieldNames is present, the
+            # aggregate Sitelinks member must not also appear in FieldNames.
+            "FieldNames": ["Id"],
             "SitelinkFieldNames": ["Title", "Href", "Description", "TurboPageId"],
             "Page": {"Limit": 10000, "Offset": 0},
         },
@@ -1179,6 +1247,7 @@ def validate_display_conditions(
 
 def read_moderation_bundle(api: Any) -> dict[str, Any]:
     ads = read_ads(api, include_creatives=True)
+    creative_cas = validate_creative_cas(ads)
     groups = read_adgroups(api)
     keywords = read_keywords(api)
     conditions = validate_display_conditions(ads, groups, keywords)
@@ -1188,6 +1257,7 @@ def read_moderation_bundle(api: Any) -> dict[str, Any]:
         "adgroups": groups,
         "keywords": keywords,
         "sitelinks": sitelinks,
+        "creative_cas": creative_cas,
         "display_conditions": conditions,
     }
 
@@ -1808,6 +1878,13 @@ def _run_operation_core(
         ad_ids = validate_five_draft_ads(moderation_bundle["ads"])
         ads_hash = sha256_json(moderation_bundle)
         receipt["planned_ad_ids"] = ad_ids
+        receipt["moderation_bundle_sha256"] = ads_hash
+        receipt["moderation_bundle_counts"] = {
+            "ads": len(moderation_bundle["ads"]),
+            "adgroups": len(moderation_bundle["adgroups"]),
+            "keywords_or_autotargeting": len(moderation_bundle["keywords"]),
+            "sitelink_sets": len(moderation_bundle["sitelinks"]),
+        }
         if mode == "dry-run":
             receipt.update(status="ready", mutation_requests=0)
             if int(getattr(api, "mutation_requests", 0)) != mutations_at_start:
