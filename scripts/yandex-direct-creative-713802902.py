@@ -1,0 +1,2595 @@
+#!/usr/bin/env python3
+"""Fail-closed creative/semantic operator for Direct campaign 713802902.
+
+The default and only automatically exercised mode is a live API read-only
+dry-run.  A real mutation additionally requires ``--apply``, exact snapshot
+and source-bound plan CAS hashes from a fresh dry-run, and a one-purpose
+environment unlock.  The operator can only edit the bundle built from the
+current audited preparation source.  It
+cannot moderate, resume, update a campaign, change money, or change goals.
+
+Python arbitrary-precision integers are intentional: responsive-ad IDs in this
+campaign are larger than JavaScript's exact integer range.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+GUARD_PATH = PROJECT_ROOT / "scripts" / "yandex-direct-rosomaha-rus-measurement.py"
+
+
+def _load_measurement_guard() -> Any:
+    spec = importlib.util.spec_from_file_location("_rosomaha_direct_measurement_guard", GUARD_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Не удалось загрузить общий Direct safety guard")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+guard = _load_measurement_guard()
+
+REPORT_ROOT = PROJECT_ROOT / "marketing-audits" / "yandex-direct"
+PREP_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "yandex-direct-prepare-713802902-v2.mjs"
+PAYLOAD_NAME_RE = re.compile(
+    r"^YANDEX_DIRECT_CREATIVE_SEMANTIC_DRY_RUN_713802902_[0-9T-]+Z\.json$"
+)
+
+TARGET_CAMPAIGN_ID = 713_802_902
+EXPECTED_LOGIN = "rosomaha-rus999"
+EXPECTED_DOMAIN = "rosomaha-rus.ru"
+EXPECTED_COUNTER_ID = 111_905_412
+PROTECTED_CAMPAIGN_IDS = (708_505_950, 705_770_573, 710_087_376)
+
+GROUP_IDS = {
+    "brand": 5_791_834_449,
+    "category": 5_791_834_450,
+    "extrime_family": 5_791_834_451,
+    "parked_extrime_toyota": 5_791_834_452,
+    "hunter": 5_791_834_453,
+}
+EXISTING_AD_IDS = {
+    "brand": 1_919_379_464_991_658_812,
+    "category": 1_919_379_464_991_658_813,
+    "extrime_uaz": 1_919_379_464_991_658_814,
+    "parked_extrime_toyota": 1_919_379_464_991_658_815,
+    "hunter": 1_919_379_464_991_658_816,
+}
+PARKED_AD_ID = EXISTING_AD_IDS["parked_extrime_toyota"]
+
+BASELINE_EXPLICIT_KEYWORDS = {
+    57_915_373_903: (GROUP_IDS["brand"], "росомаха вездеход -купить"),
+    57_915_373_904: (GROUP_IDS["brand"], "снегоболотоход росомаха"),
+    57_915_373_905: (GROUP_IDS["brand"], "квадроцикл росомаха"),
+    57_915_373_906: (GROUP_IDS["brand"], "вездеход росомаха купить"),
+    57_915_373_907: (GROUP_IDS["brand"], "завод росомаха"),
+    57_915_373_908: (GROUP_IDS["category"], "снегоболотоход купить"),
+    57_915_373_909: (GROUP_IDS["category"], "болотоход купить"),
+    57_915_373_910: (GROUP_IDS["category"], "снегоболотоход от производителя"),
+    57_915_373_911: (GROUP_IDS["category"], "вездеход низкого давления купить"),
+    57_915_373_912: (GROUP_IDS["extrime_family"], "росомаха экстрим уаз"),
+    57_915_373_913: (GROUP_IDS["extrime_family"], "росомаха экстрим 1 5 уаз купить"),
+    57_915_373_914: (GROUP_IDS["extrime_family"], "вездеход экстрим уаз"),
+    57_915_373_915: (GROUP_IDS["extrime_family"], "росомаха экстрим 1nz fe уаз"),
+    57_915_373_916: (GROUP_IDS["parked_extrime_toyota"], "росомаха экстрим toyota"),
+    57_915_373_917: (GROUP_IDS["parked_extrime_toyota"], "росомаха экстрим 1 5 toyota купить"),
+    57_915_373_918: (GROUP_IDS["parked_extrime_toyota"], "вездеход экстрим тойота"),
+    57_915_373_919: (GROUP_IDS["parked_extrime_toyota"], "росомаха экстрим 1nz fe toyota"),
+    57_915_373_920: (GROUP_IDS["hunter"], "росомаха хантер -toyota -вездеход -снегоболотоход"),
+    57_915_373_921: (GROUP_IDS["hunter"], "вездеход росомаха хантер"),
+    57_915_373_922: (GROUP_IDS["hunter"], "снегоболотоход росомаха хантер"),
+    57_915_373_923: (GROUP_IDS["hunter"], "росомаха хантер toyota"),
+}
+AUTOTARGETING_IDS = {
+    205_791_834_449: GROUP_IDS["brand"],
+    205_791_834_450: GROUP_IDS["category"],
+    205_791_834_451: GROUP_IDS["extrime_family"],
+    205_791_834_452: GROUP_IDS["parked_extrime_toyota"],
+    205_791_834_453: GROUP_IDS["hunter"],
+}
+BASELINE_KEYWORD_IDS = frozenset((*BASELINE_EXPLICIT_KEYWORDS, *AUTOTARGETING_IDS))
+
+KEYWORD_UPDATE_IDS = frozenset(
+    {
+        57_915_373_903,
+        57_915_373_904,
+        57_915_373_905,
+        57_915_373_906,
+        57_915_373_907,
+        57_915_373_908,
+        57_915_373_909,
+        57_915_373_910,
+        57_915_373_911,
+        57_915_373_912,
+        57_915_373_913,
+        57_915_373_914,
+        57_915_373_915,
+        57_915_373_920,
+        57_915_373_921,
+        57_915_373_922,
+    }
+)
+KEYWORD_SUSPEND_IDS = frozenset(
+    {
+        57_915_373_916,
+        57_915_373_917,
+        57_915_373_918,
+        57_915_373_919,
+        57_915_373_923,
+    }
+)
+PARKED_AUTOTARGET_ID = 205_791_834_452
+KEYWORD_ADD_COUNT = 5
+SEMANTIC_EVIDENCE_PHRASE_COUNT = 23
+PARTIAL_NEW_KEYWORDS = {
+    57_919_713_695: (GROUP_IDS["brand"], "росомаха завод вездеходов"),
+    57_919_713_696: (GROUP_IDS["category"], "вездеход купить от производителя"),
+    57_919_713_697: (GROUP_IDS["category"], "квадроцикл вездеход купить"),
+    57_919_713_698: (GROUP_IDS["category"], "болотоход купить"),
+    57_919_713_699: (GROUP_IDS["extrime_family"], "квадроцикл росомаха экстрим"),
+}
+PARTIAL_SITELINK_IDS = {
+    "generic": 1_504_918_757,
+    "extrimeUaz": 1_504_918_758,
+    "extrimeToyota": 1_504_918_759,
+    "hunter": 1_504_918_760,
+}
+PARTIAL_APPLY_RECEIPT = (
+    REPORT_ROOT
+    / "ROSOMAHA_RUS_DIRECT_CREATIVE_apply_713802902_2026-08-24T22-04-55-192385+00-00.json"
+)
+PARTIAL_APPLY_RECEIPT_SHA256 = (
+    "053ecb56022aac437b1f67da8ab205702a9a3223d51c4ed9b5364859cffe2616"
+)
+SECOND_PARTIAL_RECEIPT = (
+    REPORT_ROOT
+    / "ROSOMAHA_RUS_DIRECT_CREATIVE_recover-partial_713802902_2026-08-24T22-26-13-167909+00-00.json"
+)
+SECOND_PARTIAL_RECEIPT_SHA256 = (
+    "c71a74adb23438d906e21496a72a4a5cfdf8f80dfb3d6fc348ab896290301bf3"
+)
+THIRD_PARTIAL_RECEIPT = (
+    REPORT_ROOT
+    / "ROSOMAHA_RUS_DIRECT_CREATIVE_recover-partial_713802902_2026-08-24T22-39-32-456403+00-00.json"
+)
+THIRD_PARTIAL_RECEIPT_SHA256 = (
+    "e7ca56f6aacb63574be030f2362ccab1eadbc705be16357b1c96c6fc631453d4"
+)
+THIRD_PARTIAL_PREIMAGE_CAS_SHA256 = (
+    "5a1c073e523f5ecb9166e68f7bbbc08d9ab107326e5764d79cf0b29cbbe2c807"
+)
+THIRD_PARTIAL_PLAN_SHA256 = (
+    "0881ecb51551c21fb682e5813afcb2a2f869f85b6ffe2583a2aee75b710b3872"
+)
+
+BASELINE_GROUP_NAMES = {
+    GROUP_IDS["brand"]: "Brand Rosomaha",
+    GROUP_IDS["category"]: "Commercial category",
+    GROUP_IDS["extrime_family"]: "Extrime UAZ",
+    GROUP_IDS["parked_extrime_toyota"]: "Extrime Toyota",
+    GROUP_IDS["hunter"]: "Hunter Toyota",
+}
+BASELINE_NEGATIVES = sorted(
+    [
+        "!своими руками",
+        "ozon",
+        "wildberries",
+        "авито",
+        "аренда",
+        "бу",
+        "вакансия",
+        "детский",
+        "дром",
+        "запчасти",
+        "игрушка",
+        "инструкция",
+        "озон",
+        "прокат",
+        "работа",
+        "радиоуправляемый",
+        "ремонт",
+        "самоделка",
+        "самодельный",
+        "скачать",
+        "схема",
+        "чертеж",
+    ]
+)
+BASELINE_SITELINK_SET_ID = 1_504_788_500
+BASELINE_GENERIC_IMAGE_HASH = "s1UdPIWzqoERf75fEOE7hw"
+
+BASELINE_ADS = {
+    EXISTING_AD_IDS["brand"]: {
+        "group": GROUP_IDS["brand"],
+        "titles": ["Вездеходы Росомаха от завода"],
+        "texts": ["Подбор модели и комплектации. Доставка по России. Связь с производителем."],
+        "href": "https://rosomaha-rus.ru/?utm_source=yandex&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}&utm_term={keyword}",
+        "display": "models",
+        "sitelink": BASELINE_SITELINK_SET_ID,
+        "images": [BASELINE_GENERIC_IMAGE_HASH],
+    },
+    EXISTING_AD_IDS["category"]: {
+        "group": GROUP_IDS["category"],
+        "titles": ["Снегоболотоходы Росомаха от завода"],
+        "texts": ["Модели для охоты, рыбалки и хозяйства. Подбор комплектации и доставка."],
+        "href": "https://rosomaha-rus.ru/product/kvadrotsikly/?utm_source=yandex&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}&utm_term={keyword}",
+        "display": "catalog",
+        "sitelink": BASELINE_SITELINK_SET_ID,
+        "images": [BASELINE_GENERIC_IMAGE_HASH],
+    },
+    EXISTING_AD_IDS["extrime_uaz"]: {
+        "group": GROUP_IDS["extrime_family"],
+        "titles": ["Экстрим 1.5 с мостами УАЗ"],
+        "texts": ["Двигатель 1NZ-FE. Комплектации и опции на сайте. Заявка производителю."],
+        "href": "https://rosomaha-rus.ru/product/extrime-s-1-5l-dvs-1nz-fe/?oid=812&utm_source=yandex&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}&utm_term={keyword}",
+        "display": "extrime-uaz",
+        "sitelink": BASELINE_SITELINK_SET_ID,
+        "images": [],
+    },
+    EXISTING_AD_IDS["parked_extrime_toyota"]: {
+        "group": GROUP_IDS["parked_extrime_toyota"],
+        "titles": ["Экстрим 1.5 с мостами Toyota"],
+        "texts": ["Двигатель 1NZ-FE. Комплектации и опции на сайте. Заявка производителю."],
+        "href": "https://rosomaha-rus.ru/product/extrime-1-5-litra-mosty-toyota/?oid=824&utm_source=yandex&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}&utm_term={keyword}",
+        "display": "extrime-toyota",
+        "sitelink": BASELINE_SITELINK_SET_ID,
+        "images": [],
+    },
+    EXISTING_AD_IDS["hunter"]: {
+        "group": GROUP_IDS["hunter"],
+        "titles": ["Хантер 1.5 с мостами Toyota"],
+        "texts": ["Двигатель 1NZ-FE. Комплектации и опции на сайте. Заявка производителю."],
+        "href": "https://rosomaha-rus.ru/product/hunter-s-1-5l-dvs-1nz-fe/?oid=800&utm_source=yandex&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}&utm_term={keyword}",
+        "display": "hunter-toyota",
+        "sitelink": BASELINE_SITELINK_SET_ID,
+        "images": [],
+    },
+}
+
+APPLY_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_APPLY"
+APPLY_GUARD_VALUE = "APPLY_713802902_CREATIVE_SEMANTIC_V3_SOURCE_BOUND"
+RECOVERY_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_RECOVERY"
+RECOVERY_GUARD_VALUE = "RECOVER_713802902_EPK_ADS_V501_V3"
+MUTATION_LOCK_PATH = guard.MUTATION_LOCK_PATH
+BROWSER_LOCK_PATHS = guard.BROWSER_LOCK_PATHS
+MAX_RESPONSE_BYTES = 4_000_000
+
+
+class OperatorError(RuntimeError):
+    def __init__(self, message: str, *, partial: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.partial = dict(partial or {})
+
+
+class ProviderError(OperatorError):
+    pass
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise ProviderError("Direct API unexpectedly redirected")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sha256_json(value: Any) -> str:
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def exact_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise OperatorError(f"{label}: требуется точное положительное целое число")
+    return value
+
+
+def safe_text(value: Any, secrets: Sequence[str] = ()) -> str:
+    text = str(value or type(value).__name__)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)Bearer\s+[^\s\"',}]+", "Bearer [REDACTED]", text)
+    return text[:1000]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_payload_artifact(path: Path) -> dict[str, Any]:
+    report_root = REPORT_ROOT.resolve()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        raise OperatorError("Creative/semantic payload недоступен") from None
+    if (
+        resolved.parent != report_root
+        or not PAYLOAD_NAME_RE.fullmatch(resolved.name)
+        or not resolved.is_file()
+        or path.is_symlink()
+    ):
+        raise OperatorError("Creative/semantic payload вышел за разрешённый report scope")
+    if path.stat().st_size > 2_000_000:
+        raise OperatorError("Creative/semantic payload превышает безопасный размер")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Creative/semantic payload содержит невалидный JSON") from None
+    validate_payload(payload)
+    return payload
+
+
+def _stable_plan_view(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove only generator timestamps; every effective field remains CAS-bound."""
+    stable = copy.deepcopy(dict(payload))
+    stable.pop("generatedAt", None)
+    landing = stable.get("publicLandingEvidence")
+    if isinstance(landing, dict):
+        landing.pop("checkedAt", None)
+    return stable
+
+
+def build_current_payload() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the plan from the current audited JS source, never from a stale receipt."""
+    if not PREP_SCRIPT_PATH.is_file() or PREP_SCRIPT_PATH.is_symlink():
+        raise OperatorError("Current creative/semantic source отсутствует или является symlink")
+    source_before = _sha256_file(PREP_SCRIPT_PATH)
+    try:
+        completed = subprocess.run(
+            ["node", str(PREP_SCRIPT_PATH)],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=45,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OperatorError(f"Не удалось построить current plan: {safe_text(exc)}") from None
+    if completed.returncode != 0:
+        raise OperatorError(
+            "Current plan generator failed: "
+            + safe_text(completed.stderr or completed.stdout)
+        )
+    if _sha256_file(PREP_SCRIPT_PATH) != source_before:
+        raise OperatorError("Creative/semantic source изменился во время построения plan")
+    try:
+        generator_receipt = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise OperatorError("Current plan generator вернул невалидный JSON") from None
+    if not isinstance(generator_receipt, Mapping) or generator_receipt.get("ok") is not True:
+        raise OperatorError("Current plan generator не подтвердил validation.ok")
+    relative = generator_receipt.get("output")
+    if not isinstance(relative, str):
+        raise OperatorError("Current plan generator не вернул output path")
+    path = PROJECT_ROOT / relative
+    payload = load_payload_artifact(path)
+
+    semantic_relative = payload.get("semanticEvidence", {}).get("receipt")
+    if not isinstance(semantic_relative, str):
+        raise OperatorError("Current plan не содержит semantic evidence receipt")
+    semantic_path = (PROJECT_ROOT / semantic_relative).resolve(strict=True)
+    if semantic_path.parent != REPORT_ROOT.resolve() or not semantic_path.is_file():
+        raise OperatorError("Semantic evidence вышел за разрешённый report scope")
+    semantic_sha256 = _sha256_file(semantic_path)
+    plan_sha256 = sha256_json(
+        {
+            "prep_source_sha256": source_before,
+            "semantic_evidence_sha256": semantic_sha256,
+            "payload": _stable_plan_view(payload),
+        }
+    )
+    metadata = {
+        "path": str(path.relative_to(PROJECT_ROOT)),
+        "artifact_sha256": _sha256_file(path),
+        "plan_sha256": plan_sha256,
+        "prep_source": str(PREP_SCRIPT_PATH.relative_to(PROJECT_ROOT)),
+        "prep_source_sha256": source_before,
+        "semantic_evidence": semantic_relative,
+        "semantic_evidence_sha256": semantic_sha256,
+    }
+    return payload, metadata
+
+
+def _walk(value: Any):
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            yield key, child
+            yield from _walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk(child)
+
+
+def _assert_domain_urls(value: Any) -> None:
+    for key, child in _walk(value):
+        if key not in {"Href", "href", "sourceUrl"} or not isinstance(child, str):
+            continue
+        parsed = urlsplit(child)
+        if parsed.scheme != "https" or parsed.hostname != EXPECTED_DOMAIN:
+            raise OperatorError(f"URL вышел за разрешённый домен: {safe_text(child)}")
+
+
+def validate_payload(payload: Any) -> None:
+    if not isinstance(payload, Mapping):
+        raise OperatorError("Payload должен быть JSON object")
+    if payload.get("mode") != "dry-run" or payload.get("exactLogin") != EXPECTED_LOGIN:
+        raise OperatorError("Payload identity/mode не совпали")
+    if exact_int(payload.get("campaignId"), "Payload CampaignId") != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Payload содержит другую кампанию")
+    if payload.get("protectedCampaignIds") != list(PROTECTED_CAMPAIGN_IDS):
+        raise OperatorError("Payload protected campaign guard не совпал")
+    authorization = payload.get("authorizationBoundary")
+    if not isinstance(authorization, Mapping) or authorization.get("externalMutationCount") != 0:
+        raise OperatorError("Payload не является подтверждённым zero-mutation dry-run")
+    if authorization.get("campaignRemainsSuspended") is not True:
+        raise OperatorError("Payload не гарантирует SUSPENDED")
+    for key in ("moderationCalled", "resumeCalled", "budgetChanged", "priorityGoalChanged"):
+        if authorization.get(key) is not False:
+            raise OperatorError(f"Payload safety boundary {key} не совпал")
+    validation = payload.get("validation")
+    if not isinstance(validation, Mapping) or validation.get("ok") is not True:
+        raise OperatorError("Payload не прошёл собственную валидацию")
+    if set(payload.get("creatives", {})) != {
+        "brand",
+        "category",
+        "extrimeUaz",
+        "extrimeToyota",
+        "hunter",
+    }:
+        raise OperatorError("Payload creative keys не совпали")
+    if list(payload.get("sitelinkSets", {})) != [
+        "generic",
+        "extrimeUaz",
+        "extrimeToyota",
+        "hunter",
+    ]:
+        raise OperatorError("Payload sitelink order не совпал")
+    keywords = payload.get("keywords")
+    if not isinstance(keywords, Mapping):
+        raise OperatorError("Payload keywords отсутствует")
+    update_ids = {exact_int(item.get("Id"), "Keyword update Id") for item in keywords.get("update", [])}
+    if update_ids != KEYWORD_UPDATE_IDS:
+        raise OperatorError("Payload Keyword.update ID scope не совпал")
+    suspend_ids = {exact_int(item, "Keyword suspend Id") for item in keywords.get("suspendIds", [])}
+    if suspend_ids != KEYWORD_SUSPEND_IDS:
+        raise OperatorError("Payload Keyword.suspend ID scope не совпал")
+    autotarget_safety = keywords.get("parkedAutotargetingSafety")
+    if autotarget_safety != {
+        "id": PARKED_AUTOTARGET_ID,
+        "adGroupId": GROUP_IDS["parked_extrime_toyota"],
+        "remainsOn": True,
+        "soleAdId": str(PARKED_AD_ID),
+        "soleAdMustBeSuspended": True,
+    }:
+        raise OperatorError("Payload parked autotargeting safety proof не совпал")
+    if len(keywords.get("add", [])) != KEYWORD_ADD_COUNT:
+        raise OperatorError("Payload должен добавлять ровно пять уникальных ключей")
+    aliases = keywords.get("providerNormalizedAliases")
+    expected_aliases = {
+        (
+            "купить вездеход росомаха",
+            57_915_373_903,
+            "росомаха вездеход купить",
+            10140,
+        ),
+        (
+            "росомаха квадроцикл купить",
+            57_915_373_905,
+            "квадроцикл росомаха купить",
+            10140,
+        ),
+    }
+    actual_aliases = {
+        (
+            item.get("evidenceKeyword"),
+            exact_int(item.get("canonicalKeywordId"), "Alias canonical KeywordId"),
+            item.get("canonicalKeyword"),
+            item.get("providerCode"),
+        )
+        for item in aliases or []
+        if isinstance(item, Mapping)
+    }
+    if actual_aliases != expected_aliases:
+        raise OperatorError("Payload provider-normalized semantic aliases не совпали")
+    semantic = payload.get("semanticEvidence")
+    if (
+        not isinstance(semantic, Mapping)
+        or semantic.get("yesEvidencePhraseCount") != SEMANTIC_EVIDENCE_PHRASE_COUNT
+        or semantic.get("materializedUniqueKeywordCount") != 21
+        or semantic.get("providerNormalizedAliasCount") != 2
+    ):
+        raise OperatorError("Payload не доказал 23 YES phrases -> 21 unique keywords")
+    _assert_domain_urls(payload)
+    forbidden_keys = {
+        "Campaigns",
+        "PriorityGoals",
+        "DailyBudget",
+        "BiddingStrategy",
+        "PackageBiddingStrategy",
+        "CounterIds",
+    }
+    found = {key for key, _ in _walk(payload) if key in forbidden_keys}
+    if found:
+        raise OperatorError(f"Payload содержит запрещённые campaign/money поля: {sorted(found)}")
+
+
+def _public_probe_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or parsed.hostname != EXPECTED_DOMAIN:
+        raise OperatorError(f"Public preflight URL вышел за exact host: {safe_text(value)}")
+    clean_query = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and "{" not in key + item and "}" not in key + item
+    ]
+    return urlunsplit(
+        ("https", EXPECTED_DOMAIN, parsed.path or "/", urlencode(clean_query), "")
+    )
+
+
+def _probe_public_url(url: str, *, timeout: float = 12.0) -> dict[str, Any]:
+    opener = build_opener(RejectRedirects())
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Rosomaha-Direct-Safety-Preflight/1.0",
+            "Accept": "text/html,image/*;q=0.8,*/*;q=0.1",
+        },
+        method="GET",
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", response.getcode()))
+            final = urlsplit(response.geturl())
+            response.read(1)
+            content_type = response.headers.get("Content-Type")
+    except HTTPError as exc:
+        raise OperatorError(f"Public preflight HTTP {exc.code}: {url}") from None
+    except (URLError, TimeoutError, OSError, ProviderError) as exc:
+        raise OperatorError(f"Public preflight transport: {url}: {safe_text(exc)}") from None
+    if status != 200:
+        raise OperatorError(f"Public preflight требует HTTP 200, получен {status}: {url}")
+    if final.scheme != "https" or final.hostname != EXPECTED_DOMAIN:
+        raise OperatorError(f"Public preflight final host drift: {url}")
+    return {"url": url, "status": status, "content_type": content_type}
+
+
+def public_http_preflight(payload: Mapping[str, Any]) -> dict[str, Any]:
+    source_urls = [
+        child
+        for key, child in _walk(payload)
+        if key in {"Href", "href", "sourceUrl"} and isinstance(child, str)
+    ]
+    probe_urls = sorted({_public_probe_url(item) for item in source_urls})
+    if not probe_urls:
+        raise OperatorError("Public preflight не нашёл ни одного URL")
+    with ThreadPoolExecutor(max_workers=min(4, len(probe_urls))) as pool:
+        results = list(pool.map(_probe_public_url, probe_urls))
+    if any(item.get("status") != 200 for item in results):
+        raise OperatorError("Public preflight не подтвердил HTTP 200 для всех URL")
+    return {
+        "exact_host": EXPECTED_DOMAIN,
+        "source_url_count": len(source_urls),
+        "unique_probe_count": len(results),
+        "all_http_200": True,
+        "results": results,
+    }
+
+
+class MutationLockPolicy:
+    def __init__(
+        self,
+        *,
+        browser_locks: Sequence[Path] = BROWSER_LOCK_PATHS,
+        mutation_lock: Path = MUTATION_LOCK_PATH,
+    ) -> None:
+        self.browser_locks = tuple(Path(item) for item in browser_locks)
+        self.mutation_lock = Path(mutation_lock)
+
+    def inspect(self) -> dict[str, Any]:
+        browser = [str(path) for path in self.browser_locks if path.exists() or path.is_symlink()]
+        mutation = self.mutation_lock.exists() or self.mutation_lock.is_symlink()
+        return {
+            "browser_locks": browser,
+            "mutation_lock_present": mutation,
+            "available": not browser and not mutation,
+        }
+
+    def _assert_free(self) -> None:
+        state = self.inspect()
+        if not state["available"]:
+            raise OperatorError(f"Глобальная Yandex lock занята: {state}")
+
+    @contextmanager
+    def hold(self):
+        self._assert_free()
+        self.mutation_lock.parent.mkdir(parents=True, exist_ok=True)
+        content = canonical_bytes(
+            {
+                "schema": 1,
+                "owner": "yandex-direct-creative-713802902",
+                "campaign_id": TARGET_CAMPAIGN_ID,
+                "pid": os.getpid(),
+                "created_at": utc_now(),
+            }
+        ) + b"\n"
+        try:
+            descriptor = os.open(self.mutation_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            raise OperatorError("Глобальная Yandex mutation lock занята") from None
+        try:
+            os.write(descriptor, content)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        acquired = self.mutation_lock.stat()
+        evidence = {"path": str(self.mutation_lock), "atomic_create": True, "released": False}
+        try:
+            occupied = [str(path) for path in self.browser_locks if path.exists() or path.is_symlink()]
+            if occupied:
+                raise OperatorError("Browser owner lock появился после захвата mutation lock")
+            yield evidence
+        finally:
+            try:
+                current = self.mutation_lock.lstat()
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and not self.mutation_lock.is_symlink()
+                    and current.st_dev == acquired.st_dev
+                    and current.st_ino == acquired.st_ino
+                ):
+                    self.mutation_lock.unlink()
+                    evidence["released"] = True
+                else:
+                    evidence["release_error"] = "mutation lock identity changed"
+            except FileNotFoundError:
+                evidence["release_error"] = "mutation lock disappeared"
+
+
+def endpoint(version: str, service: str) -> str:
+    allowed = {
+        ("v501", "sitelinks"),
+        ("v501", "adgroups"),
+        ("v501", "ads"),
+        ("v5", "keywords"),
+    }
+    if (version, service) not in allowed:
+        raise OperatorError("Creative mutation endpoint не входит в allowlist")
+    return f"https://api.direct.yandex.com/json/{version}/{service}"
+
+
+def _all_ints(value: Any) -> set[int]:
+    found: set[int] = set()
+    if isinstance(value, bool):
+        return found
+    if isinstance(value, int):
+        found.add(value)
+    elif isinstance(value, Mapping):
+        for child in value.values():
+            found.update(_all_ints(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_all_ints(child))
+    return found
+
+
+def assert_mutation_contract(
+    version: str,
+    service: str,
+    method: str,
+    params: Mapping[str, Any],
+    mutation_kind: str,
+) -> None:
+    endpoint(version, service)
+    allowed = {
+        "sitelinks_add": ("v501", "sitelinks", "add"),
+        "adgroups_update": ("v501", "adgroups", "update"),
+        "keywords_update": ("v5", "keywords", "update"),
+        "keywords_add": ("v5", "keywords", "add"),
+        "keywords_suspend": ("v5", "keywords", "suspend"),
+        "ads_update": ("v501", "ads", "update"),
+        "ads_add": ("v501", "ads", "add"),
+        "ads_suspend": ("v501", "ads", "suspend"),
+    }
+    if allowed.get(mutation_kind) != (version, service, method):
+        raise OperatorError("Mutation kind/service/method не совпали с allowlist")
+    serialized_keys = {key for key, _ in _walk(params)}
+    forbidden = {
+        "Campaigns",
+        "CampaignId",
+        "PriorityGoals",
+        "DailyBudget",
+        "BiddingStrategy",
+        "PackageBiddingStrategy",
+        "CounterIds",
+        "Budget",
+    }
+    if serialized_keys & forbidden:
+        raise OperatorError("Creative mutation содержит campaign/money/goal поле")
+    if _all_ints(params) & set(PROTECTED_CAMPAIGN_IDS):
+        raise OperatorError("Creative mutation содержит защищённый campaign ID")
+    _assert_domain_urls(params)
+
+    if mutation_kind == "sitelinks_add":
+        rows = params.get("SitelinksSets") if set(params) == {"SitelinksSets"} else None
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 4:
+            raise OperatorError("Sitelinks.add требует от одного до четырёх новых наборов")
+        signatures = [sha256_json(_normalise_sitelinks(row.get("Sitelinks"))) for row in rows]
+        if len(signatures) != len(set(signatures)):
+            raise OperatorError("Sitelinks.add содержит дубли вместо reuse")
+    elif mutation_kind == "adgroups_update":
+        rows = params.get("AdGroups") if set(params) == {"AdGroups"} else None
+        if not isinstance(rows, list) or {exact_int(row.get("Id"), "AdGroup Id") for row in rows} != set(GROUP_IDS.values()):
+            raise OperatorError("AdGroups.update должен содержать ровно пять целевых групп")
+    elif mutation_kind == "keywords_update":
+        rows = params.get("Keywords") if set(params) == {"Keywords"} else None
+        if not isinstance(rows, list) or {exact_int(row.get("Id"), "Keyword Id") for row in rows} != KEYWORD_UPDATE_IDS:
+            raise OperatorError("Keywords.update scope не совпал")
+    elif mutation_kind == "keywords_add":
+        rows = params.get("Keywords") if set(params) == {"Keywords"} else None
+        if not isinstance(rows, list) or len(rows) != KEYWORD_ADD_COUNT:
+            raise OperatorError("Keywords.add требует ровно пять уникальных фраз")
+        if any(exact_int(row.get("AdGroupId"), "Keyword AdGroupId") not in set(GROUP_IDS.values()) for row in rows):
+            raise OperatorError("Keywords.add содержит чужую группу")
+    elif mutation_kind == "keywords_suspend":
+        ids = params.get("SelectionCriteria", {}).get("Ids")
+        requested = (
+            {exact_int(item, "Keyword suspend Id") for item in ids}
+            if isinstance(ids, list)
+            else set()
+        )
+        if not requested or not requested <= KEYWORD_SUSPEND_IDS:
+            raise OperatorError("Keywords.suspend scope не совпал")
+    elif mutation_kind == "ads_update":
+        rows = params.get("Ads") if set(params) == {"Ads"} else None
+        if not isinstance(rows, list) or {exact_int(row.get("Id"), "Ad Id") for row in rows} != set(EXISTING_AD_IDS.values()):
+            raise OperatorError("Ads.update требует все пять exact 64-bit IDs")
+        if any(set(row) != {"Id", "ResponsiveAd"} for row in rows):
+            raise OperatorError("Ads.update item содержит лишние поля")
+    elif mutation_kind == "ads_add":
+        rows = params.get("Ads") if set(params) == {"Ads"} else None
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise OperatorError("Ads.add требует одно объявление")
+        row = rows[0]
+        if set(row) != {"AdGroupId", "ResponsiveAd"} or exact_int(row.get("AdGroupId"), "Ads.add AdGroupId") != GROUP_IDS["extrime_family"]:
+            raise OperatorError("Ads.add разрешён только в семейной группе Extrime")
+        hashes = row.get("ResponsiveAd", {}).get("AdImageHashes")
+        if not isinstance(hashes, list) or len(hashes) != 1 or not isinstance(hashes[0], str):
+            raise OperatorError("Ads.add ResponsiveAd.AdImageHashes обязан быть массивом")
+    elif mutation_kind == "ads_suspend":
+        ids = params.get("SelectionCriteria", {}).get("Ids")
+        if ids != [PARKED_AD_ID]:
+            raise OperatorError("Ads.suspend разрешён только для parked ad exact ID")
+
+
+class CreativeDirectApi(guard.DirectApi):
+    def call(
+        self,
+        version: str,
+        service: str,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        use_client_login: bool,
+        mutation_kind: str | None = None,
+    ) -> dict[str, Any]:
+        if mutation_kind is None:
+            return super().call(
+                version,
+                service,
+                method,
+                params,
+                use_client_login=use_client_login,
+            )
+        override = getattr(self, "mutation_allowlist_override", None)
+        if override is not None and mutation_kind not in override:
+            raise OperatorError(
+                f"Current operator mode forbids mutation stage {mutation_kind}"
+            )
+        if not use_client_login:
+            raise OperatorError("Creative mutation обязана использовать exact Client-Login")
+        assert_mutation_contract(version, service, method, params, mutation_kind)
+        self.request_log.append(
+            {
+                "version": version,
+                "service": service,
+                "method": method,
+                "client_login": EXPECTED_LOGIN,
+                "mutation_kind": mutation_kind,
+            }
+        )
+        self.mutation_requests += 1
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept-Language": "ru",
+            "Client-Login": EXPECTED_LOGIN,
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        request = Request(
+            endpoint(version, service),
+            data=canonical_bytes({"method": method, "params": dict(params)}),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ProviderError("Direct API response превысил безопасный предел")
+                units_login = response.headers.get("Units-Used-Login")
+        except HTTPError as exc:
+            raw = exc.read(MAX_RESPONSE_BYTES + 1)
+            detail = safe_text(raw.decode("utf-8", errors="replace"), (self._token,))
+            raise ProviderError(f"Direct API HTTP {exc.code}: {detail}") from None
+        except (URLError, TimeoutError, OSError) as exc:
+            raise ProviderError(f"Direct API transport: {safe_text(exc, (self._token,))}") from None
+        if units_login and str(units_login).strip() != EXPECTED_LOGIN:
+            raise OperatorError("Direct API mutation ответил единицами другого логина")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ProviderError("Direct API mutation вернул невалидный JSON") from None
+        if not isinstance(payload, Mapping):
+            raise ProviderError("Direct API mutation вернул JSON неожиданного типа")
+        if payload.get("error"):
+            error = payload["error"] if isinstance(payload["error"], Mapping) else {}
+            raise ProviderError(
+                f"Direct API error_code={error.get('error_code')}: "
+                + safe_text(error.get("error_string") or error.get("error_detail"), (self._token,))
+            )
+        result = payload.get("result")
+        if not isinstance(result, Mapping):
+            raise ProviderError("Direct API mutation response не содержит result object")
+        return dict(result)
+
+
+def _notifications(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise OperatorError("Provider notification list имеет неверную структуру")
+    return [
+        {
+            "Code": item.get("Code"),
+            "Message": safe_text(item.get("Message")),
+            "Details": safe_text(item.get("Details")) if item.get("Details") else None,
+        }
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
+def strict_action_rows(
+    result: Mapping[str, Any],
+    key: str,
+    *,
+    expected_count: int,
+    id_field: str,
+    expected_ids: Sequence[int] | None = None,
+) -> list[Any]:
+    rows = result.get(key)
+    if not isinstance(rows, list) or len(rows) != expected_count:
+        raise OperatorError(f"Direct mutation не вернула точный {key}")
+    warnings = _notifications(result.get("Warnings"))
+    values: list[Any] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise OperatorError(f"{key} row имеет неверный тип")
+        errors = _notifications(row.get("Errors"))
+        warnings.extend(_notifications(row.get("Warnings")))
+        if errors:
+            raise OperatorError("Direct mutation вернула Errors", partial={"provider_errors": errors})
+        value = row.get(id_field)
+        if id_field == "AdImageHash":
+            if not isinstance(value, str) or not value:
+                raise OperatorError("Direct mutation не вернула AdImageHash")
+        else:
+            value = exact_int(value, f"{key} {id_field}")
+        values.append(value)
+    if warnings:
+        raise OperatorError(
+            "Direct mutation вернула Warnings; дальнейшие стадии остановлены",
+            partial={"provider_warnings": warnings, "provider_values": values},
+        )
+    if expected_ids is not None and sorted(values) != sorted(expected_ids):
+        raise OperatorError(f"{key} вернул другие IDs")
+    if len(set(values)) != len(values):
+        raise OperatorError(f"{key} вернул дублирующиеся значения")
+    return values
+
+
+def _responsive_values(ad: Mapping[str, Any]) -> dict[str, Any]:
+    creative = ad.get("ResponsiveAd")
+    if not isinstance(creative, Mapping):
+        raise OperatorError(f"Ad {ad.get('Id')} не является полным ResponsiveAd")
+    titles = creative.get("Titles")
+    texts = creative.get("Texts")
+    if not isinstance(titles, list) or not isinstance(texts, list):
+        raise OperatorError("ResponsiveAd titles/texts readback отсутствует")
+    image_container = creative.get("AdImages")
+    image_items = [] if image_container is None else image_container.get("Items")
+    if not isinstance(image_items, list):
+        raise OperatorError("ResponsiveAd AdImages readback некорректен")
+    return {
+        "titles": [item.get("Title") for item in titles if isinstance(item, Mapping)],
+        "texts": [item.get("Text") for item in texts if isinstance(item, Mapping)],
+        "href": creative.get("Href"),
+        "display": creative.get("DisplayUrlPath"),
+        "sitelink": creative.get("SitelinkSetId"),
+        "images": [item.get("ImageHash") for item in image_items if isinstance(item, Mapping)],
+    }
+
+
+def read_all_sitelinks(api: Any) -> list[dict[str, Any]]:
+    """Read account-wide sets so a retry reuses sets created by a partial run."""
+    result = api.call(
+        guard.CANONICAL_API_VERSION,
+        "sitelinks",
+        "get",
+        {
+            "FieldNames": ["Id"],
+            "SitelinkFieldNames": ["Title", "Href", "Description", "TurboPageId"],
+            "Page": {"Limit": 10000, "Offset": 0},
+        },
+        use_client_login=True,
+    )
+    rows = result.get("SitelinksSets")
+    if not isinstance(rows, list):
+        raise OperatorError("Account-wide sitelinks.get не вернул SitelinksSets")
+    if len(rows) >= 10000 or result.get("LimitedBy") is not None:
+        raise OperatorError("Account-wide sitelinks.get достиг page limit; reuse не доказан")
+    ids = [exact_int(item.get("Id"), "SitelinksSet Id") for item in rows]
+    if len(ids) != len(set(ids)):
+        raise OperatorError("Account-wide sitelinks.get вернул duplicate IDs")
+    return sorted((dict(item) for item in rows), key=lambda item: item["Id"])
+
+
+def read_target_snapshot(api: Any, *, require_baseline_ads: bool = True) -> dict[str, Any]:
+    campaign = guard.read_campaign(api, guard.CANONICAL_API_VERSION)
+    guard.validate_canonical_campaign(
+        campaign,
+        require_draft=False,
+        allowed_states=("SUSPENDED",),
+    )
+    ads = guard.read_ads(api, include_creatives=True)
+    if require_baseline_ads:
+        guard.validate_creative_cas(ads)
+    groups = guard.read_adgroups(api)
+    keywords = guard.read_keywords(api)
+    sitelink_ids = guard._sitelink_ids(ads)
+    sitelinks = guard.read_sitelinks(api, sitelink_ids)
+    all_sitelinks = read_all_sitelinks(api)
+    raw = {
+        "campaign": campaign,
+        "adgroups": groups,
+        "ads": ads,
+        "keywords": keywords,
+        "sitelinks": sitelinks,
+        "all_sitelinks": all_sitelinks,
+    }
+    return {
+        "raw": raw,
+        "sha256": sha256_json(raw),
+        "counts": {
+            "adgroups": len(groups),
+            "ads": len(ads),
+            "keywords": len(keywords),
+            "sitelinks": len(sitelinks),
+            "account_sitelinks": len(all_sitelinks),
+        },
+    }
+
+
+def validate_baseline(snapshot: Mapping[str, Any]) -> None:
+    raw = snapshot.get("raw")
+    if not isinstance(raw, Mapping):
+        raise OperatorError("Target snapshot raw отсутствует")
+    campaign = raw.get("campaign")
+    if not isinstance(campaign, Mapping):
+        raise OperatorError("Target campaign отсутствует")
+    if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Target snapshot содержит другую кампанию")
+    if campaign.get("Type") != "UNIFIED_CAMPAIGN" or campaign.get("Status") != "ACCEPTED" or campaign.get("State") != "SUSPENDED":
+        raise OperatorError("Creative baseline требует UNIFIED/ACCEPTED/SUSPENDED")
+    unified = guard.validate_canonical_campaign(
+        campaign,
+        require_draft=False,
+        allowed_states=("SUSPENDED",),
+    )
+    if unified.get("PackageBiddingStrategy") is not None:
+        raise OperatorError("Пакетная стратегия блокирует creative apply")
+    measurement = guard.measurement(campaign, allowed_states=("SUSPENDED",))
+    if measurement != {"CounterIds": [EXPECTED_COUNTER_ID], "PriorityGoals": None}:
+        raise OperatorError("Measurement baseline изменился; creative apply заблокирован")
+
+    groups = raw.get("adgroups")
+    if not isinstance(groups, list) or {item.get("Id") for item in groups} != set(GROUP_IDS.values()):
+        raise OperatorError("Baseline должен содержать ровно пять exact groups")
+    for item in groups:
+        group_id = exact_int(item.get("Id"), "AdGroup Id")
+        negatives = item.get("NegativeKeywords", {}).get("Items")
+        if item.get("Name") != BASELINE_GROUP_NAMES[group_id] or sorted(negatives or []) != BASELINE_NEGATIVES:
+            raise OperatorError(f"AdGroup {group_id} baseline drift")
+
+    ads = raw.get("ads")
+    if not isinstance(ads, list) or {item.get("Id") for item in ads} != set(EXISTING_AD_IDS.values()):
+        raise OperatorError("Baseline должен содержать пять exact 64-bit ads")
+    for ad in ads:
+        ad_id = exact_int(ad.get("Id"), "Ad Id")
+        expected = BASELINE_ADS[ad_id]
+        if exact_int(ad.get("AdGroupId"), "AdGroup Id") != expected["group"]:
+            raise OperatorError(f"Ad {ad_id} group drift")
+        if ad.get("Status") != "ACCEPTED" or ad.get("State") != "OFF":
+            raise OperatorError(f"Ad {ad_id} lifecycle baseline drift")
+        if _responsive_values(ad) != {key: expected[key] for key in ("titles", "texts", "href", "display", "sitelink", "images")}:
+            raise OperatorError(f"Ad {ad_id} creative baseline drift")
+
+    keywords = raw.get("keywords")
+    if not isinstance(keywords, list) or {item.get("Id") for item in keywords} != BASELINE_KEYWORD_IDS:
+        raise OperatorError("Baseline keyword IDs drift")
+    by_id = {exact_int(item.get("Id"), "Keyword Id"): item for item in keywords}
+    for keyword_id, (group_id, phrase) in BASELINE_EXPLICIT_KEYWORDS.items():
+        item = by_id[keyword_id]
+        if item.get("Keyword") != phrase or item.get("AdGroupId") != group_id or item.get("State") != "ON":
+            raise OperatorError(f"Keyword {keyword_id} baseline drift")
+    for keyword_id, group_id in AUTOTARGETING_IDS.items():
+        item = by_id[keyword_id]
+        if item.get("Keyword") != "---autotargeting" or item.get("AdGroupId") != group_id or item.get("State") != "ON":
+            raise OperatorError(f"Autotargeting {keyword_id} baseline drift")
+
+    sitelinks = raw.get("sitelinks")
+    if not isinstance(sitelinks, list) or [item.get("Id") for item in sitelinks] != [BASELINE_SITELINK_SET_ID]:
+        raise OperatorError("Baseline sitelink set drift")
+
+
+def validate_partial_apply_receipt() -> dict[str, Any]:
+    if (
+        not PARTIAL_APPLY_RECEIPT.is_file()
+        or PARTIAL_APPLY_RECEIPT.is_symlink()
+        or _sha256_file(PARTIAL_APPLY_RECEIPT) != PARTIAL_APPLY_RECEIPT_SHA256
+    ):
+        raise OperatorError("Pinned partial apply receipt отсутствует или SHA drift")
+    try:
+        receipt = json.loads(PARTIAL_APPLY_RECEIPT.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Pinned partial apply receipt невалиден") from None
+    stages = receipt.get("stage_receipts")
+    if (
+        receipt.get("status") != "manual_inspection_required_suspended"
+        or receipt.get("final_campaign_state") != "SUSPENDED"
+        or receipt.get("protected_unchanged") is not True
+        or receipt.get("mutation_requests") != 4
+        or [item.get("kind") for item in stages or []]
+        != ["sitelinks_add", "adgroups_update", "keywords_update"]
+        or receipt.get("provider_values")
+        != [
+            57_915_373_903,
+            57_915_373_905,
+            *PARTIAL_NEW_KEYWORDS.keys(),
+        ]
+        or [item.get("Code") for item in receipt.get("provider_warnings", [])]
+        != [10140, 10140]
+    ):
+        raise OperatorError("Pinned partial apply receipt не соответствует recovery boundary")
+    resolved = stages[0].get("resolved_ids")
+    if resolved != PARTIAL_SITELINK_IDS:
+        raise OperatorError("Pinned partial receipt sitelink IDs drift")
+    return {
+        "path": str(PARTIAL_APPLY_RECEIPT.relative_to(PROJECT_ROOT)),
+        "sha256": PARTIAL_APPLY_RECEIPT_SHA256,
+        "completed_stages": [
+            "sitelinks_add",
+            "adgroups_update",
+            "keywords_update",
+            "keywords_add_partial_provider_success",
+        ],
+        "provider_warning_codes": [10140, 10140],
+        "existing_alias_ids": [57_915_373_903, 57_915_373_905],
+        "new_keyword_ids": list(PARTIAL_NEW_KEYWORDS),
+    }
+
+
+def validate_second_partial_receipt() -> dict[str, Any]:
+    if (
+        not SECOND_PARTIAL_RECEIPT.is_file()
+        or SECOND_PARTIAL_RECEIPT.is_symlink()
+        or _sha256_file(SECOND_PARTIAL_RECEIPT)
+        != SECOND_PARTIAL_RECEIPT_SHA256
+    ):
+        raise OperatorError("Pinned second partial receipt отсутствует или SHA drift")
+    try:
+        receipt = json.loads(SECOND_PARTIAL_RECEIPT.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Pinned second partial receipt невалиден") from None
+    errors = receipt.get("provider_errors")
+    mutation_kinds = [
+        item.get("mutation_kind")
+        for item in receipt.get("request_log", [])
+        if item.get("mutation_kind") is not None
+    ]
+    if (
+        receipt.get("status") != "manual_inspection_required_suspended"
+        or receipt.get("final_campaign_state") != "SUSPENDED"
+        or receipt.get("protected_unchanged") is not True
+        or receipt.get("mutation_requests") != 1
+        or receipt.get("preimage_cas_sha256")
+        != "3b7498bc55626c3dc0d8baaa6f17ab3e2207011b1f09ff14aba7c57666e26285"
+        or receipt.get("stage_receipts") != []
+        or mutation_kinds != ["keywords_suspend"]
+        or not isinstance(errors, list)
+        or len(errors) != 1
+        or errors[0].get("Code") != 8305
+        or errors[0].get("Details")
+        != "Автотаргетинг не может быть остановлен"
+    ):
+        raise OperatorError("Pinned second partial receipt не совпал с error 8305 boundary")
+    return {
+        "path": str(SECOND_PARTIAL_RECEIPT.relative_to(PROJECT_ROOT)),
+        "sha256": SECOND_PARTIAL_RECEIPT_SHA256,
+        "provider_error_code": 8305,
+        "provider_error_details": "Автотаргетинг не может быть остановлен",
+        "attempted_autotarget_id": PARKED_AUTOTARGET_ID,
+        "campaign_state": "SUSPENDED",
+        "protected_unchanged": True,
+    }
+
+
+def validate_third_partial_receipt() -> dict[str, Any]:
+    """Pin the v5 EPK rejection before permitting a v501-only recovery."""
+    if (
+        not THIRD_PARTIAL_RECEIPT.is_file()
+        or THIRD_PARTIAL_RECEIPT.is_symlink()
+        or _sha256_file(THIRD_PARTIAL_RECEIPT)
+        != THIRD_PARTIAL_RECEIPT_SHA256
+    ):
+        raise OperatorError("Pinned third partial receipt отсутствует или SHA drift")
+    try:
+        receipt = json.loads(THIRD_PARTIAL_RECEIPT.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Pinned third partial receipt невалиден") from None
+    errors = receipt.get("provider_errors")
+    mutation_rows = [
+        {
+            "version": item.get("version"),
+            "service": item.get("service"),
+            "method": item.get("method"),
+            "mutation_kind": item.get("mutation_kind"),
+        }
+        for item in receipt.get("request_log", [])
+        if item.get("mutation_kind") is not None
+    ]
+    if (
+        receipt.get("mode") != "recover-partial"
+        or receipt.get("status") != "manual_inspection_required_suspended"
+        or receipt.get("final_campaign_state") != "SUSPENDED"
+        or receipt.get("campaign_unchanged") is not True
+        or receipt.get("protected_unchanged") is not True
+        or receipt.get("mutation_requests") != 1
+        or receipt.get("preimage_cas_sha256")
+        != THIRD_PARTIAL_PREIMAGE_CAS_SHA256
+        or receipt.get("payload", {}).get("plan_sha256")
+        != THIRD_PARTIAL_PLAN_SHA256
+        or receipt.get("stage_receipts") != []
+        or mutation_rows
+        != [
+            {
+                "version": "v5",
+                "service": "ads",
+                "method": "update",
+                "mutation_kind": "ads_update",
+            }
+        ]
+        or not isinstance(errors, list)
+        or len(errors) != 1
+        or errors[0].get("Code") != 3500
+        or errors[0].get("Details")
+        != "Объявление данного типа не поддерживается в v5, используйте v501"
+    ):
+        raise OperatorError("Pinned third partial receipt не совпал с error 3500 boundary")
+    return {
+        "path": str(THIRD_PARTIAL_RECEIPT.relative_to(PROJECT_ROOT)),
+        "sha256": THIRD_PARTIAL_RECEIPT_SHA256,
+        "provider_error_code": 3500,
+        "provider_error_details": (
+            "Объявление данного типа не поддерживается в v5, используйте v501"
+        ),
+        "rejected_request": mutation_rows[0],
+        "preimage_cas_sha256": THIRD_PARTIAL_PREIMAGE_CAS_SHA256,
+        "campaign_state": "SUSPENDED",
+        "campaign_unchanged": True,
+        "protected_unchanged": True,
+        "completed_ad_stages": [],
+    }
+
+
+def validate_partial_state(
+    snapshot: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    after_autotarget_error: bool = False,
+    after_epk_v5_error: bool = False,
+) -> dict[str, Any]:
+    if after_epk_v5_error and not after_autotarget_error:
+        raise OperatorError("EPK v5 boundary требует подтверждённый 8305 boundary")
+    evidence = validate_partial_apply_receipt()
+    second_evidence = (
+        validate_second_partial_receipt() if after_autotarget_error else None
+    )
+    third_evidence = (
+        validate_third_partial_receipt() if after_epk_v5_error else None
+    )
+    if (
+        after_epk_v5_error
+        and snapshot.get("sha256") != THIRD_PARTIAL_PREIMAGE_CAS_SHA256
+    ):
+        raise OperatorError(
+            "Fresh post-3500 snapshot не совпал с exact preimage CAS third receipt"
+        )
+    raw = snapshot.get("raw")
+    if not isinstance(raw, Mapping):
+        raise OperatorError("Partial snapshot raw отсутствует")
+    campaign = raw.get("campaign")
+    if not isinstance(campaign, Mapping):
+        raise OperatorError("Partial campaign отсутствует")
+    if (
+        exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID
+        or campaign.get("Type") != "UNIFIED_CAMPAIGN"
+        or campaign.get("Status") != "ACCEPTED"
+        or campaign.get("State") != "SUSPENDED"
+    ):
+        raise OperatorError("Partial recovery требует exact ACCEPTED/SUSPENDED campaign")
+    unified = guard.validate_canonical_campaign(
+        campaign, require_draft=False, allowed_states=("SUSPENDED",)
+    )
+    if unified.get("PackageBiddingStrategy") is not None:
+        raise OperatorError("Partial recovery запрещён при package bidding")
+    if guard.measurement(campaign, allowed_states=("SUSPENDED",)) != {
+        "CounterIds": [EXPECTED_COUNTER_ID],
+        "PriorityGoals": None,
+    }:
+        raise OperatorError("Partial recovery measurement drift")
+
+    desired_groups = {
+        exact_int(item.get("Id"), "Desired AdGroup Id"): item
+        for item in _current_stage_params(payload, "adgroups", "update")["AdGroups"]
+    }
+    groups = {
+        exact_int(item.get("Id"), "AdGroup Id"): item for item in raw.get("adgroups", [])
+    }
+    if set(groups) != set(GROUP_IDS.values()) or set(desired_groups) != set(groups):
+        raise OperatorError("Partial recovery group ID set drift")
+    group_diffs: list[dict[str, Any]] = []
+    for group_id, desired in desired_groups.items():
+        actual = groups[group_id]
+        if (
+            actual.get("Name") != desired.get("Name")
+            or sorted(actual.get("NegativeKeywords", {}).get("Items") or [])
+            != sorted(desired.get("NegativeKeywords", {}).get("Items") or [])
+        ):
+            actual_negatives = set(actual.get("NegativeKeywords", {}).get("Items") or [])
+            desired_negatives = set(desired.get("NegativeKeywords", {}).get("Items") or [])
+            group_diffs.append(
+                {
+                    "group_id": group_id,
+                    "actual_name": actual.get("Name"),
+                    "desired_name": desired.get("Name"),
+                    "missing_negatives": sorted(desired_negatives - actual_negatives),
+                    "extra_negatives": sorted(actual_negatives - desired_negatives),
+                }
+            )
+    if group_diffs:
+        raise OperatorError(
+            "Partial recovery groups have provider-normalized drift",
+            partial={"group_diffs": group_diffs},
+        )
+
+    ads = raw.get("ads")
+    if not isinstance(ads, list) or {item.get("Id") for item in ads} != set(
+        EXISTING_AD_IDS.values()
+    ):
+        raise OperatorError("Partial recovery requires exact five unchanged ads")
+    for ad in ads:
+        ad_id = exact_int(ad.get("Id"), "Ad Id")
+        expected = BASELINE_ADS[ad_id]
+        if (
+            ad.get("AdGroupId") != expected["group"]
+            or ad.get("Status") != "ACCEPTED"
+            or ad.get("State") != "OFF"
+            or _responsive_values(ad)
+            != {
+                key: expected[key]
+                for key in ("titles", "texts", "href", "display", "sitelink", "images")
+            }
+        ):
+            raise OperatorError(f"Partial recovery ad preimage drift {ad_id}")
+    parked_group_ads = [
+        ad
+        for ad in ads
+        if ad.get("AdGroupId") == GROUP_IDS["parked_extrime_toyota"]
+    ]
+    if (
+        len(parked_group_ads) != 1
+        or parked_group_ads[0].get("Id") != PARKED_AD_ID
+        or parked_group_ads[0].get("State") != "OFF"
+    ):
+        raise OperatorError("Parked group must have exact sole pre-recovery ad ...8815")
+
+    desired_updates = {
+        exact_int(item.get("Id"), "Desired Keyword Id"): item.get("Keyword")
+        for item in payload["keywords"]["update"]
+    }
+    keyword_rows = raw.get("keywords")
+    expected_ids = BASELINE_KEYWORD_IDS | set(PARTIAL_NEW_KEYWORDS)
+    if not isinstance(keyword_rows, list) or {item.get("Id") for item in keyword_rows} != expected_ids:
+        raise OperatorError("Partial recovery keyword ID set is not exact baseline+five")
+    keywords = {exact_int(item.get("Id"), "Keyword Id"): item for item in keyword_rows}
+    already_suspended_explicit: list[int] = []
+    remaining_explicit_suspend: list[int] = []
+    for keyword_id, (group_id, baseline_phrase) in BASELINE_EXPLICIT_KEYWORDS.items():
+        item = keywords[keyword_id]
+        expected_phrase = desired_updates.get(keyword_id, baseline_phrase)
+        state = item.get("State")
+        if keyword_id in KEYWORD_SUSPEND_IDS and after_autotarget_error:
+            if state == "SUSPENDED":
+                already_suspended_explicit.append(keyword_id)
+            elif state == "ON":
+                remaining_explicit_suspend.append(keyword_id)
+            else:
+                raise OperatorError(
+                    f"Second partial explicit keyword state drift {keyword_id}"
+                )
+        elif state != "ON":
+            raise OperatorError(f"Partial recovery keyword state drift {keyword_id}")
+        elif keyword_id in KEYWORD_SUSPEND_IDS:
+            remaining_explicit_suspend.append(keyword_id)
+        if (
+            item.get("AdGroupId") != group_id
+            or item.get("Keyword") != expected_phrase
+        ):
+            raise OperatorError(f"Partial recovery keyword drift {keyword_id}")
+    if after_autotarget_error and not already_suspended_explicit:
+        raise OperatorError("Second partial receipt did not produce any explicit suspend")
+    for keyword_id, group_id in AUTOTARGETING_IDS.items():
+        item = keywords[keyword_id]
+        if (
+            item.get("AdGroupId") != group_id
+            or item.get("Keyword") != "---autotargeting"
+            or item.get("State") != "ON"
+        ):
+            raise OperatorError(f"Partial recovery autotargeting drift {keyword_id}")
+    for keyword_id, (group_id, phrase) in PARTIAL_NEW_KEYWORDS.items():
+        item = keywords[keyword_id]
+        if (
+            item.get("AdGroupId") != group_id
+            or item.get("Keyword") != phrase
+            or item.get("State") != "ON"
+        ):
+            raise OperatorError(f"Partial recovery added keyword drift {keyword_id}")
+    desired_add = [
+        (item.get("AdGroupId"), item.get("Keyword"))
+        for item in payload["keywords"]["add"]
+    ]
+    if desired_add != list(PARTIAL_NEW_KEYWORDS.values()):
+        raise OperatorError("Current source add rows do not match partial provider IDs")
+
+    reuse = plan_sitelink_reuse(raw.get("all_sitelinks", []), payload["sitelinkSets"])
+    resolved = resolve_sitelink_ids(reuse, []) if not reuse["add_keys"] else None
+    if reuse["add_keys"] or resolved != PARTIAL_SITELINK_IDS:
+        raise OperatorError("Partial recovery must reuse exact four completed sitelink sets")
+    if [item.get("Id") for item in raw.get("sitelinks", [])] != [BASELINE_SITELINK_SET_ID]:
+        raise OperatorError("Partial recovery ads already reference unexpected sitelinks")
+    remaining_stages = [
+        *(["keywords_suspend"] if remaining_explicit_suspend else []),
+        "ads_update",
+        "ads_add",
+        "ads_suspend",
+    ]
+    if after_epk_v5_error:
+        classification_name = "partial_after_epk_ads_v5_error_3500"
+    elif after_autotarget_error:
+        classification_name = "partial_after_autotarget_8305"
+    else:
+        classification_name = "partial_after_keyword_normalization_warning"
+    return {
+        "classification": classification_name,
+        "campaign_state": "SUSPENDED",
+        "completed_stages": [
+            *evidence["completed_stages"],
+            *(["keywords_suspend_provider_partial_action"] if after_autotarget_error else []),
+        ],
+        "remaining_stages": remaining_stages,
+        "keyword_count": len(keywords),
+        "current_on_explicit_keyword_count": sum(
+            1
+            for item_id in BASELINE_EXPLICIT_KEYWORDS | PARTIAL_NEW_KEYWORDS
+            if keywords[item_id].get("State") == "ON"
+        ),
+        "desired_post_active_explicit_keyword_count": 21,
+        "semantic_yes_phrase_count": SEMANTIC_EVIDENCE_PHRASE_COUNT,
+        "already_suspended_explicit_ids": sorted(already_suspended_explicit),
+        "remaining_explicit_suspend_ids": sorted(remaining_explicit_suspend),
+        "parked_autotarget": {
+            "id": PARKED_AUTOTARGET_ID,
+            "state": "ON",
+            "cannot_suspend_provider_error": 8305 if after_autotarget_error else None,
+            "ad_group_id": GROUP_IDS["parked_extrime_toyota"],
+            "sole_ad_id": PARKED_AD_ID,
+            "sole_ad_current_state": "OFF",
+            "sole_ad_required_post_state": "SUSPENDED",
+        },
+        "sitelink_ids": resolved,
+        "partial_receipt": evidence,
+        "second_partial_receipt": second_evidence,
+        "third_partial_receipt": third_evidence,
+        "ads_post_error_exact_preimage_unchanged": after_epk_v5_error,
+    }
+
+
+def classify_target_state(
+    snapshot: Mapping[str, Any], payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    try:
+        validate_baseline(snapshot)
+        return {"classification": "baseline", "campaign_state": "SUSPENDED"}
+    except OperatorError as baseline_error:
+        try:
+            return validate_partial_state(
+                snapshot,
+                payload,
+                after_autotarget_error=True,
+                after_epk_v5_error=True,
+            )
+        except OperatorError as third_partial_error:
+            try:
+                return validate_partial_state(snapshot, payload)
+            except OperatorError as partial_error:
+                try:
+                    return validate_partial_state(
+                        snapshot, payload, after_autotarget_error=True
+                    )
+                except OperatorError as second_partial_error:
+                    raise OperatorError(
+                        "Target state is not baseline/partial-v1/partial-v2/partial-v3: "
+                        f"baseline={safe_text(baseline_error)}; "
+                        f"partial_v1={safe_text(partial_error)}; "
+                        f"partial_v2={safe_text(second_partial_error)}; "
+                        f"partial_v3={safe_text(third_partial_error)}",
+                        partial={
+                            "partial_state_diagnostic": third_partial_error.partial
+                        },
+                    ) from None
+
+
+def assert_exact_cas(actual: str, expected: str | None) -> None:
+    if not expected or not re.fullmatch(r"[a-f0-9]{64}", expected):
+        raise OperatorError("Apply требует exact --expected-cas-sha256 из свежего dry-run")
+    if actual != expected:
+        raise OperatorError("Target creative/semantic CAS snapshot изменился")
+
+
+def verify_apply_unlock(environ: Mapping[str, str]) -> None:
+    if environ.get(APPLY_GUARD_ENV) != APPLY_GUARD_VALUE:
+        raise OperatorError("Creative apply заблокирован: exact environment unlock отсутствует")
+
+
+def verify_recovery_unlock(environ: Mapping[str, str]) -> None:
+    if environ.get(RECOVERY_GUARD_ENV) != RECOVERY_GUARD_VALUE:
+        raise OperatorError("Partial recovery заблокирован: exact recovery unlock отсутствует")
+
+
+def validate_reused_image(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    item = payload.get("imageEvidence")
+    if not isinstance(item, Mapping):
+        raise OperatorError("Payload image evidence отсутствует")
+    image_hash = item.get("hash")
+    if image_hash != BASELINE_GENERIC_IMAGE_HASH:
+        raise OperatorError("Current plan пытается использовать неподтверждённый image hash")
+    _assert_domain_urls({"sourceUrl": item.get("sourceUrl")})
+    provider_relative = item.get("providerReceipt")
+    if not isinstance(provider_relative, str):
+        raise OperatorError("Image provider receipt отсутствует")
+    provider_path = (PROJECT_ROOT / provider_relative).resolve(strict=True)
+    if provider_path.parent != REPORT_ROOT.resolve() or not provider_path.is_file():
+        raise OperatorError("Image provider receipt вышел за разрешённый report scope")
+    try:
+        provider = json.loads(provider_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError("Image provider receipt невалиден") from None
+    if (
+        provider.get("login") != EXPECTED_LOGIN
+        or exact_int(provider.get("campaignId"), "Image receipt CampaignId")
+        != TARGET_CAMPAIGN_ID
+        or provider.get("readbackVerified") is not True
+        or provider.get("moderationCalled") is not False
+        or provider.get("resumeCalled") is not False
+        or provider.get("budgetChanged") is not False
+        or provider.get("selectedHashes", {}).get("generic") != image_hash
+    ):
+        raise OperatorError("Image provider receipt identity/readback guard не совпал")
+    uploads = provider.get("uploads")
+    accepted = [
+        row
+        for row in uploads or []
+        if isinstance(row, Mapping)
+        and row.get("status") == "uploaded"
+        and row.get("hash") == image_hash
+    ]
+    if len(accepted) != 1 or accepted[0].get("expected", {}).get("sha256") != item.get("sha256"):
+        raise OperatorError("Image provider receipt SHA/hash proof не совпал")
+    return image_hash, {
+        "hash": image_hash,
+        "source_url": item.get("sourceUrl"),
+        "sha256": item.get("sha256"),
+        "provider_receipt": provider_relative,
+        "provider_receipt_sha256": _sha256_file(provider_path),
+        "readback_verified": True,
+        "upload_skipped_reuse": True,
+    }
+
+
+def _normalise_sitelinks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise OperatorError("Sitelink set пуст или имеет неверный тип")
+    normalised: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise OperatorError("Sitelink item имеет неверный тип")
+        normalised.append(
+            {
+                "Title": item.get("Title"),
+                "Href": item.get("Href"),
+                "Description": item.get("Description"),
+            }
+        )
+    return normalised
+
+
+def plan_sitelink_reuse(
+    existing_sets: Sequence[Mapping[str, Any]],
+    desired_sets: Mapping[str, Any],
+) -> dict[str, Any]:
+    existing_by_signature: dict[str, int] = {}
+    for row in existing_sets:
+        item_id = exact_int(row.get("Id"), "Existing SitelinkSet Id")
+        signature = sha256_json(_normalise_sitelinks(row.get("Sitelinks")))
+        existing_by_signature.setdefault(signature, item_id)
+
+    resolved: dict[str, int] = {}
+    add_keys: list[str] = []
+    alias_of: dict[str, str] = {}
+    first_desired: dict[str, str] = {}
+    for key, links in desired_sets.items():
+        signature = sha256_json(_normalise_sitelinks(links))
+        if signature in existing_by_signature:
+            resolved[key] = existing_by_signature[signature]
+        elif signature in first_desired:
+            alias_of[key] = first_desired[signature]
+        else:
+            first_desired[signature] = key
+            add_keys.append(key)
+    return {
+        "resolved_ids": resolved,
+        "add_keys": add_keys,
+        "alias_of": alias_of,
+        "reused_count": len(resolved),
+        "new_unique_count": len(add_keys),
+    }
+
+
+def build_sitelinks_add_request(
+    payload: Mapping[str, Any], add_keys: Sequence[str]
+) -> dict[str, Any]:
+    if not add_keys:
+        raise OperatorError("Sitelinks.add нельзя вызывать с пустым списком")
+    desired = payload.get("sitelinkSets")
+    if not isinstance(desired, Mapping) or any(key not in desired for key in add_keys):
+        raise OperatorError("Sitelinks.add keys вышли за current plan")
+    item = {
+        "version": "v501",
+        "service": "sitelinks",
+        "method": "add",
+        "params": {
+            "SitelinksSets": [
+                {"Sitelinks": copy.deepcopy(desired[key])} for key in add_keys
+            ]
+        },
+    }
+    assert_mutation_contract(
+        item["version"], item["service"], item["method"], item["params"], "sitelinks_add"
+    )
+    return item
+
+
+def resolve_sitelink_ids(
+    reuse_plan: Mapping[str, Any], new_values: Sequence[int]
+) -> dict[str, int]:
+    add_keys = list(reuse_plan.get("add_keys", []))
+    if len(add_keys) != len(new_values):
+        raise OperatorError("Sitelink provider ID count не совпал с add plan")
+    resolved = {
+        key: exact_int(value, "Reused SitelinkSet Id")
+        for key, value in dict(reuse_plan.get("resolved_ids", {})).items()
+    }
+    for key, value in zip(add_keys, new_values, strict=True):
+        resolved[key] = exact_int(value, "New SitelinkSet Id")
+    for key, source in dict(reuse_plan.get("alias_of", {})).items():
+        if source not in resolved:
+            raise OperatorError("Sitelink desired dedup alias не удалось разрешить")
+        resolved[key] = resolved[source]
+    if set(resolved) != {"generic", "extrimeUaz", "extrimeToyota", "hunter"}:
+        raise OperatorError("Sitelink resolution не покрывает current plan")
+    return resolved
+
+
+def _replace_creative_tokens(
+    creative: Mapping[str, Any],
+    *,
+    image_hashes: Mapping[str, str],
+    sitelink_ids: Mapping[str, int],
+) -> dict[str, Any]:
+    value = copy.deepcopy(dict(creative))
+    image_items = value.get("AdImageHashes", {}).get("Items")
+    if not isinstance(image_items, list) or len(image_items) != 1:
+        raise OperatorError("Creative AdImageHashes placeholder некорректен")
+    token = image_items[0]
+    image_map = {
+        "{{AD_IMAGE_HASH:extrime}}": image_hashes["extrime"],
+        "{{AD_IMAGE_HASH:hunter}}": image_hashes["hunter"],
+        BASELINE_GENERIC_IMAGE_HASH: BASELINE_GENERIC_IMAGE_HASH,
+    }
+    if token not in image_map:
+        raise OperatorError("Creative image placeholder неизвестен")
+    value["AdImageHashes"] = {"Items": [image_map[token]]}
+    sitelink_token = value.get("SitelinkSetId")
+    sitelink_map = {
+        "{{SITELINK_SET_ID:generic}}": sitelink_ids["generic"],
+        "{{SITELINK_SET_ID:extrimeUaz}}": sitelink_ids["extrimeUaz"],
+        "{{SITELINK_SET_ID:extrimeToyota}}": sitelink_ids["extrimeToyota"],
+        "{{SITELINK_SET_ID:hunter}}": sitelink_ids["hunter"],
+    }
+    if sitelink_token not in sitelink_map:
+        raise OperatorError("Creative sitelink placeholder неизвестен")
+    value["SitelinkSetId"] = sitelink_map[sitelink_token]
+    _assert_domain_urls(value)
+    return value
+
+
+def _current_stage_params(
+    payload: Mapping[str, Any], service: str, method: str
+) -> dict[str, Any]:
+    matches = [
+        item.get("request", {}).get("params")
+        for item in payload.get("stagedRequests", [])
+        if item.get("service") == service
+        and item.get("request", {}).get("method") == method
+    ]
+    if len(matches) != 1 or not isinstance(matches[0], Mapping):
+        raise OperatorError(f"Current plan stage {service}.{method} не найден однозначно")
+    return copy.deepcopy(dict(matches[0]))
+
+
+def build_materialized_requests(
+    payload: Mapping[str, Any],
+    *,
+    image_hash: str,
+    sitelink_ids: Mapping[str, int],
+) -> dict[str, dict[str, Any]]:
+    if image_hash != BASELINE_GENERIC_IMAGE_HASH:
+        raise OperatorError("Materialization разрешает только provider-verified image hash")
+    creatives = payload["creatives"]
+    resolved = {
+        key: _replace_creative_tokens(
+            value,
+            image_hashes={"extrime": image_hash, "hunter": image_hash},
+            sitelink_ids=sitelink_ids,
+        )
+        for key, value in creatives.items()
+    }
+    existing_mapping = {
+        EXISTING_AD_IDS["brand"]: resolved["brand"],
+        EXISTING_AD_IDS["category"]: resolved["category"],
+        EXISTING_AD_IDS["extrime_uaz"]: resolved["extrimeUaz"],
+        # Update exact ...8815 before parking it, so every existing ad has a
+        # verified same-model sitelink/image preimage and no rounded ID.
+        EXISTING_AD_IDS["parked_extrime_toyota"]: resolved["extrimeToyota"],
+        EXISTING_AD_IDS["hunter"]: resolved["hunter"],
+    }
+    add_creative = copy.deepcopy(resolved["extrimeToyota"])
+    add_creative["AdImageHashes"] = list(add_creative["AdImageHashes"]["Items"])
+
+    requests = {
+        "sitelinks_add": {
+            **build_sitelinks_add_request(payload, list(payload["sitelinkSets"])),
+        },
+        "adgroups_update": {
+            "version": "v501",
+            "service": "adgroups",
+            "method": "update",
+            "params": _current_stage_params(payload, "adgroups", "update"),
+        },
+        "keywords_update": {
+            "version": "v5",
+            "service": "keywords",
+            "method": "update",
+            "params": {"Keywords": copy.deepcopy(payload["keywords"]["update"])},
+        },
+        "keywords_add": {
+            "version": "v5",
+            "service": "keywords",
+            "method": "add",
+            "params": {"Keywords": copy.deepcopy(payload["keywords"]["add"])},
+        },
+        "keywords_suspend": {
+            "version": "v5",
+            "service": "keywords",
+            "method": "suspend",
+            "params": {"SelectionCriteria": {"Ids": sorted(KEYWORD_SUSPEND_IDS)}},
+        },
+        "ads_update": {
+            "version": "v501",
+            "service": "ads",
+            "method": "update",
+            "params": {
+                "Ads": [
+                    {"Id": ad_id, "ResponsiveAd": creative}
+                    for ad_id, creative in existing_mapping.items()
+                ]
+            },
+        },
+        "ads_add": {
+            "version": "v501",
+            "service": "ads",
+            "method": "add",
+            "params": {
+                "Ads": [
+                    {
+                        "AdGroupId": GROUP_IDS["extrime_family"],
+                        "ResponsiveAd": add_creative,
+                    }
+                ]
+            },
+        },
+        "ads_suspend": {
+            "version": "v501",
+            "service": "ads",
+            "method": "suspend",
+            "params": {"SelectionCriteria": {"Ids": [PARKED_AD_ID]}},
+        },
+    }
+    for kind, item in requests.items():
+        assert_mutation_contract(
+            item["version"], item["service"], item["method"], item["params"], kind
+        )
+    return requests
+
+
+def _request_summary(requests: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "stage": index,
+            "mutation_kind": kind,
+            "version": item["version"],
+            "service": item["service"],
+            "method": item["method"],
+        }
+        for index, (kind, item) in enumerate(requests.items(), 1)
+    ]
+
+
+def _campaign_safety(api: Any, baseline_campaign: Mapping[str, Any]) -> dict[str, Any]:
+    current = guard.read_campaign(api, guard.CANONICAL_API_VERSION)
+    guard.validate_canonical_campaign(current, require_draft=False, allowed_states=("SUSPENDED",))
+    if guard.sha256_json(current) != guard.sha256_json(baseline_campaign):
+        raise OperatorError("Campaign CAS изменился во время creative stages")
+    return {
+        "state": current.get("State"),
+        "status": current.get("Status"),
+        "sha256": guard.sha256_json(current),
+    }
+
+
+def _mutate_stage(
+    api: Any,
+    kind: str,
+    item: Mapping[str, Any],
+    *,
+    baseline_campaign: Mapping[str, Any],
+    protected_before: Mapping[str, Any],
+) -> dict[str, Any]:
+    before = _campaign_safety(api, baseline_campaign)
+    result = api.call(
+        item["version"],
+        item["service"],
+        item["method"],
+        item["params"],
+        use_client_login=True,
+        mutation_kind=kind,
+    )
+    after = _campaign_safety(api, baseline_campaign)
+    protected_after = guard.read_protected_snapshot(api)
+    guard.assert_protected_equal(protected_before, protected_after)
+    return {"result": result, "campaign_before": before, "campaign_after": after}
+
+
+def _creative_expected(value: Mapping[str, Any]) -> dict[str, Any]:
+    hashes = value.get("AdImageHashes", {}).get("Items")
+    return {
+        "titles": list(value.get("Titles", [])),
+        "texts": list(value.get("Texts", [])),
+        "href": value.get("Href"),
+        "display": value.get("DisplayUrlPath"),
+        "sitelink": value.get("SitelinkSetId"),
+        "images": list(hashes or []),
+    }
+
+
+def verify_post_readback(
+    snapshot: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    requests: Mapping[str, Mapping[str, Any]],
+    *,
+    new_keyword_ids: Sequence[int],
+    new_ad_id: int,
+    sitelink_ids: Mapping[str, int],
+) -> dict[str, Any]:
+    raw = snapshot["raw"]
+    campaign = raw["campaign"]
+    if campaign.get("State") != "SUSPENDED":
+        raise OperatorError("Post-readback campaign is not SUSPENDED")
+
+    groups = {exact_int(item.get("Id"), "AdGroup Id"): item for item in raw["adgroups"]}
+    desired_groups = requests["adgroups_update"]["params"]["AdGroups"]
+    if set(groups) != set(GROUP_IDS.values()):
+        raise OperatorError("Post-readback group ID set drift")
+    for desired in desired_groups:
+        actual = groups[desired["Id"]]
+        if actual.get("Name") != desired.get("Name"):
+            raise OperatorError(f"Post-readback group name mismatch {desired['Id']}")
+        if sorted(actual.get("NegativeKeywords", {}).get("Items") or []) != sorted(desired["NegativeKeywords"]["Items"]):
+            raise OperatorError(f"Post-readback negatives mismatch {desired['Id']}")
+
+    ads = {exact_int(item.get("Id"), "Ad Id"): item for item in raw["ads"]}
+    if set(ads) != set(EXISTING_AD_IDS.values()) | {new_ad_id}:
+        raise OperatorError("Post-readback ad ID set is not exact baseline+one")
+    desired_ads = {
+        item["Id"]: item["ResponsiveAd"]
+        for item in requests["ads_update"]["params"]["Ads"]
+    }
+    for ad_id, desired in desired_ads.items():
+        if _responsive_values(ads[ad_id]) != _creative_expected(desired):
+            raise OperatorError(f"Post-readback creative mismatch {ad_id}")
+    add_desired = copy.deepcopy(requests["ads_add"]["params"]["Ads"][0]["ResponsiveAd"])
+    add_desired["AdImageHashes"] = {"Items": add_desired["AdImageHashes"]}
+    if ads[new_ad_id].get("AdGroupId") != GROUP_IDS["extrime_family"] or _responsive_values(ads[new_ad_id]) != _creative_expected(add_desired):
+        raise OperatorError("Post-readback new Extrime Toyota ad mismatch")
+    if ads[PARKED_AD_ID].get("State") != "SUSPENDED":
+        raise OperatorError("Parked existing ad is not SUSPENDED")
+    parked_group_ads = [
+        item
+        for item in ads.values()
+        if item.get("AdGroupId") == GROUP_IDS["parked_extrime_toyota"]
+    ]
+    if (
+        len(parked_group_ads) != 1
+        or parked_group_ads[0].get("Id") != PARKED_AD_ID
+        or parked_group_ads[0].get("State") != "SUSPENDED"
+    ):
+        raise OperatorError(
+            "Parked group can retain autotargeting only with exact sole suspended ad"
+        )
+    active_ad_ids = [
+        item_id for item_id, item in ads.items() if item.get("State") != "SUSPENDED"
+    ]
+    if len(active_ad_ids) != 5:
+        raise OperatorError("Post-readback требует ровно 6 ads total / 5 non-suspended")
+
+    keywords = {exact_int(item.get("Id"), "Keyword Id"): item for item in raw["keywords"]}
+    expected_keyword_ids = BASELINE_KEYWORD_IDS | set(new_keyword_ids)
+    if set(keywords) != expected_keyword_ids:
+        raise OperatorError("Post-readback keyword ID set is not exact baseline+five")
+    for desired in requests["keywords_update"]["params"]["Keywords"]:
+        if keywords[desired["Id"]].get("Keyword") != desired["Keyword"]:
+            raise OperatorError(f"Post-readback keyword mismatch {desired['Id']}")
+    add_rows = requests["keywords_add"]["params"]["Keywords"]
+    actual_added = sorted(
+        (keywords[item_id].get("AdGroupId"), keywords[item_id].get("Keyword"))
+        for item_id in new_keyword_ids
+    )
+    desired_added = sorted((item["AdGroupId"], item["Keyword"]) for item in add_rows)
+    if actual_added != desired_added:
+        raise OperatorError("Post-readback added keyword content mismatch")
+    if any(keywords[item_id].get("State") != "ON" for item_id in new_keyword_ids):
+        raise OperatorError("Post-readback added keyword is not ON")
+    for item_id in KEYWORD_SUSPEND_IDS:
+        if keywords[item_id].get("State") != "SUSPENDED":
+            raise OperatorError(f"Post-readback keyword not suspended {item_id}")
+    parked_auto = keywords[PARKED_AUTOTARGET_ID]
+    if (
+        parked_auto.get("AdGroupId") != GROUP_IDS["parked_extrime_toyota"]
+        or parked_auto.get("Keyword") != "---autotargeting"
+        or parked_auto.get("State") != "ON"
+    ):
+        raise OperatorError("Parked autotargeting post-readback must remain exact ON")
+
+    sitelinks = {exact_int(item.get("Id"), "Sitelink Id"): item for item in raw["sitelinks"]}
+    if set(sitelinks) != set(sitelink_ids.values()):
+        raise OperatorError("Post-readback sitelink IDs do not equal four new sets")
+    desired_sets = list(payload["sitelinkSets"].values())
+    for index, key in enumerate(payload["sitelinkSets"]):
+        actual = sitelinks[sitelink_ids[key]].get("Sitelinks")
+        if _normalise_sitelinks(actual) != _normalise_sitelinks(desired_sets[index]):
+            raise OperatorError(f"Post-readback sitelink content mismatch {key}")
+    return {
+        "campaign_state": "SUSPENDED",
+        "group_count": len(groups),
+        "ad_count_total": len(ads),
+        "ad_count_non_suspended": len(active_ad_ids),
+        "moderation_called": False,
+        "keyword_count": len(keywords),
+        "sitelink_count": len(sitelinks),
+        "new_ad_id": new_ad_id,
+        "new_keyword_ids": list(new_keyword_ids),
+        "parked_autotarget_safety": {
+            "id": PARKED_AUTOTARGET_ID,
+            "state": "ON",
+            "sole_ad_id": PARKED_AD_ID,
+            "sole_ad_state": "SUSPENDED",
+            "non_suspended_ads_in_group": 0,
+        },
+    }
+
+
+ROLLBACK_SAFETY_PLAN = [
+    "Никогда не вызывать Campaigns.resume, Ads.moderate или изменение бюджета/целей.",
+    "При любой частичной стадии оставить campaign 713802902 в SUSPENDED.",
+    "Сохранить exact preimage CAS SHA-256, provider request log и все возвращённые IDs.",
+    "Перед восстановлением выполнить новый read-only snapshot и классифицировать каждую строку как baseline/candidate/unknown.",
+    "Восстанавливать только candidate-строки по exact preimage; unknown не менять и передать на ручную инспекцию.",
+    "Новые ad/keywords/sitelinks/images удалять только после доказанного отвязывания и отдельного mutation unlock.",
+]
+
+
+def _base_receipt(
+    mode: str, payload_metadata: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    receipt = {
+        "schema": 1,
+        "operator": "yandex-direct-creative-713802902-v1",
+        "generated_at": utc_now(),
+        "mode": mode,
+        "status": "in_progress",
+        "scope": {
+            "login": EXPECTED_LOGIN,
+            "campaign_id": TARGET_CAMPAIGN_ID,
+            "domain": EXPECTED_DOMAIN,
+            "protected_campaign_ids": list(PROTECTED_CAMPAIGN_IDS),
+            "campaign_mutation_allowed": False,
+            "moderate_allowed": False,
+            "resume_allowed": False,
+            "budget_or_goal_change_allowed": False,
+        },
+        "rollback_safety_plan": list(ROLLBACK_SAFETY_PLAN),
+    }
+    if payload_metadata is not None:
+        receipt["payload"] = dict(payload_metadata)
+    return receipt
+
+
+def run_dry_run(
+    api: Any,
+    payload: Mapping[str, Any],
+    *,
+    payload_metadata: Mapping[str, Any] | None = None,
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    receipt = _base_receipt("dry-run", payload_metadata)
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    public_preflight = public_http_preflight(payload)
+    identity = guard.prove_identity(api)
+    protected = guard.read_protected_snapshot(api)
+    snapshot = read_target_snapshot(api)
+    classification = classify_target_state(snapshot, payload)
+    image_hash, image_evidence = validate_reused_image(payload)
+    sitelink_reuse = plan_sitelink_reuse(
+        snapshot["raw"]["all_sitelinks"], payload["sitelinkSets"]
+    )
+    dry_sitelink_ids = resolve_sitelink_ids(
+        sitelink_reuse,
+        [9_900_000_001 + index for index in range(len(sitelink_reuse["add_keys"]))],
+    )
+    # Synthetic provider IDs validate the entire materialized contract without
+    # making any write request.  No synthetic data is sent to Direct or CRM.
+    requests = build_materialized_requests(
+        payload,
+        image_hash=image_hash,
+        sitelink_ids=dry_sitelink_ids,
+    )
+    if sitelink_reuse["add_keys"]:
+        requests["sitelinks_add"] = build_sitelinks_add_request(
+            payload, sitelink_reuse["add_keys"]
+        )
+    else:
+        requests.pop("sitelinks_add")
+    if int(getattr(api, "mutation_requests", 0)) != mutations_before:
+        raise OperatorError("Dry-run выполнил mutation request")
+    lock_state = (lock_policy or MutationLockPolicy()).inspect()
+    is_recovery = classification["classification"].startswith("partial_")
+    if is_recovery:
+        remaining = set(classification["remaining_stages"])
+        requests = {key: value for key, value in requests.items() if key in remaining}
+    base_status = "ready_recovery" if is_recovery else "ready"
+    receipt.update(
+        status=base_status if lock_state["available"] else "blocked_by_lock",
+        account=identity,
+        protected={key: value for key, value in protected.items() if key != "campaigns"},
+        target={
+            "cas_sha256": snapshot["sha256"],
+            "state": snapshot["raw"]["campaign"].get("State"),
+            "counts": snapshot["counts"],
+            "classification": classification,
+        },
+        public_http_preflight=public_preflight,
+        image_evidence=image_evidence,
+        sitelink_reuse=sitelink_reuse,
+        planned_requests=_request_summary(requests),
+        exact_existing_ad_ids=sorted(EXISTING_AD_IDS.values()),
+        new_ads_planned=1,
+        expected_post_counts={
+            "adgroups": 5,
+            "ads_total": 6,
+            "ads_non_suspended": 5,
+            "keywords": 31,
+            "sitelinks_unique": len(set(dry_sitelink_ids.values())),
+        },
+        moderation_called=False,
+        global_lock=lock_state,
+        mutation_requests=0,
+        ready_for_apply=lock_state["available"] and not is_recovery,
+        ready_for_recovery=lock_state["available"] and is_recovery,
+    )
+    return receipt
+
+
+def run_apply(
+    api: Any,
+    payload: Mapping[str, Any],
+    *,
+    expected_cas_sha256: str,
+    expected_plan_sha256: str,
+    environ: Mapping[str, str],
+    payload_metadata: Mapping[str, Any] | None = None,
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    verify_apply_unlock(environ)
+    actual_plan_sha256 = (payload_metadata or {}).get("plan_sha256")
+    assert_exact_cas(str(actual_plan_sha256 or ""), expected_plan_sha256)
+    receipt = _base_receipt("apply", payload_metadata)
+    receipt["public_http_preflight"] = public_http_preflight(payload)
+    policy = lock_policy or MutationLockPolicy()
+    stage_receipts: list[dict[str, Any]] = []
+    protected_before: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+    with policy.hold() as lock_evidence:
+        receipt["global_lock"] = lock_evidence
+        try:
+            identity = guard.prove_identity(api)
+            protected_before = guard.read_protected_snapshot(api)
+            baseline = read_target_snapshot(api)
+            validate_baseline(baseline)
+            assert_exact_cas(baseline["sha256"], expected_cas_sha256)
+            baseline_campaign = baseline["raw"]["campaign"]
+            image_hash, image_evidence = validate_reused_image(payload)
+            sitelink_reuse = plan_sitelink_reuse(
+                baseline["raw"]["all_sitelinks"], payload["sitelinkSets"]
+            )
+            receipt.update(
+                account=identity,
+                preimage_cas_sha256=baseline["sha256"],
+                protected_before={key: value for key, value in protected_before.items() if key != "campaigns"},
+                image_evidence=image_evidence,
+                sitelink_reuse=sitelink_reuse,
+            )
+
+            add_keys = list(sitelink_reuse["add_keys"])
+            if add_keys:
+                sitelinks_request = build_sitelinks_add_request(payload, add_keys)
+                stage = _mutate_stage(
+                    api,
+                    "sitelinks_add",
+                    sitelinks_request,
+                    baseline_campaign=baseline_campaign,
+                    protected_before=protected_before,
+                )
+                sitelink_values = strict_action_rows(
+                    stage["result"],
+                    "AddResults",
+                    expected_count=len(add_keys),
+                    id_field="Id",
+                )
+                stage_receipts.append(
+                    {
+                        "stage": 1,
+                        "kind": "sitelinks_add",
+                        "added_keys": add_keys,
+                        "provider_ids": sitelink_values,
+                    }
+                )
+            else:
+                sitelink_values = []
+                stage_receipts.append(
+                    {"stage": 1, "kind": "sitelinks_reuse", "added_keys": []}
+                )
+            sitelink_ids = resolve_sitelink_ids(sitelink_reuse, sitelink_values)
+            stage_receipts[-1]["resolved_ids"] = sitelink_ids
+
+            requests = build_materialized_requests(
+                payload,
+                image_hash=image_hash,
+                sitelink_ids=sitelink_ids,
+            )
+            fixed_stages = [
+                ("adgroups_update", "UpdateResults", sorted(GROUP_IDS.values())),
+                ("keywords_update", "UpdateResults", sorted(KEYWORD_UPDATE_IDS)),
+                ("keywords_add", "AddResults", None),
+                ("keywords_suspend", "SuspendResults", sorted(KEYWORD_SUSPEND_IDS)),
+                ("ads_update", "UpdateResults", sorted(EXISTING_AD_IDS.values())),
+                ("ads_add", "AddResults", None),
+                ("ads_suspend", "SuspendResults", [PARKED_AD_ID]),
+            ]
+            new_keyword_ids: list[int] = []
+            new_ad_id: int | None = None
+            for offset, (kind, result_key, expected_ids) in enumerate(fixed_stages, 2):
+                stage = _mutate_stage(
+                    api,
+                    kind,
+                    requests[kind],
+                    baseline_campaign=baseline_campaign,
+                    protected_before=protected_before,
+                )
+                if kind == "keywords_add":
+                    values = strict_action_rows(
+                        stage["result"],
+                        result_key,
+                        expected_count=KEYWORD_ADD_COUNT,
+                        id_field="Id",
+                    )
+                    new_keyword_ids = [exact_int(item, "New Keyword Id") for item in values]
+                    detail = {"new_keyword_ids": new_keyword_ids}
+                elif kind == "ads_add":
+                    values = strict_action_rows(
+                        stage["result"], result_key, expected_count=1, id_field="Id"
+                    )
+                    new_ad_id = exact_int(values[0], "New Ad Id")
+                    detail = {"new_ad_id": new_ad_id}
+                else:
+                    values = strict_action_rows(
+                        stage["result"],
+                        result_key,
+                        expected_count=len(expected_ids or []),
+                        id_field="Id",
+                        expected_ids=expected_ids,
+                    )
+                    detail = {"verified_ids": values}
+                stage_receipts.append({"stage": offset, "kind": kind, **detail})
+
+            if new_ad_id is None or len(new_keyword_ids) != KEYWORD_ADD_COUNT:
+                raise OperatorError("Provider IDs не были полностью разрешены")
+            post = read_target_snapshot(api, require_baseline_ads=False)
+            if guard.sha256_json(post["raw"]["campaign"]) != guard.sha256_json(baseline_campaign):
+                raise OperatorError("Campaign changed despite creative-only scope")
+            readback = verify_post_readback(
+                post,
+                payload,
+                requests,
+                new_keyword_ids=new_keyword_ids,
+                new_ad_id=new_ad_id,
+                sitelink_ids=sitelink_ids,
+            )
+            protected_after = guard.read_protected_snapshot(api)
+            guard.assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="applied_verified_suspended",
+                stage_receipts=stage_receipts,
+                postimage_cas_sha256=post["sha256"],
+                readback=readback,
+                protected_unchanged=True,
+                final_campaign_state="SUSPENDED",
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+            )
+        except Exception as exc:
+            receipt.update(
+                status="manual_inspection_required_suspended",
+                error=safe_text(exc),
+                stage_receipts=stage_receipts,
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+            )
+            if isinstance(exc, OperatorError) and exc.partial:
+                receipt.update(exc.partial)
+            try:
+                if baseline is not None:
+                    safety = _campaign_safety(api, baseline["raw"]["campaign"])
+                    receipt["final_campaign_state"] = safety["state"]
+                    receipt["campaign_unchanged"] = True
+            except Exception as safety_exc:
+                receipt["campaign_safety_error"] = safe_text(safety_exc)
+            try:
+                if protected_before is not None:
+                    protected_after = guard.read_protected_snapshot(api)
+                    guard.assert_protected_equal(protected_before, protected_after)
+                    receipt["protected_unchanged"] = True
+            except Exception as protected_exc:
+                receipt["protected_unchanged"] = False
+                receipt["protected_error"] = safe_text(protected_exc)
+    return receipt
+
+
+def run_partial_recovery(
+    api: Any,
+    payload: Mapping[str, Any],
+    *,
+    expected_cas_sha256: str,
+    expected_plan_sha256: str,
+    environ: Mapping[str, str],
+    payload_metadata: Mapping[str, Any] | None = None,
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    """Continue only the v501 ad stages left after provider errors 8305/3500."""
+    verify_recovery_unlock(environ)
+    recovery_kinds = frozenset({"ads_update", "ads_add", "ads_suspend"})
+    # Defense in depth: even an accidental future call to a completed stage is
+    # rejected inside CreativeDirectApi before any HTTP request is constructed.
+    setattr(api, "mutation_allowlist_override", recovery_kinds)
+    actual_plan_sha256 = (payload_metadata or {}).get("plan_sha256")
+    assert_exact_cas(str(actual_plan_sha256 or ""), expected_plan_sha256)
+    receipt = _base_receipt("recover-partial", payload_metadata)
+    receipt["public_http_preflight"] = public_http_preflight(payload)
+    policy = lock_policy or MutationLockPolicy()
+    stage_receipts: list[dict[str, Any]] = []
+    protected_before: dict[str, Any] | None = None
+    partial_snapshot: dict[str, Any] | None = None
+    with policy.hold() as lock_evidence:
+        receipt["global_lock"] = lock_evidence
+        try:
+            identity = guard.prove_identity(api)
+            protected_before = guard.read_protected_snapshot(api)
+            partial_snapshot = read_target_snapshot(api)
+            classification = validate_partial_state(
+                partial_snapshot,
+                payload,
+                after_autotarget_error=True,
+                after_epk_v5_error=True,
+            )
+            if (
+                classification.get("classification")
+                != "partial_after_epk_ads_v5_error_3500"
+                or classification.get("remaining_explicit_suspend_ids") != []
+                or classification.get("remaining_stages")
+                != ["ads_update", "ads_add", "ads_suspend"]
+                or classification.get("ads_post_error_exact_preimage_unchanged")
+                is not True
+            ):
+                raise OperatorError("Recovery-v3 requires exact post-3500 state")
+            assert_exact_cas(partial_snapshot["sha256"], expected_cas_sha256)
+            baseline_campaign = partial_snapshot["raw"]["campaign"]
+            image_hash, image_evidence = validate_reused_image(payload)
+            sitelink_ids = classification["sitelink_ids"]
+            if sitelink_ids != PARTIAL_SITELINK_IDS:
+                raise OperatorError("Recovery sitelink resolution drift")
+            requests = build_materialized_requests(
+                payload,
+                image_hash=image_hash,
+                sitelink_ids=sitelink_ids,
+            )
+            allowed_remaining = (
+                "ads_update",
+                "ads_add",
+                "ads_suspend",
+            )
+            if set(allowed_remaining) - set(requests):
+                raise OperatorError("Recovery remaining request set incomplete")
+            if set(allowed_remaining) != set(recovery_kinds):
+                raise OperatorError("Recovery API allowlist drift")
+            if any(requests[key].get("version") != "v501" for key in allowed_remaining):
+                raise OperatorError("Recovery-v3 permits only v501 EPK ad mutations")
+            receipt.update(
+                account=identity,
+                preimage_cas_sha256=partial_snapshot["sha256"],
+                partial_classification=classification,
+                protected_before={
+                    key: value
+                    for key, value in protected_before.items()
+                    if key != "campaigns"
+                },
+                image_evidence=image_evidence,
+                exact_remaining_requests=_request_summary(
+                    {key: requests[key] for key in allowed_remaining}
+                ),
+                forbidden_replay_stages=[
+                    "sitelinks_add",
+                    "adgroups_update",
+                    "keywords_update",
+                    "keywords_add",
+                    "keywords_suspend",
+                ],
+            )
+
+            new_ad_id: int | None = None
+            stage_contracts = [
+                ("ads_update", "UpdateResults", sorted(EXISTING_AD_IDS.values())),
+                ("ads_add", "AddResults", None),
+                ("ads_suspend", "SuspendResults", [PARKED_AD_ID]),
+            ]
+            for index, (kind, result_key, expected_ids) in enumerate(
+                stage_contracts, 1
+            ):
+                stage = _mutate_stage(
+                    api,
+                    kind,
+                    requests[kind],
+                    baseline_campaign=baseline_campaign,
+                    protected_before=protected_before,
+                )
+                if kind == "ads_add":
+                    values = strict_action_rows(
+                        stage["result"],
+                        result_key,
+                        expected_count=1,
+                        id_field="Id",
+                    )
+                    new_ad_id = exact_int(values[0], "Recovery new Ad Id")
+                    detail = {"new_ad_id": new_ad_id}
+                else:
+                    values = strict_action_rows(
+                        stage["result"],
+                        result_key,
+                        expected_count=len(expected_ids or []),
+                        id_field="Id",
+                        expected_ids=expected_ids,
+                    )
+                    detail = {"verified_ids": values}
+                stage_receipts.append(
+                    {"stage": index, "kind": kind, **detail}
+                )
+
+            if new_ad_id is None:
+                raise OperatorError("Recovery provider did not resolve new ad ID")
+            post = read_target_snapshot(api, require_baseline_ads=False)
+            if guard.sha256_json(post["raw"]["campaign"]) != guard.sha256_json(
+                baseline_campaign
+            ):
+                raise OperatorError("Campaign changed during partial recovery")
+            readback = verify_post_readback(
+                post,
+                payload,
+                requests,
+                new_keyword_ids=list(PARTIAL_NEW_KEYWORDS),
+                new_ad_id=new_ad_id,
+                sitelink_ids=sitelink_ids,
+            )
+            protected_after = guard.read_protected_snapshot(api)
+            guard.assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="recovered_verified_suspended",
+                stage_receipts=stage_receipts,
+                postimage_cas_sha256=post["sha256"],
+                readback=readback,
+                protected_unchanged=True,
+                final_campaign_state="SUSPENDED",
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+            )
+        except Exception as exc:
+            receipt.update(
+                status="manual_inspection_required_suspended",
+                error=safe_text(exc),
+                stage_receipts=stage_receipts,
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+            )
+            if isinstance(exc, OperatorError) and exc.partial:
+                receipt.update(exc.partial)
+            try:
+                if partial_snapshot is not None:
+                    safety = _campaign_safety(
+                        api, partial_snapshot["raw"]["campaign"]
+                    )
+                    receipt["final_campaign_state"] = safety["state"]
+                    receipt["campaign_unchanged"] = True
+            except Exception as safety_exc:
+                receipt["campaign_safety_error"] = safe_text(safety_exc)
+            try:
+                if protected_before is not None:
+                    protected_after = guard.read_protected_snapshot(api)
+                    guard.assert_protected_equal(protected_before, protected_after)
+                    receipt["protected_unchanged"] = True
+            except Exception as protected_exc:
+                receipt["protected_unchanged"] = False
+                receipt["protected_error"] = safe_text(protected_exc)
+    return receipt
+
+
+def _receipt_path(receipt: Mapping[str, Any]) -> Path:
+    stamp = str(receipt.get("generated_at", utc_now())).replace(":", "-").replace(".", "-")
+    mode = re.sub(r"[^a-z-]", "", str(receipt.get("mode", "unknown"))) or "unknown"
+    return REPORT_ROOT / f"ROSOMAHA_RUS_DIRECT_CREATIVE_{mode}_713802902_{stamp}.json"
+
+
+def save_receipt(receipt: Mapping[str, Any], *, token: str = "") -> Path:
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(receipt, ensure_ascii=False, indent=2)
+    if token:
+        raw = raw.replace(token, "[REDACTED]")
+    raw = re.sub(r"(?i)Bearer\s+[^\s\"',}]+", "Bearer [REDACTED]", raw)
+    if len(raw.encode("utf-8")) > 2_000_000:
+        raise OperatorError("Receipt превысил безопасный размер")
+    path = _receipt_path(receipt)
+    path.write_text(raw + "\n", encoding="utf-8")
+    return path
+
+
+def receipt_is_safe(receipt: Mapping[str, Any]) -> bool:
+    mode = receipt.get("mode")
+    if mode == "dry-run":
+        return (
+            receipt.get("status")
+            in {"ready", "ready_recovery", "blocked_by_lock"}
+            and receipt.get("mutation_requests") == 0
+            and receipt.get("target", {}).get("cas_sha256")
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and receipt.get("payload", {}).get("plan_sha256")
+            and receipt.get("public_http_preflight", {}).get("all_http_200") is True
+            and receipt.get("scope", {}).get("campaign_id") == TARGET_CAMPAIGN_ID
+        )
+    if mode == "apply":
+        return (
+            receipt.get("status") == "applied_verified_suspended"
+            and receipt.get("final_campaign_state") == "SUSPENDED"
+            and receipt.get("protected_unchanged") is True
+        )
+    if mode == "recover-partial":
+        return (
+            receipt.get("status") == "recovered_verified_suspended"
+            and receipt.get("final_campaign_state") == "SUSPENDED"
+            and receipt.get("protected_unchanged") is True
+            and receipt.get("mutation_requests") == 3
+        )
+    return False
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fail-closed API-only creative operator for Direct 713802902"
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="read-only mode (default)")
+    mode.add_argument("--apply", action="store_true", help="apply current source-bound bundle")
+    mode.add_argument(
+        "--recover-partial",
+        action="store_true",
+        help="continue only the exact classified partial state",
+    )
+    parser.add_argument("--expected-cas-sha256", help="exact CAS SHA-256 from fresh dry-run")
+    parser.add_argument(
+        "--expected-plan-sha256",
+        help="exact source-bound plan SHA-256 from the same fresh dry-run",
+    )
+    args = parser.parse_args(argv)
+    args.mode = (
+        "recover-partial"
+        if args.recover_partial
+        else "apply"
+        if args.apply
+        else "dry-run"
+    )
+    if args.mode == "dry-run" and (args.expected_cas_sha256 or args.expected_plan_sha256):
+        parser.error("expected CAS/plan SHA-256 разрешены только с --apply")
+    if args.mode in {"apply", "recover-partial"} and (
+        not args.expected_cas_sha256 or not args.expected_plan_sha256
+    ):
+        parser.error(
+            "mutation mode требует exact --expected-cas-sha256 и --expected-plan-sha256"
+        )
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    token = ""
+    api: CreativeDirectApi | None = None
+    payload_metadata: dict[str, Any] | None = None
+    try:
+        route = guard.resolve_route()
+        payload, payload_metadata = build_current_payload()
+        token = guard.load_project_token()
+        api = CreativeDirectApi(token)
+        if args.mode == "apply":
+            receipt = run_apply(
+                api,
+                payload,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_plan_sha256=args.expected_plan_sha256,
+                environ=os.environ,
+                payload_metadata=payload_metadata,
+            )
+        elif args.mode == "recover-partial":
+            receipt = run_partial_recovery(
+                api,
+                payload,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_plan_sha256=args.expected_plan_sha256,
+                environ=os.environ,
+                payload_metadata=payload_metadata,
+            )
+        else:
+            receipt = run_dry_run(
+                api, payload, payload_metadata=payload_metadata
+            )
+        receipt["routing"] = route
+        receipt["request_log"] = api.request_log
+    except Exception as exc:
+        receipt = _base_receipt(args.mode, payload_metadata)
+        receipt.update(status="blocked", error=safe_text(exc, (token,)))
+        if isinstance(exc, OperatorError) and exc.partial:
+            receipt.update(exc.partial)
+        receipt["mutation_requests"] = int(getattr(api, "mutation_requests", 0)) if api else 0
+        receipt["request_log"] = list(getattr(api, "request_log", [])) if api else []
+    path = save_receipt(receipt, token=token)
+    print(
+        json.dumps(
+            {
+                "status": receipt.get("status"),
+                "mode": receipt.get("mode"),
+                "campaign_id": TARGET_CAMPAIGN_ID,
+                "final_campaign_state": receipt.get("final_campaign_state")
+                or receipt.get("target", {}).get("state"),
+                "mutation_requests": receipt.get("mutation_requests", 0),
+                "cas_sha256": receipt.get("target", {}).get("cas_sha256"),
+                "plan_sha256": receipt.get("payload", {}).get("plan_sha256"),
+                "classification": receipt.get("target", {})
+                .get("classification", {})
+                .get("classification"),
+                "receipt": str(path.relative_to(PROJECT_ROOT)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0 if receipt_is_safe(receipt) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
