@@ -255,29 +255,54 @@ def baseline_sftp() -> FakeSFTP:
     )
 
 
-def option_stub(state: dict[str, str], calls: list[str]):
+def option_state(
+    *,
+    site_present: bool = True,
+    value: str | None = None,
+    global_present: bool = False,
+) -> dict[str, dict[str, object]]:
+    pinned = value or str(operator.OLD_COUNTER_ID)
+    return {
+        "site_s1": {
+            "exists": site_present,
+            "value": pinned if site_present else None,
+        },
+        "global": {
+            "exists": global_present,
+            "value": pinned if global_present else None,
+        },
+    }
+
+
+def clone_option_state(
+    state: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    return {name: dict(scope) for name, scope in state.items()}
+
+
+def option_stub(state: dict[str, dict[str, object]], calls: list[str]):
     def stub(client, mode: str, target_counter_id: int, *, php_binary=None):
         del client, php_binary
         calls.append(mode)
-        before = dict(state)
+        before = clone_option_state(state)
+        old_value = str(operator.OLD_COUNTER_ID)
+        target_value = str(target_counter_id)
         if mode == "apply":
-            if set(state.values()) == {str(operator.OLD_COUNTER_ID)}:
-                state.update(site_s1=str(target_counter_id), global_=str(target_counter_id))
-                state["global"] = state.pop("global_")
+            if operator._aspro_snapshot_matches(state, old_value):
+                state["site_s1"]["value"] = target_value
                 status = "applied"
-                mutations = 2
-            elif set(state.values()) == {str(target_counter_id)}:
+                mutations = operator._aspro_expected_mutations(before)
+            elif operator._aspro_snapshot_matches(state, target_value):
                 status = "already_target"
                 mutations = 0
             else:
                 raise operator.DeployError("fake option CAS blocked")
         elif mode == "rollback":
-            if set(state.values()) == {str(target_counter_id)}:
-                state.update(site_s1=str(operator.OLD_COUNTER_ID), global_=str(operator.OLD_COUNTER_ID))
-                state["global"] = state.pop("global_")
+            if operator._aspro_snapshot_matches(state, target_value):
+                state["site_s1"]["value"] = old_value
                 status = "rolled_back"
-                mutations = 2
-            elif set(state.values()) == {str(operator.OLD_COUNTER_ID)}:
+                mutations = operator._aspro_expected_mutations(before)
+            elif operator._aspro_snapshot_matches(state, old_value):
                 status = "already_target"
                 mutations = 0
             else:
@@ -285,7 +310,12 @@ def option_stub(state: dict[str, str], calls: list[str]):
         else:
             status = "audited"
             mutations = 0
-        return {"status": status, "before": before, "after": dict(state), "mutations": mutations}
+        return {
+            "status": status,
+            "before": before,
+            "after": clone_option_state(state),
+            "mutations": mutations,
+        }
 
     return stub
 
@@ -496,17 +526,22 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
             counter_id=operator.TARGET_COUNTER_ID,
             goal_ids=goal_ids,
         )
-        with mock.patch.object(
-            operator, "OPERATOR_REVISION", "bitrix-metrika-bridge-pinned-v1"
+        for previous_revision in (
+            "bitrix-metrika-bridge-pinned-v1",
+            "bitrix-metrika-bridge-pinned-v2-transaction-lock",
+            "bitrix-metrika-bridge-pinned-v3-raw-aspro-cas",
         ):
-            previous = operator._operation_id(
-                bridge=b"a",
-                init=b"b",
-                counter=b"c",
-                counter_id=operator.TARGET_COUNTER_ID,
-                goal_ids=goal_ids,
-            )
-        self.assertNotEqual(current, previous)
+            with self.subTest(previous_revision=previous_revision), mock.patch.object(
+                operator, "OPERATOR_REVISION", previous_revision
+            ):
+                previous = operator._operation_id(
+                    bridge=b"a",
+                    init=b"b",
+                    counter=b"c",
+                    counter_id=operator.TARGET_COUNTER_ID,
+                    goal_ids=goal_ids,
+                )
+            self.assertNotEqual(current, previous)
 
     def test_transaction_lock_observation_is_read_only(self) -> None:
         sftp = baseline_sftp()
@@ -517,9 +552,90 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
     def test_audit_aspro_helper_contains_no_write_api(self) -> None:
         audit = operator._aspro_php("audit", operator.TARGET_COUNTER_ID)
         apply = operator._aspro_php("apply", operator.TARGET_COUNTER_ID)
-        self.assertNotIn("SetOptionString", audit)
-        self.assertIn("SetOptionString", apply)
-        self.assertIn("GetOptionString", audit)
+        self.assertNotIn("::set(", audit)
+        self.assertIn("getRealValue", audit)
+        self.assertIn("rosomaha_read_raw_option('s1')", audit)
+        self.assertIn("rosomaha_read_raw_option('')", audit)
+        self.assertEqual(apply.count("::set("), 1)
+        self.assertIn("rosomaha_set_site_option", apply)
+        self.assertNotIn("rosomaha_set_option('global'", apply)
+        self.assertIn("'YA_COUNTER_ID', $value, 's1'", apply)
+
+    def test_raw_aspro_topology_is_exactly_existing_s1_and_missing_global(self) -> None:
+        baseline = option_state()
+        self.assertTrue(
+            operator._aspro_snapshot_matches(
+                baseline, str(operator.OLD_COUNTER_ID)
+            )
+        )
+        self.assertEqual(operator._aspro_expected_mutations(baseline), 1)
+        for drift in (
+            option_state(site_present=False),
+            option_state(global_present=True),
+        ):
+            with self.subTest(drift=drift):
+                self.assertFalse(
+                    operator._aspro_snapshot_matches(
+                        drift, str(operator.OLD_COUNTER_ID)
+                    )
+                )
+                with self.assertRaises(operator.DeployError):
+                    operator._aspro_expected_mutations(drift)
+
+    def test_aspro_payload_parser_keeps_raw_existence_without_fallback(self) -> None:
+        snapshot = option_state()
+        payload = {
+            "status": "audited",
+            "before": snapshot,
+            "after": clone_option_state(snapshot),
+            "mutations": 0,
+        }
+        with mock.patch.object(
+            operator,
+            "_exec_bounded",
+            return_value=(
+                0,
+                json.dumps(payload, separators=(",", ":")).encode("ascii"),
+                b"",
+            ),
+        ):
+            observed = operator.aspro_options(
+                object(),
+                "audit",
+                operator.TARGET_COUNTER_ID,
+                php_binary=operator.PHP_CANDIDATES[0],
+            )
+        self.assertEqual(observed, payload)
+        fallback_shaped = {
+            "status": "audited",
+            "before": {
+                "site_s1": str(operator.OLD_COUNTER_ID),
+                "global": str(operator.OLD_COUNTER_ID),
+            },
+            "after": {
+                "site_s1": str(operator.OLD_COUNTER_ID),
+                "global": str(operator.OLD_COUNTER_ID),
+            },
+            "mutations": 0,
+        }
+        with mock.patch.object(
+            operator,
+            "_exec_bounded",
+            return_value=(
+                0,
+                json.dumps(fallback_shaped, separators=(",", ":")).encode("ascii"),
+                b"",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                operator.DeployError, "CAS/readback failed"
+            ):
+                operator.aspro_options(
+                    object(),
+                    "audit",
+                    operator.TARGET_COUNTER_ID,
+                    php_binary=operator.PHP_CANDIDATES[0],
+                )
 
     def test_dry_run_only_uses_read_only_snapshot(self) -> None:
         fake_runtime = runtime()
@@ -534,8 +650,8 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         }
         options = {
             "status": "audited",
-            "before": {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)},
-            "after": {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)},
+            "before": option_state(),
+            "after": option_state(),
             "mutations": 0,
         }
         with (
@@ -581,6 +697,10 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         self.assertEqual(payload["parent_directories"][0]["uid"], 0)
         self.assertEqual(payload["operation_directory"]["status"], "missing")
         self.assertEqual(payload["transaction_lock"]["status"], "missing")
+        self.assertEqual(payload["transaction"]["bitrix_option_cas_updates"], 1)
+        self.assertTrue(payload["transaction"]["raw_site_option_existence_preserved"])
+        self.assertTrue(payload["transaction"]["raw_global_option_required_missing"])
+        self.assertEqual(payload["aspro_scope"]["site_id"], operator.ASPRO_SITE_ID)
         apply_remote.assert_not_called()
 
 
@@ -683,10 +803,7 @@ class TransactionTests(unittest.TestCase):
         )
 
     def rolled_back_sftp(self) -> FakeSFTP:
-        state = {
-            "site_s1": str(operator.OLD_COUNTER_ID),
-            "global": str(operator.OLD_COUNTER_ID),
-        }
+        state = option_state()
         calls: list[str] = []
         sftp = baseline_sftp()
         client = FakeClient(sftp)
@@ -708,7 +825,7 @@ class TransactionTests(unittest.TestCase):
         return sftp
 
     def test_apply_uses_same_directory_renames_backups_and_exact_option_cas(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins() as counter_candidate:
             sftp = baseline_sftp()
@@ -727,7 +844,14 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], counter_candidate)
         self.assertIn(operator.CONFIG_PATH, sftp.files)
         self.assertEqual(stat.S_IMODE(sftp.files[operator.CONFIG_PATH]["mode"]), 0o600)
-        self.assertEqual(set(state.values()), {str(operator.TARGET_COUNTER_ID)})
+        self.assertTrue(
+            operator._aspro_snapshot_matches(state, str(operator.TARGET_COUNTER_ID))
+        )
+        self.assertFalse(state["global"]["exists"])
+        self.assertIsNone(state["global"]["value"])
+        self.assertEqual(result["aspro_options"]["mutations"], 1)
+        self.assertEqual(result["aspro_scope"]["mutation"], "site_s1_only")
+        self.assertEqual(result["aspro_scope"]["raw_global"], "required_missing")
         self.assertEqual(calls, ["audit", "apply"])
         self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
         self.assertIn(("open", operator.TRANSACTION_LOCK_PATH, "wx"), sftp.calls)
@@ -744,7 +868,7 @@ class TransactionTests(unittest.TestCase):
         self.assertNotIn(runtime()["credential"].encode(), receipt)
 
     def test_baseline_drift_blocks_before_any_write(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins():
             sftp = baseline_sftp()
@@ -759,8 +883,37 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(any(call[0] in {"mkdir", "posix_rename", "remove"} for call in sftp.calls))
         self.assertEqual(calls, [])
 
+    def test_aspro_raw_topology_drift_blocks_before_staging_or_option_write(self) -> None:
+        for case, state in (
+            ("missing_site", option_state(site_present=False)),
+            ("unexpected_global", option_state(global_present=True)),
+        ):
+            with self.subTest(case=case), fixture_pins():
+                calls: list[str] = []
+                original = clone_option_state(state)
+                sftp = baseline_sftp()
+                client = FakeClient(sftp)
+                first, second, third = self.patches(state, calls)
+                with first, second, third:
+                    with self.assertRaisesRegex(
+                        operator.DeployError,
+                        "exact baseline Aspro counter options",
+                    ):
+                        operator.apply_remote(
+                            client,
+                            runtime(),
+                            FIXTURE_BRIDGE_CANDIDATE,
+                            public_verifier=lambda _: {"status": 200},
+                        )
+                self.assertEqual(state, original)
+                self.assertEqual(calls, ["audit"])
+                self.assertFalse(
+                    any(call[0] in {"mkdir", "posix_rename"} for call in sftp.calls)
+                )
+                self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
+
     def test_public_failure_restores_all_files_config_and_options(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins():
             sftp = baseline_sftp()
@@ -785,7 +938,11 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(sftp.files[operator.INIT_PATH]["data"], FIXTURE_INIT)
         self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], FIXTURE_COUNTER_BASELINE)
         self.assertNotIn(operator.CONFIG_PATH, sftp.files)
-        self.assertEqual(set(state.values()), {str(operator.OLD_COUNTER_ID)})
+        self.assertTrue(
+            operator._aspro_snapshot_matches(state, str(operator.OLD_COUNTER_ID))
+        )
+        self.assertFalse(state["global"]["exists"])
+        self.assertIsNone(state["global"]["value"])
         self.assertEqual(calls, ["audit", "apply", "rollback"])
         self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
 
@@ -878,7 +1035,7 @@ class TransactionTests(unittest.TestCase):
                     self.assertIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
 
     def test_rollback_respects_the_same_existing_transaction_lock(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins() as counter_candidate:
             sftp = baseline_sftp()
@@ -915,7 +1072,7 @@ class TransactionTests(unittest.TestCase):
                 operator._release_transaction_lock(sftp, owner)
 
     def test_exact_rolled_back_operation_is_reused_without_overwriting_backups(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins():
             sftp = baseline_sftp()
@@ -1000,7 +1157,7 @@ class TransactionTests(unittest.TestCase):
                     )
 
     def test_rolled_back_operation_with_unexpected_artifact_blocks_retry_before_write(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins():
             sftp = baseline_sftp()
@@ -1066,7 +1223,7 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(writes_after, writes_before)
 
     def test_explicit_rollback_restores_exact_baseline(self) -> None:
-        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        state = option_state()
         calls: list[str] = []
         with fixture_pins():
             sftp = baseline_sftp()
@@ -1090,7 +1247,9 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(sftp.files[operator.BRIDGE_PATH]["data"], FIXTURE_BRIDGE_BASELINE)
         self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], FIXTURE_COUNTER_BASELINE)
         self.assertNotIn(operator.CONFIG_PATH, sftp.files)
-        self.assertEqual(set(state.values()), {str(operator.OLD_COUNTER_ID)})
+        self.assertTrue(
+            operator._aspro_snapshot_matches(state, str(operator.OLD_COUNTER_ID))
+        )
         self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
 
     def test_apply_and_rollback_guards_block_before_dispatch(self) -> None:

@@ -154,10 +154,11 @@ APPLY_GUARD_ENV = "ROSOMAHA_BITRIX_METRIKA_APPLY"
 APPLY_GUARD_VALUE = "APPLY_PINNED_METRIKA_BRIDGE_WITH_CAS"
 ROLLBACK_GUARD_ENV = "ROSOMAHA_BITRIX_METRIKA_ROLLBACK"
 ROLLBACK_GUARD_VALUE = "ROLLBACK_PINNED_METRIKA_BRIDGE_BY_OPERATION_ID"
-OPERATOR_REVISION = "bitrix-metrika-bridge-pinned-v2-transaction-lock"
+OPERATOR_REVISION = "bitrix-metrika-bridge-pinned-v4-site-s1-only-cas"
 ASPRO_MODULE = "aspro.allcorp3"
 ASPRO_OPTION = "YA_COUNTER_ID"
 ASPRO_SITE_ID = "s1"
+ASPRO_SCOPE_KEYS = ("site_s1", "global")
 PINNED_PARENT_POLICIES = {
     # Beget exposes the account's SFTP chroot root as root:root/0700 even
     # though descendants are owned by the account uid/gid.  This exception is
@@ -1215,14 +1216,62 @@ def discover_php(client: Any) -> str:
     raise DeployError("Pinned PHP 8.2 CLI was not found")
 
 
+def _aspro_snapshot_is_valid(snapshot: Any) -> bool:
+    if not isinstance(snapshot, dict) or set(snapshot) != set(ASPRO_SCOPE_KEYS):
+        return False
+    for scope_name in ASPRO_SCOPE_KEYS:
+        scope = snapshot.get(scope_name)
+        if not isinstance(scope, dict) or set(scope) != {"exists", "value"}:
+            return False
+        if type(scope.get("exists")) is not bool:
+            return False
+        value = scope.get("value")
+        if scope["exists"]:
+            if not isinstance(value, str):
+                return False
+        elif value is not None:
+            return False
+    return True
+
+
+def _aspro_snapshot_matches(snapshot: Any, expected_value: str) -> bool:
+    if not _aspro_snapshot_is_valid(snapshot):
+        return False
+    global_scope = snapshot["global"]
+    site_scope = snapshot["site_s1"]
+    return bool(
+        site_scope["exists"]
+        and site_scope["value"] == expected_value
+        and not global_scope["exists"]
+        and global_scope["value"] is None
+    )
+
+
+def _aspro_expected_mutations(snapshot: Any) -> int:
+    if not _aspro_snapshot_is_valid(snapshot):
+        raise DeployError("Aspro raw option topology is invalid")
+    if (
+        not snapshot["site_s1"]["exists"]
+        or snapshot["site_s1"]["value"] is None
+        or snapshot["global"]["exists"]
+        or snapshot["global"]["value"] is not None
+    ):
+        raise DeployError("Aspro raw option topology is outside pinned s1-only scope")
+    return 1
+
+
 def _aspro_php(mode: str, target_counter_id: int) -> str:
     if mode not in {"audit", "apply", "rollback"}:
         raise ValueError("Aspro option mode is invalid")
     if re.fullmatch(r"[1-9][0-9]{4,14}", str(target_counter_id)) is None:
         raise ValueError("Aspro option target counter id is invalid")
     # All interpolated values above are fixed identifiers or validated digits.
-    # The helper emits only the two non-sensitive option values and mutation
-    # counts; it never reads form results, sessions or runtime credentials.
+    # The helper emits only the two non-sensitive raw option records and
+    # mutation counts; it never reads form results, sessions or runtime
+    # credentials.  An empty site id is deliberately used for the global
+    # b_option row.  In Bitrix, false means the current site and is not global.
+    # Mutation modes are pinned to the existing s1 row only; the raw global
+    # row must remain absent throughout the transaction.
     common = f"""
 $_SERVER['DOCUMENT_ROOT'] = '{SITE_ROOT}';
 define('NO_KEEP_STATISTIC', true);
@@ -1231,12 +1280,32 @@ define('NOT_CHECK_PERMISSIONS', true);
 ob_start();
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/modules/main/include/prolog_before.php';
 ob_end_clean();
-if (!class_exists('COption')) {{ fwrite(STDERR, 'option_api_unavailable'); exit(20); }}
+if (!class_exists('Bitrix\\Main\\Config\\Option')) {{ fwrite(STDERR, 'option_api_unavailable'); exit(20); }}
+function rosomaha_read_raw_option($siteId) {{
+    $value = \\Bitrix\\Main\\Config\\Option::getRealValue(
+        '{ASPRO_MODULE}', '{ASPRO_OPTION}', $siteId
+    );
+    return array(
+        'exists' => $value !== null,
+        'value' => $value === null ? null : (string)$value,
+    );
+}}
 function rosomaha_read_options() {{
     return array(
-        'site_s1' => (string)COption::GetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', '__missing__', '{ASPRO_SITE_ID}'),
-        'global' => (string)COption::GetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', '__missing__', false),
+        'site_s1' => rosomaha_read_raw_option('{ASPRO_SITE_ID}'),
+        'global' => rosomaha_read_raw_option(''),
     );
+}}
+function rosomaha_scope_is($scope, $exists, $value) {{
+    return is_array($scope)
+        && array_key_exists('exists', $scope)
+        && array_key_exists('value', $scope)
+        && $scope['exists'] === $exists
+        && $scope['value'] === $value;
+}}
+function rosomaha_snapshot_is($snapshot, $value) {{
+    return rosomaha_scope_is($snapshot['site_s1'], true, $value)
+        && rosomaha_scope_is($snapshot['global'], false, null);
 }}
 function rosomaha_emit($status, $before, $after, $mutations) {{
     echo json_encode(array(
@@ -1254,34 +1323,28 @@ $before = rosomaha_read_options();
     to_value = target_counter_id if mode == "apply" else OLD_COUNTER_ID
     success_status = "applied" if mode == "apply" else "rolled_back"
     return common + f"""
+function rosomaha_set_site_option($value) {{
+    \\Bitrix\\Main\\Config\\Option::set(
+        '{ASPRO_MODULE}', '{ASPRO_OPTION}', $value, '{ASPRO_SITE_ID}'
+    );
+}}
 $from = '{from_value}';
 $to = '{to_value}';
-if ($before['site_s1'] === $to && $before['global'] === $to) {{
+if (rosomaha_snapshot_is($before, $to)) {{
     rosomaha_emit('already_target', $before, $before, 0); exit(0);
 }}
-if ($before['site_s1'] !== $from || $before['global'] !== $from) {{
+if (!rosomaha_snapshot_is($before, $from)) {{
     rosomaha_emit('cas_blocked', $before, $before, 0); exit(21);
 }}
-COption::SetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', $to, false, '{ASPRO_SITE_ID}');
-$middle = rosomaha_read_options();
-if ($middle['site_s1'] !== $to || $middle['global'] !== $from) {{
-    if ($middle['site_s1'] === $to) {{
-        COption::SetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', $from, false, '{ASPRO_SITE_ID}');
-    }}
-    rosomaha_emit('first_write_failed', $before, rosomaha_read_options(), 1); exit(22);
-}}
-COption::SetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', $to, false, false);
+rosomaha_set_site_option($to);
 $after = rosomaha_read_options();
-if ($after['site_s1'] !== $to || $after['global'] !== $to) {{
-    if ($after['global'] === $to) {{
-        COption::SetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', $from, false, false);
+if (!rosomaha_snapshot_is($after, $to)) {{
+    if (rosomaha_scope_is($after['site_s1'], true, $to)) {{
+        rosomaha_set_site_option($from);
     }}
-    if ($after['site_s1'] === $to) {{
-        COption::SetOptionString('{ASPRO_MODULE}', '{ASPRO_OPTION}', $from, false, '{ASPRO_SITE_ID}');
-    }}
-    rosomaha_emit('second_write_failed_rolled_back', $before, rosomaha_read_options(), 2); exit(23);
+    rosomaha_emit('site_write_failed_rolled_back', $before, rosomaha_read_options(), 1); exit(22);
 }}
-rosomaha_emit('{success_status}', $before, $after, 2);
+rosomaha_emit('{success_status}', $before, $after, 1);
 """.strip()
 
 
@@ -1314,11 +1377,11 @@ def aspro_options(
     if (
         not isinstance(payload, dict)
         or set(payload) != {"status", "before", "after", "mutations"}
-        or not isinstance(payload.get("before"), dict)
-        or not isinstance(payload.get("after"), dict)
-        or set(payload["before"]) != {"site_s1", "global"}
-        or set(payload["after"]) != {"site_s1", "global"}
+        or not _aspro_snapshot_is_valid(payload.get("before"))
+        or not _aspro_snapshot_is_valid(payload.get("after"))
         or not isinstance(payload.get("mutations"), int)
+        or isinstance(payload.get("mutations"), bool)
+        or payload["mutations"] not in {0, 1}
     ):
         raise DeployError("Aspro option helper CAS/readback failed")
     if status != 0:
@@ -1329,9 +1392,9 @@ def aspro_options(
         )
     allowed_values = {str(OLD_COUNTER_ID), str(target_counter_id)}
     if any(
-        value not in allowed_values
+        scope["exists"] and scope["value"] not in allowed_values
         for snapshot in (payload["before"], payload["after"])
-        for value in snapshot.values()
+        for scope in snapshot.values()
     ):
         raise DeployError("Aspro option helper observed an unpinned value")
     if mode == "audit" and (
@@ -1770,11 +1833,11 @@ def apply_remote(
         )
         old_value = str(OLD_COUNTER_ID)
         new_value = str(runtime["counter_id"])
-        options_are_baseline = all(
-            value == old_value for value in options_before["after"].values()
+        options_are_baseline = _aspro_snapshot_matches(
+            options_before["after"], old_value
         )
-        options_are_candidate = all(
-            value == new_value for value in options_before["after"].values()
+        options_are_candidate = _aspro_snapshot_matches(
+            options_before["after"], new_value
         )
         if not all(_is_baseline(plan) for plan in plans):
             if all(_is_candidate(plan) for plan in plans) and options_are_candidate:
@@ -1821,20 +1884,25 @@ def apply_remote(
                 option_readback = aspro_options(
                     client, "audit", int(runtime["counter_id"]), php_binary=php_binary
                 )
-                values = set(option_readback["after"].values())
-                if values == {new_value}:
+                if _aspro_snapshot_matches(option_readback["after"], new_value):
                     options_switched = True
-                elif values != {old_value}:
+                elif not _aspro_snapshot_matches(option_readback["after"], old_value):
                     options_state_unknown = True
             except Exception:
                 options_state_unknown = True
             raise
-        options_switched = all(
-            value == new_value for value in options_after["after"].values()
+        options_switched = _aspro_snapshot_matches(
+            options_after["after"], new_value
         )
-        if any(value != new_value for value in options_after["after"].values()):
+        if not options_switched:
             raise DeployError("Aspro counter option post-write readback failed")
-        if options_after["status"] != "applied" or options_after["mutations"] != 2:
+        expected_option_mutations = _aspro_expected_mutations(
+            options_after["before"]
+        )
+        if (
+            options_after["status"] != "applied"
+            or options_after["mutations"] != expected_option_mutations
+        ):
             raise DeployError("Aspro counter option CAS changed concurrently")
 
         public = (
@@ -1858,6 +1926,11 @@ def apply_remote(
             "staged": staged,
             "php_lint": lint,
             "aspro_options": options_after,
+            "aspro_scope": {
+                "site_id": ASPRO_SITE_ID,
+                "mutation": "site_s1_only",
+                "raw_global": "required_missing",
+            },
             "after": after,
             "public": public,
             "atomic_same_directory_replace": True,
@@ -1883,9 +1956,8 @@ def apply_remote(
                     option_rollback = aspro_options(
                         client, "rollback", int(runtime["counter_id"])
                     )
-                    if any(
-                        value != str(OLD_COUNTER_ID)
-                        for value in option_rollback["after"].values()
+                    if not _aspro_snapshot_matches(
+                        option_rollback["after"], str(OLD_COUNTER_ID)
                     ):
                         raise DeployError("Automatic Aspro option rollback readback failed")
                 rollback = _restore_all(sftp, paths, plans)
@@ -1962,9 +2034,8 @@ def rollback_remote(
         option_rollback = aspro_options(
             client, "rollback", int(runtime["counter_id"]), php_binary=php_binary
         )
-        if any(
-            value != str(OLD_COUNTER_ID)
-            for value in option_rollback["after"].values()
+        if not _aspro_snapshot_matches(
+            option_rollback["after"], str(OLD_COUNTER_ID)
         ):
             raise DeployError("Rollback Aspro option readback failed")
         try:
@@ -1978,9 +2049,8 @@ def rollback_remote(
                         int(runtime["counter_id"]),
                         php_binary=php_binary,
                     )
-                    if any(
-                        value != str(runtime["counter_id"])
-                        for value in option_restore["after"].values()
+                    if not _aspro_snapshot_matches(
+                        option_restore["after"], str(runtime["counter_id"])
                     ):
                         raise DeployError("Aspro candidate option restoration failed")
                 except Exception as option_exc:
@@ -2001,6 +2071,11 @@ def rollback_remote(
             "counter_id": int(runtime["counter_id"]),
             "result": results,
             "aspro_options": option_rollback,
+            "aspro_scope": {
+                "site_id": ASPRO_SITE_ID,
+                "mutation": "site_s1_only",
+                "raw_global": "required_missing",
+            },
             "public": public,
             "atomic_same_directory_replace": True,
             "transaction_lock": {
@@ -2179,6 +2254,11 @@ def run_audit() -> tuple[dict[str, Any], Path]:
         "read_only": True,
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
+        "aspro_scope": {
+            "site_id": ASPRO_SITE_ID,
+            "mutation": "site_s1_only",
+            "raw_global": "required_missing",
+        },
         "parent_directories": parents,
         "operation_directory": operation,
         "transaction_lock": transaction_lock,
@@ -2193,11 +2273,15 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
     plans, operation_id, options, parents, operation, transaction_lock = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
-    ready = all(_is_baseline(plan) for plan in plans) and all(
-        value == str(OLD_COUNTER_ID) for value in options["after"].values()
-    ) and operation["status"] in {"missing", "reusable_rolled_back"} and transaction_lock[
-        "status"
-    ] == "missing"
+    options_are_baseline = _aspro_snapshot_matches(
+        options["after"], str(OLD_COUNTER_ID)
+    )
+    ready = (
+        all(_is_baseline(plan) for plan in plans)
+        and options_are_baseline
+        and operation["status"] in {"missing", "reusable_rolled_back"}
+        and transaction_lock["status"] == "missing"
+    )
     payload = _base_receipt("dry-run", runtime) | {
         "status": "plan_ready" if ready else "blocked",
         "operation_id": operation_id,
@@ -2205,6 +2289,11 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
         "local_php_lint": lint,
         "targets": [_safe_plan_info(plan) for plan in plans],
         "aspro_options": options,
+        "aspro_scope": {
+            "site_id": ASPRO_SITE_ID,
+            "mutation": "site_s1_only",
+            "raw_global": "required_missing",
+        },
         "parent_directories": parents,
         "operation_directory": operation,
         "transaction_lock": transaction_lock,
@@ -2213,7 +2302,13 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
             "same_directory_atomic_renames": 3,
             "backups_outside_docroot": 3,
             "missing_baseline_markers": 1,
-            "bitrix_option_cas_updates": 2,
+            "bitrix_option_cas_updates": (
+                _aspro_expected_mutations(options["after"])
+                if options_are_baseline
+                else None
+            ),
+            "raw_site_option_existence_preserved": True,
+            "raw_global_option_required_missing": True,
             "automatic_rollback_after_switch_failure": True,
         },
     }
