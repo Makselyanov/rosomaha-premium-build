@@ -1732,11 +1732,18 @@ def apply_remote(
     sftp = client.open_sftp()
     plans: list[dict[str, Any]] = []
     paths: dict[str, Any] = {}
+    transaction_lock: dict[str, Any] | None = None
     switched = False
     options_switched = False
     options_state_unknown = False
     try:
         plans, operation_id = _plans_from_remote(sftp, runtime, bridge)
+        transaction_lock = _acquire_transaction_lock(
+            sftp, mode="apply", operation_id=operation_id
+        )
+        plans, locked_operation_id = _plans_from_remote(sftp, runtime, bridge)
+        if locked_operation_id != operation_id:
+            raise DeployError("Apply operation changed while acquiring transaction lock")
         php_binary = discover_php(client)
         options_before = aspro_options(
             client, "audit", int(runtime["counter_id"]), php_binary=php_binary
@@ -1835,7 +1842,14 @@ def apply_remote(
             "public": public,
             "atomic_same_directory_replace": True,
             "config_outside_docroot": not CONFIG_PATH.startswith(SITE_ROOT + "/"),
-            "write_scope": [plan["path"] for plan in plans],
+            "transaction_lock": {
+                "path": TRANSACTION_LOCK_PATH,
+                "exclusive_create": "wx",
+                "scope": "apply_and_rollback",
+                "release": "finally_exact_owner_only",
+            },
+            "write_scope": [TRANSACTION_LOCK_PATH]
+            + [plan["path"] for plan in plans],
         }
         payload["remote_receipt"] = _write_remote_receipt(
             sftp, paths["operation_receipt"], payload
@@ -1876,7 +1890,21 @@ def apply_remote(
             ) from exc
         raise
     finally:
-        sftp.close()
+        primary_exc = sys.exc_info()[1]
+        try:
+            if transaction_lock is not None:
+                _release_transaction_lock(sftp, transaction_lock)
+        except Exception as lock_exc:
+            if primary_exc is not None:
+                raise DeployError(
+                    "Transaction failed and its exact owned lock could not be released: "
+                    + safe_error(lock_exc)
+                    + "; redacted primary cause: "
+                    + safe_error(primary_exc)
+                ) from primary_exc
+            raise
+        finally:
+            sftp.close()
 
 
 def rollback_remote(
@@ -2093,7 +2121,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     _candidate_lint_local(bridge)
-    plans, operation_id, options, parents, operation = _connect_and_close(
+    plans, operation_id, options, parents, operation, transaction_lock = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     payload = _base_receipt("audit", runtime) | {
@@ -2104,6 +2132,7 @@ def run_audit() -> tuple[dict[str, Any], Path]:
         "aspro_options": options,
         "parent_directories": parents,
         "operation_directory": operation,
+        "transaction_lock": transaction_lock,
     }
     return payload, write_local_receipt("audit", payload)
 
@@ -2112,12 +2141,14 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
     runtime = load_runtime()
     bridge = validate_bridge_candidate()
     lint = _candidate_lint_local(bridge)
-    plans, operation_id, options, parents, operation = _connect_and_close(
+    plans, operation_id, options, parents, operation, transaction_lock = _connect_and_close(
         lambda client: _snapshot(client, runtime, bridge)
     )
     ready = all(_is_baseline(plan) for plan in plans) and all(
         value == str(OLD_COUNTER_ID) for value in options["after"].values()
-    ) and operation["status"] in {"missing", "reusable_rolled_back"}
+    ) and operation["status"] in {"missing", "reusable_rolled_back"} and transaction_lock[
+        "status"
+    ] == "missing"
     payload = _base_receipt("dry-run", runtime) | {
         "status": "plan_ready" if ready else "blocked",
         "operation_id": operation_id,
@@ -2127,6 +2158,7 @@ def run_dry_run() -> tuple[dict[str, Any], Path]:
         "aspro_options": options,
         "parent_directories": parents,
         "operation_directory": operation,
+        "transaction_lock": transaction_lock,
         "apply_guard": {"environment": APPLY_GUARD_ENV, "exact_value_required": True},
         "transaction": {
             "same_directory_atomic_renames": 3,
