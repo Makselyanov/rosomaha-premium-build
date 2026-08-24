@@ -74,6 +74,7 @@ CONFIG_DIRECTORY = CONFIG_PARENT + "/rosomaha"
 CONFIG_PATH = CONFIG_DIRECTORY + "/metrika.json"
 OPERATION_PARENT = HOME_ROOT + "/migration/rosomaha-rus/ops"
 OPERATION_ROOT = OPERATION_PARENT + "/bitrix-metrika-bridge"
+TRANSACTION_LOCK_PATH = OPERATION_PARENT + "/.bitrix-metrika-bridge.transaction.lock"
 
 DOMAIN = "rosomaha-rus.ru"
 PUBLIC_ORIGIN = "https://rosomaha-rus.ru"
@@ -153,7 +154,7 @@ APPLY_GUARD_ENV = "ROSOMAHA_BITRIX_METRIKA_APPLY"
 APPLY_GUARD_VALUE = "APPLY_PINNED_METRIKA_BRIDGE_WITH_CAS"
 ROLLBACK_GUARD_ENV = "ROSOMAHA_BITRIX_METRIKA_ROLLBACK"
 ROLLBACK_GUARD_VALUE = "ROLLBACK_PINNED_METRIKA_BRIDGE_BY_OPERATION_ID"
-OPERATOR_REVISION = "bitrix-metrika-bridge-pinned-v1"
+OPERATOR_REVISION = "bitrix-metrika-bridge-pinned-v2-transaction-lock"
 ASPRO_MODULE = "aspro.allcorp3"
 ASPRO_OPTION = "YA_COUNTER_ID"
 ASPRO_SITE_ID = "s1"
@@ -855,6 +856,144 @@ def _write_exact_file(
     return info
 
 
+def _transaction_lock_bytes(
+    mode: str,
+    operation_id: str,
+    nonce: str,
+    *,
+    created_at_utc: str | None = None,
+) -> bytes:
+    if mode not in {"apply", "rollback"}:
+        raise ValueError("Transaction lock mode is invalid")
+    if re.fullmatch(r"bitrix-metrika-[a-f0-9]{24}", operation_id) is None:
+        raise ValueError("Transaction lock operation id is invalid")
+    if re.fullmatch(r"[a-f0-9]{32}", nonce) is None:
+        raise ValueError("Transaction lock nonce is invalid")
+    created = utc_now() if created_at_utc is None else created_at_utc
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00", created) is None:
+        raise ValueError("Transaction lock timestamp is invalid")
+    return _receipt_bytes(
+        {
+            "schema": 1,
+            "kind": "bitrix_metrika_transaction_lock",
+            "operator_revision": OPERATOR_REVISION,
+            "mode": mode,
+            "operation_id": operation_id,
+            "nonce": nonce,
+            "created_at_utc": created,
+        }
+    )
+
+
+def _require_exact_transaction_lock_metadata(info: Mapping[str, Any]) -> None:
+    if (
+        info.get("regular_non_symlink") is not True
+        or info.get("mode") != f"{EXPECTED_FILE_MODE:04o}"
+        or info.get("uid") != EXPECTED_UID
+        or info.get("gid") != EXPECTED_GID
+    ):
+        raise DeployError("Transaction lock metadata drifted")
+
+
+def _acquire_transaction_lock(
+    sftp: Any, *, mode: str, operation_id: str
+) -> dict[str, Any]:
+    _require_pinned_parent(sftp, OPERATION_PARENT)
+    if _exists(sftp, TRANSACTION_LOCK_PATH):
+        raise DeployError(
+            "Transaction lock already exists; read-only inspection is required"
+        )
+    nonce = uuid.uuid4().hex
+    created_at_utc = utc_now()
+    body = _transaction_lock_bytes(
+        mode, operation_id, nonce, created_at_utc=created_at_utc
+    )
+    try:
+        info = _write_exact_file(sftp, TRANSACTION_LOCK_PATH, body)
+    except FileExistsError as exc:
+        raise DeployError(
+            "Concurrent transaction acquired the exact remote lock first"
+        ) from exc
+    _require_exact_transaction_lock_metadata(info)
+    return {
+        "path": TRANSACTION_LOCK_PATH,
+        "mode": mode,
+        "operation_id": operation_id,
+        "nonce": nonce,
+        "created_at_utc": created_at_utc,
+        "body": body,
+    }
+
+
+def _release_transaction_lock(sftp: Any, lock: Mapping[str, Any]) -> None:
+    if (
+        lock.get("path") != TRANSACTION_LOCK_PATH
+        or lock.get("mode") not in {"apply", "rollback"}
+        or re.fullmatch(r"bitrix-metrika-[a-f0-9]{24}", str(lock.get("operation_id")))
+        is None
+        or re.fullmatch(r"[a-f0-9]{32}", str(lock.get("nonce"))) is None
+        or not isinstance(lock.get("created_at_utc"), str)
+        or not isinstance(lock.get("body"), bytes)
+    ):
+        raise DeployError("Local transaction lock ownership evidence is invalid")
+    expected = _transaction_lock_bytes(
+        str(lock["mode"]),
+        str(lock["operation_id"]),
+        str(lock["nonce"]),
+        created_at_utc=str(lock["created_at_utc"]),
+    )
+    body = lock["body"]
+    if not isinstance(body, bytes) or body != expected or len(body) > MAX_FILE_BYTES:
+        raise DeployError("Local transaction lock body is invalid")
+    current, info = read_remote_file(sftp, TRANSACTION_LOCK_PATH)
+    _require_exact_transaction_lock_metadata(info)
+    if current != body:
+        raise DeployError("Transaction lock ownership changed; foreign lock was not deleted")
+    # A second exact read narrows the cooperative SFTP compare/delete window;
+    # no operator is allowed to replace a live lock.
+    current_again, info_again = read_remote_file(sftp, TRANSACTION_LOCK_PATH)
+    _require_exact_transaction_lock_metadata(info_again)
+    if current_again != body:
+        raise DeployError("Transaction lock changed before release; it was not deleted")
+    sftp.remove(TRANSACTION_LOCK_PATH)
+    if _exists(sftp, TRANSACTION_LOCK_PATH):
+        raise DeployError("Owned transaction lock release was not confirmed")
+
+
+def _observe_transaction_lock(sftp: Any) -> dict[str, Any]:
+    if not _exists(sftp, TRANSACTION_LOCK_PATH):
+        return {"status": "missing", "path": TRANSACTION_LOCK_PATH}
+    data, info = read_remote_file(sftp, TRANSACTION_LOCK_PATH)
+    _require_exact_transaction_lock_metadata(info)
+    valid_content = False
+    try:
+        payload = json.loads((data or b"").decode("utf-8"))
+        valid_content = (
+            isinstance(payload, dict)
+            and payload.get("schema") == 1
+            and payload.get("kind") == "bitrix_metrika_transaction_lock"
+            and payload.get("operator_revision") == OPERATOR_REVISION
+            and payload.get("mode") in {"apply", "rollback"}
+            and re.fullmatch(
+                r"bitrix-metrika-[a-f0-9]{24}", str(payload.get("operation_id"))
+            )
+            is not None
+            and re.fullmatch(r"[a-f0-9]{32}", str(payload.get("nonce"))) is not None
+            and isinstance(payload.get("created_at_utc"), str)
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        valid_content = False
+    return {
+        "status": "present",
+        "path": TRANSACTION_LOCK_PATH,
+        "mode": info["mode"],
+        "uid": info["uid"],
+        "gid": info["gid"],
+        "valid_content": valid_content,
+        "automatic_cleanup_allowed": False,
+    }
+
+
 def _atomic_replace(sftp: Any, source: str, destination: str) -> None:
     try:
         sftp.posix_rename(source, destination)
@@ -1292,6 +1431,7 @@ def _snapshot(
     dict[str, Any],
     list[dict[str, Any]],
     dict[str, Any],
+    dict[str, Any],
 ]:
     sftp = client.open_sftp()
     try:
@@ -1300,10 +1440,11 @@ def _snapshot(
         operation = _observe_operation_directory(
             sftp, _paths(operation_id, plans), plans
         )
+        transaction_lock = _observe_transaction_lock(sftp)
     finally:
         sftp.close()
     options = aspro_options(client, "audit", int(runtime["counter_id"]))
-    return plans, operation_id, options, parents, operation
+    return plans, operation_id, options, parents, operation, transaction_lock
 
 
 def _connect_and_close(callback: Callable[[Any], Any]) -> Any:
