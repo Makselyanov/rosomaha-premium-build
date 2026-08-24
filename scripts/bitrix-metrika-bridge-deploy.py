@@ -910,9 +910,9 @@ def _acquire_transaction_lock(
     )
     try:
         info = _write_exact_file(sftp, TRANSACTION_LOCK_PATH, body)
-    except FileExistsError as exc:
+    except OSError as exc:
         raise DeployError(
-            "Concurrent transaction acquired the exact remote lock first"
+            "Exclusive transaction lock creation failed; no existing lock was modified"
         ) from exc
     _require_exact_transaction_lock_metadata(info)
     return {
@@ -979,7 +979,11 @@ def _observe_transaction_lock(sftp: Any) -> dict[str, Any]:
             )
             is not None
             and re.fullmatch(r"[a-f0-9]{32}", str(payload.get("nonce"))) is not None
-            and isinstance(payload.get("created_at_utc"), str)
+            and re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00",
+                str(payload.get("created_at_utc")),
+            )
+            is not None
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
         valid_content = False
@@ -1296,13 +1300,19 @@ def aspro_options(
     status, out, err = _exec_bounded(client, command, timeout=45)
     if len(out) > 8_192 or len(err) > 2_048:
         raise DeployError("Aspro option helper output exceeded its narrow bound")
+    payload: dict[str, Any] | None = None
     try:
-        payload = json.loads(out.decode("utf-8"))
+        decoded = out.decode("utf-8")
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DeployError("Aspro option helper did not return exact JSON") from exc
+    try:
+        loaded = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise DeployError("Aspro option helper did not return exact JSON") from exc
+    if isinstance(loaded, dict):
+        payload = loaded
     if (
-        status != 0
-        or not isinstance(payload, dict)
+        not isinstance(payload, dict)
         or set(payload) != {"status", "before", "after", "mutations"}
         or not isinstance(payload.get("before"), dict)
         or not isinstance(payload.get("after"), dict)
@@ -1311,6 +1321,12 @@ def aspro_options(
         or not isinstance(payload.get("mutations"), int)
     ):
         raise DeployError("Aspro option helper CAS/readback failed")
+    if status != 0:
+        raise DeployError(
+            "Aspro option helper returned "
+            + str(payload["status"])
+            + f" mutations={int(payload['mutations'])} before={payload['before']} after={payload['after']}"
+        )
     allowed_values = {str(OLD_COUNTER_ID), str(target_counter_id)}
     if any(
         value not in allowed_values
