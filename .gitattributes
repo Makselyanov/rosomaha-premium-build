@@ -1,1 +1,5 @@
 *.sh text eol=lf
+integrations/legacy-bitrix/templates/aspro-allcorp3/header.php text eol=lf
+integrations/legacy-bitrix/templates/aspro-allcorp3/manifest.json text eol=lf
+scripts/bitrix-canonical-cleanup.py text eol=lf
+scripts/bitrix-canonical-cleanup.test.py text eol=lf

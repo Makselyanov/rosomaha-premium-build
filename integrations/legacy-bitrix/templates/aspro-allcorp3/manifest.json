@@ -1,0 +1,45 @@
+{
+  "schema": "rosomaha-bitrix-template-file/v1",
+  "domain": "rosomaha-rus.ru",
+  "site_id": "s1",
+  "template_id": "aspro-allcorp3",
+  "remote_path": "/home/b/berkutm4/rosomaha-rus.ru/public_html/bitrix/templates/aspro-allcorp3/header.php",
+  "source_export": {
+    "artifact": ".local-artifacts/bitrix-canonical-20260824/header.php",
+    "exported_at_utc": "2026-08-24T10:27:48.659896Z",
+    "bytes": 4897,
+    "sha256": "f5a8256054c4ee53d469ec5f17076e6ea5c438b2a061fec925e2643767997baf",
+    "mode": "0600",
+    "uid": 8476,
+    "gid": 601
+  },
+  "candidate": {
+    "file": "header.php",
+    "bytes": 5598,
+    "sha256": "075909d8e940145077a47abfa2bc5ba32fc67ead66a0fd3ce86c54c4592251e7"
+  },
+  "change_contract": {
+    "kind": "single_canonical_generation_replacement",
+    "api": "$APPLICATION->GetCurPageParam('', $rosomahaCanonicalKillParams)",
+    "escape": "htmlspecialcharsbx",
+    "remove_case_insensitive_exact": [
+      "yclid",
+      "gclid",
+      "fbclid",
+      "msclkid",
+      "_openstat",
+      "gbraid",
+      "wbraid"
+    ],
+    "remove_case_insensitive_prefix": [
+      "utm_"
+    ],
+    "preserve_examples": [
+      "oid",
+      "display",
+      "PAGEN_1",
+      "unknown_business_parameter"
+    ],
+    "on_end_buffer_content_handlers_added": 0
+  }
+}
