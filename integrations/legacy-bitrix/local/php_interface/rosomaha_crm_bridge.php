@@ -8,6 +8,10 @@ if (!defined('B_PROLOG_INCLUDED') || B_PROLOG_INCLUDED !== true) {
 final class RosomahaCrmBridge
 {
     private const ENDPOINT = 'https://rosomaha.centrlp.ru/api/webhooks/site-form';
+    private const METRIKA_ENDPOINT = 'https://mc.yandex.ru/collect';
+    private const METRIKA_CONFIG_PATH = '/home/b/berkutm4/.config/rosomaha/metrika.json';
+    private const METRIKA_SOFT_ACTION = 'lead_submit';
+    private const METRIKA_HARD_ACTION = 'crm_conversion';
     private const SOURCE = 'rosomaha-rus.ru';
     private const AGENT_NAME = 'RosomahaCrmBridge::retryAgent();';
     private const AGENT_INTERVAL = 300;
@@ -26,6 +30,18 @@ final class RosomahaCrmBridge
         AddEventHandler('form', 'onAfterResultAdd', [self::class, 'onAfterResultAdd']);
         self::$registered = true;
         self::maybeRetryOnHit();
+    }
+
+    /**
+     * The counter id is the only Metrika configuration value that may be
+     * rendered into the public page. The Measurement Protocol token remains
+     * private to this class and a mode-0600 file outside the document root.
+     */
+    public static function metrikaCounterId(): ?int
+    {
+        $config = self::metrikaConfig();
+
+        return $config === null ? null : $config['counter_id'];
     }
 
     public static function install(): array
@@ -138,6 +154,16 @@ final class RosomahaCrmBridge
                     continue;
                 }
 
+                $completedPath = self::completedRecordPath(
+                    (int) $record['form_id'],
+                    (int) $record['result_id']
+                );
+                if (is_file($completedPath)) {
+                    @unlink($path);
+                    $summary['delivered']++;
+                    continue;
+                }
+
                 if (!$force && (int) ($record['next_attempt_at'] ?? 0) > $now) {
                     continue;
                 }
@@ -145,35 +171,151 @@ final class RosomahaCrmBridge
                 $summary['processed']++;
                 $formId = (int) $record['form_id'];
                 $resultId = (int) $record['result_id'];
-                $payload = self::buildPayload($formId, $resultId, (array) ($record['context'] ?? []));
+                if (self::requiresCrmDelivery($record)) {
+                    $payload = self::buildPayload($formId, $resultId, (array) ($record['context'] ?? []));
 
-                if ($payload === null) {
-                    self::markFailure($path, $record, 'payload_unavailable', 0);
-                    self::log('payload_unavailable', $formId, $resultId);
+                    if ($payload === null) {
+                        self::markFailure($path, $record, 'payload_unavailable', 0);
+                        self::log('payload_unavailable', $formId, $resultId);
+                        $summary['failed']++;
+                        continue;
+                    }
+
+                    $record['lead_submission_id'] = (string) $payload['lead_submission_id'];
+                    $delivery = self::deliver($payload);
+                    if (!$delivery['ok']) {
+                        self::markFailure(
+                            $path,
+                            $record,
+                            (string) $delivery['error'],
+                            (int) $delivery['http_code']
+                        );
+                        self::log('delivery_failed', $formId, $resultId, [
+                            'http_code' => $delivery['http_code'],
+                            'error' => $delivery['error'],
+                        ]);
+                        $summary['failed']++;
+                        continue;
+                    }
+
+                    // Persist the exact CRM acknowledgement before attempting
+                    // Metrika. Every later retry must skip CRM deal creation.
+                    $record['crm_ack'] = [
+                        'status' => 'ok',
+                        'lead_submission_id' => (string) $payload['lead_submission_id'],
+                        'deal_id' => $delivery['deal_id'],
+                        'acknowledged_at' => date(DATE_ATOM),
+                    ];
+                    $record['attempts'] = 0;
+                    $record['next_attempt_at'] = 0;
+                    $record['last_http_code'] = (int) $delivery['http_code'];
+                    $record['last_error'] = null;
+                    $record['updated_at'] = date(DATE_ATOM);
+                    self::writeRecord($path, $record);
+                    self::log('crm_acknowledged', $formId, $resultId, [
+                        'http_code' => $delivery['http_code'],
+                        'deal_id' => $delivery['deal_id'],
+                    ]);
+                }
+
+                if (self::requiresCrmDelivery($record)) {
+                    self::markFailure($path, $record, 'crm_ack_unavailable', 0);
+                    self::log('crm_ack_unavailable', $formId, $resultId);
                     $summary['failed']++;
                     continue;
                 }
 
-                $delivery = self::deliver($payload);
-                if ($delivery['ok']) {
-                    @unlink($path);
+                // CRM delivery always runs first. The soft analytics signal is
+                // best effort and cannot delay or prevent deal creation.
+                try {
+                    $record = self::attemptSoftGoal($path, $record);
+                } catch (Throwable $exception) {
+                    self::log('metrika_soft_exception', $formId, $resultId, [
+                        'exception' => get_class($exception),
+                    ]);
+                    $storedRecord = self::readRecord($path);
+                    if ($storedRecord !== null) {
+                        $record = $storedRecord;
+                    }
+                }
+
+                $resumeAction = self::hardGoalResumeAction($record);
+                if (in_array($resumeAction, ['finalize_sent', 'finalize_unattributed'], true)) {
+                    $finalStatus = $resumeAction === 'finalize_sent' ? 'sent' : 'metrika_unattributed';
+                    self::finalizeRecord($path, $record, $finalStatus);
+                    $summary['delivered']++;
+                    continue;
+                }
+
+                if ($resumeAction === 'manual_review') {
+                    $record['metrika']['hard_goal'] = self::metrikaGoalState([
+                        'status' => 'metrika_indeterminate',
+                        'http_code' => (int) ($record['metrika']['hard_goal']['http_code'] ?? 0),
+                        'error' => 'prior_dispatch_unknown',
+                    ]);
+                    $record['updated_at'] = date(DATE_ATOM);
+                    self::finalizeRecord($path, $record, 'metrika_indeterminate');
+                    self::log('metrika_hard_indeterminate', $formId, $resultId, [
+                        'deal_id' => $record['crm_ack']['deal_id'] ?? null,
+                        'metrika_status' => 'metrika_indeterminate',
+                    ]);
+                    $summary['failed']++;
+                    continue;
+                }
+
+                $hardPreparation = self::prepareMetrikaGoal(
+                    self::METRIKA_HARD_ACTION,
+                    (array) ($record['context'] ?? []),
+                    'CRM confirmed deal'
+                );
+                if (($hardPreparation['status'] ?? null) !== 'ready') {
+                    $hardGoal = $hardPreparation;
+                } else {
+                    // From this durable marker onward a crash or ambiguous
+                    // transport error must never trigger an automatic resend.
+                    $record['metrika']['hard_goal'] = [
+                        'status' => 'attempting',
+                        'attempted_at' => date(DATE_ATOM),
+                    ];
+                    $record['updated_at'] = date(DATE_ATOM);
+                    self::writeRecord($path, $record);
+                    $hardGoal = self::dispatchMetrikaFields((array) $hardPreparation['fields']);
+                }
+                $record['metrika']['hard_goal'] = self::metrikaGoalState($hardGoal);
+                $record['updated_at'] = date(DATE_ATOM);
+
+                if (in_array($hardGoal['status'], ['sent', 'metrika_unattributed'], true)) {
+                    self::finalizeRecord($path, $record, (string) $hardGoal['status']);
                     self::log('delivered', $formId, $resultId, [
-                        'http_code' => $delivery['http_code'],
-                        'deal_id' => $delivery['deal_id'],
+                        'deal_id' => $record['crm_ack']['deal_id'] ?? null,
+                        'metrika_status' => $hardGoal['status'],
                     ]);
                     $summary['delivered']++;
+                    continue;
+                }
+
+                if ($hardGoal['status'] === 'metrika_indeterminate') {
+                    self::finalizeRecord($path, $record, 'metrika_indeterminate');
+                    self::log('metrika_hard_indeterminate', $formId, $resultId, [
+                        'http_code' => $hardGoal['http_code'] ?? 0,
+                        'deal_id' => $record['crm_ack']['deal_id'] ?? null,
+                        'error' => $hardGoal['error'] ?? 'dispatch_unknown',
+                        'metrika_status' => 'metrika_indeterminate',
+                    ]);
+                    $summary['failed']++;
                     continue;
                 }
 
                 self::markFailure(
                     $path,
                     $record,
-                    (string) $delivery['error'],
-                    (int) $delivery['http_code']
+                    'metrika_' . (string) ($hardGoal['error'] ?? 'failed'),
+                    (int) ($hardGoal['http_code'] ?? 0)
                 );
-                self::log('delivery_failed', $formId, $resultId, [
-                    'http_code' => $delivery['http_code'],
-                    'error' => $delivery['error'],
+                self::log('metrika_hard_failed', $formId, $resultId, [
+                    'http_code' => $hardGoal['http_code'] ?? 0,
+                    'deal_id' => $record['crm_ack']['deal_id'] ?? null,
+                    'error' => $hardGoal['error'] ?? 'failed',
                 ]);
                 $summary['failed']++;
             }
@@ -246,20 +388,22 @@ final class RosomahaCrmBridge
 
     private static function enqueueResult(int $webFormId, int $resultId, array $context): bool
     {
-        if (self::buildPayload($webFormId, $resultId, $context) === null) {
+        $payload = self::buildPayload($webFormId, $resultId, $context);
+        if ($payload === null) {
             return false;
         }
 
         self::ensureStorage();
         $path = self::recordPath($webFormId, $resultId);
-        if (is_file($path)) {
+        if (is_file($path) || is_file(self::completedRecordPath($webFormId, $resultId))) {
             return true;
         }
 
         $record = [
-            'version' => 1,
+            'version' => 2,
             'form_id' => $webFormId,
             'result_id' => $resultId,
+            'lead_submission_id' => (string) $payload['lead_submission_id'],
             'context' => self::sanitizeContext($context),
             'attempts' => 0,
             'next_attempt_at' => 0,
@@ -455,12 +599,20 @@ final class RosomahaCrmBridge
     {
         $pageUrl = self::sanitizePageUrl((string) ($_SERVER['HTTP_REFERER'] ?? ''));
         $consent = $_REQUEST['licenses_popup'] ?? null;
+        $cookieTracking = [];
+        foreach (self::trackingKeys() as $key) {
+            $value = self::sanitizeTrackingValue($key, $_COOKIE[$key] ?? '');
+            if ($value !== '') {
+                $cookieTracking[$key] = $value;
+            }
+        }
 
         return [
             'page_url' => $pageUrl,
             'privacy_accepted' => in_array(mb_strtolower(trim((string) $consent)), ['1', 'y', 'yes', 'on'], true),
             'captured_at' => date(DATE_ATOM),
-            'tracking' => self::trackingFromUrl($pageUrl),
+            'tracking' => $cookieTracking,
+            'ym_client_id' => self::sanitizeClientId($_COOKIE['ym_client_id'] ?? ''),
         ];
     }
 
@@ -475,18 +627,36 @@ final class RosomahaCrmBridge
                 : null,
             'captured_at' => self::safeIsoTimestamp((string) ($context['captured_at'] ?? '')),
             'tracking' => self::trackingFromContext($context, $pageUrl),
+            'ym_client_id' => self::sanitizeClientId(
+                $context['ym_client_id']
+                ?? (is_array($context['tracking'] ?? null) ? ($context['tracking']['ym_client_id'] ?? '') : '')
+            ),
         ], static fn ($value) => $value !== null && $value !== '' && $value !== []);
     }
 
     private static function trackingFromContext(array $context, string $pageUrl): array
     {
-        $tracking = self::trackingFromUrl($pageUrl);
         $provided = is_array($context['tracking'] ?? null) ? $context['tracking'] : $context;
+        $tracking = [];
         foreach (self::trackingKeys() as $key) {
-            $value = self::cleanText((string) ($provided[$key] ?? ''), 250);
+            $value = self::sanitizeTrackingValue($key, $provided[$key] ?? '');
             if ($value !== '') {
                 $tracking[$key] = $value;
             }
+        }
+
+        // A fresh URL parameter represents the current submission and must
+        // override an older first-party attribution cookie.
+        foreach (self::trackingFromUrl($pageUrl) as $key => $value) {
+            $tracking[$key] = $value;
+        }
+
+        $clientId = self::sanitizeClientId(
+            $context['ym_client_id']
+            ?? ($provided['ym_client_id'] ?? '')
+        );
+        if ($clientId !== '') {
+            $tracking['ym_client_id'] = $clientId;
         }
 
         $utmSource = mb_strtolower((string) ($tracking['utm_source'] ?? ''));
@@ -532,7 +702,7 @@ final class RosomahaCrmBridge
         parse_str($query, $params);
         $tracking = [];
         foreach (self::trackingKeys() as $key) {
-            $value = self::cleanText((string) ($params[$key] ?? ''), 250);
+            $value = self::sanitizeTrackingValue($key, $params[$key] ?? '');
             if ($value !== '') {
                 $tracking[$key] = $value;
             }
@@ -555,6 +725,37 @@ final class RosomahaCrmBridge
             'vkclid',
             'vk_click_id',
         ];
+    }
+
+    private static function sanitizeClientId($value): string
+    {
+        if (!is_scalar($value)) {
+            return '';
+        }
+
+        $value = trim((string) $value);
+
+        return preg_match('/^[0-9]{6,32}$/D', $value) === 1 ? $value : '';
+    }
+
+    private static function sanitizeTrackingValue(string $key, $value): string
+    {
+        if (!is_scalar($value)) {
+            return '';
+        }
+
+        $value = self::cleanText((string) $value, 250);
+        if ($value === '') {
+            return '';
+        }
+
+        if (in_array($key, ['yclid', 'gclid', 'vkclid', 'vk_click_id'], true)
+            && preg_match('/^[a-z0-9._~+\/-]{1,250}$/iD', $value) !== 1
+        ) {
+            return '';
+        }
+
+        return $value;
     }
 
     private static function sanitizePageUrl(string $url): string
@@ -583,7 +784,7 @@ final class RosomahaCrmBridge
         if (!empty($parts['query'])) {
             parse_str((string) $parts['query'], $params);
             foreach (self::trackingKeys() as $key) {
-                $value = self::cleanText((string) ($params[$key] ?? ''), 250);
+                $value = self::sanitizeTrackingValue($key, $params[$key] ?? '');
                 if ($value !== '') {
                     $tracking[$key] = $value;
                 }
@@ -622,28 +823,55 @@ final class RosomahaCrmBridge
     private static function deliver(array $payload): array
     {
         $response = self::postJson($payload);
-        if ($response['curl_errno'] !== 0) {
+        $ack = self::parseCrmAck($payload, $response);
+        if ($ack === null) {
             return [
                 'ok' => false,
                 'http_code' => $response['http_code'],
                 'deal_id' => null,
-                'error' => 'curl_' . $response['curl_errno'],
+                'error' => $response['curl_errno'] !== 0
+                    ? 'curl_' . $response['curl_errno']
+                    : 'invalid_ack',
             ];
         }
 
-        $body = json_decode((string) $response['body'], true);
-        $acknowledged = $response['http_code'] >= 200
-            && $response['http_code'] < 300
-            && is_array($body)
-            && ($body['status'] ?? null) === 'ok'
-            && (string) ($body['lead_submission_id'] ?? '') === (string) $payload['lead_submission_id']
-            && !empty($body['deal_id']);
+        return [
+            'ok' => true,
+            'http_code' => $response['http_code'],
+            'deal_id' => $ack['deal_id'],
+            'error' => null,
+        ];
+    }
+
+    private static function parseCrmAck(array $payload, array $response): ?array
+    {
+        if ((int) ($response['curl_errno'] ?? -1) !== 0) {
+            return null;
+        }
+
+        $httpCode = (int) ($response['http_code'] ?? 0);
+        if ($httpCode < 200 || $httpCode >= 300) {
+            return null;
+        }
+
+        $body = json_decode((string) ($response['body'] ?? ''), true);
+        $expectedSubmissionId = (string) ($payload['lead_submission_id'] ?? '');
+        $rawSubmissionId = is_array($body) ? ($body['lead_submission_id'] ?? null) : null;
+        $actualSubmissionId = is_scalar($rawSubmissionId) ? (string) $rawSubmissionId : '';
+        $dealId = is_array($body) ? self::normalizeDealId($body['deal_id'] ?? null) : null;
+        if (!is_array($body)
+            || ($body['status'] ?? null) !== 'ok'
+            || $expectedSubmissionId === ''
+            || !hash_equals($expectedSubmissionId, $actualSubmissionId)
+            || $dealId === null
+        ) {
+            return null;
+        }
 
         return [
-            'ok' => $acknowledged,
-            'http_code' => $response['http_code'],
-            'deal_id' => $acknowledged ? (int) $body['deal_id'] : null,
-            'error' => $acknowledged ? null : 'invalid_ack',
+            'status' => 'ok',
+            'lead_submission_id' => $actualSubmissionId,
+            'deal_id' => $dealId,
         ];
     }
 
@@ -684,6 +912,361 @@ final class RosomahaCrmBridge
             'curl_errno' => $curlError,
             'body' => is_string($body) ? mb_substr($body, 0, 10000) : '',
         ];
+    }
+
+    private static function metrikaConfig(): ?array
+    {
+        $path = self::METRIKA_CONFIG_PATH;
+        $permissions = @fileperms($path);
+        if (!is_file($path)
+            || is_link($path)
+            || $permissions === false
+            || ($permissions & 0777) !== 0600
+            || (int) @filesize($path) > 8192
+        ) {
+            return null;
+        }
+
+        $content = @file_get_contents($path);
+
+        return is_string($content) ? self::parseMetrikaConfigJson($content) : null;
+    }
+
+    private static function parseMetrikaConfigJson(string $content): ?array
+    {
+        $decoded = json_decode($content, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+
+        $counterId = self::normalizeCounterId($decoded['counter_id'] ?? null);
+        $rawMeasurementToken = $decoded['measurement_token'] ?? null;
+        $measurementToken = is_scalar($rawMeasurementToken) ? trim((string) $rawMeasurementToken) : '';
+        if ($counterId === null
+            || preg_match('/^[\x21-\x7E]{16,1024}$/D', $measurementToken) !== 1
+        ) {
+            return null;
+        }
+
+        return [
+            'counter_id' => $counterId,
+            'measurement_token' => $measurementToken,
+        ];
+    }
+
+    private static function normalizeCounterId($value): ?int
+    {
+        if (!is_scalar($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+        if (preg_match('/^[1-9][0-9]{4,14}$/D', $value) !== 1) {
+            return null;
+        }
+
+        $counterId = (int) $value;
+
+        return $counterId > 0 ? $counterId : null;
+    }
+
+    private static function attemptSoftGoal(string $path, array $record): array
+    {
+        if (isset($record['metrika']['soft_goal']['status'])) {
+            return $record;
+        }
+
+        // Persist the attempt marker first. A process crash can lose this
+        // optional signal, but cannot send it twice on an automatic retry.
+        $record['metrika']['soft_goal'] = [
+            'status' => 'attempted',
+            'attempted_at' => date(DATE_ATOM),
+        ];
+        $record['updated_at'] = date(DATE_ATOM);
+        self::writeRecord($path, $record);
+
+        $result = self::sendMetrikaGoal(
+            self::METRIKA_SOFT_ACTION,
+            (array) ($record['context'] ?? []),
+            'Bitrix accepted form'
+        );
+        $record['metrika']['soft_goal'] = self::metrikaGoalState($result);
+        $record['updated_at'] = date(DATE_ATOM);
+        self::writeRecord($path, $record);
+
+        return $record;
+    }
+
+    private static function sendMetrikaGoal(string $action, array $context, string $title): array
+    {
+        $preparation = self::prepareMetrikaGoal($action, $context, $title);
+        if (($preparation['status'] ?? null) !== 'ready') {
+            return $preparation;
+        }
+
+        return self::dispatchMetrikaFields((array) $preparation['fields']);
+    }
+
+    private static function prepareMetrikaGoal(string $action, array $context, string $title): array
+    {
+        if (!in_array($action, [self::METRIKA_SOFT_ACTION, self::METRIKA_HARD_ACTION], true)) {
+            return [
+                'status' => 'failed',
+                'http_code' => 0,
+                'error' => 'invalid_action',
+            ];
+        }
+
+        $context = self::sanitizeContext($context);
+        $clientId = self::sanitizeClientId(
+            $context['ym_client_id']
+            ?? ($context['tracking']['ym_client_id'] ?? '')
+        );
+        if ($clientId === '') {
+            return [
+                'status' => 'metrika_unattributed',
+                'http_code' => 0,
+                'error' => 'client_id_missing',
+            ];
+        }
+
+        $config = self::metrikaConfig();
+        if ($config === null) {
+            return [
+                'status' => 'failed',
+                'http_code' => 0,
+                'error' => 'config_unavailable',
+            ];
+        }
+
+        $pageUrl = self::sanitizePageUrl((string) ($context['page_url'] ?? ''));
+        if ($pageUrl === '') {
+            $pageUrl = 'https://' . self::SOURCE . '/';
+        }
+
+        return [
+            'status' => 'ready',
+            'fields' => self::buildMetrikaFields(
+                $config,
+                $clientId,
+                $action,
+                $title,
+                $pageUrl
+            ),
+        ];
+    }
+
+    private static function dispatchMetrikaFields(array $fields): array
+    {
+        return self::classifyMetrikaResponse(self::postMetrikaForm($fields));
+    }
+
+    private static function classifyMetrikaResponse(array $response): array
+    {
+        $httpCode = (int) ($response['http_code'] ?? 0);
+        $curlError = (int) ($response['curl_errno'] ?? -1);
+        $dispatched = ($response['dispatched'] ?? false) === true;
+        if ($curlError === 0 && $httpCode >= 200 && $httpCode < 300) {
+            return [
+                'status' => 'sent',
+                'http_code' => $httpCode,
+                'error' => null,
+            ];
+        }
+
+        if (($curlError !== 0 || $httpCode >= 500) && $dispatched) {
+            return [
+                'status' => 'metrika_indeterminate',
+                'http_code' => $httpCode,
+                'error' => 'dispatch_unknown',
+            ];
+        }
+
+        if ($curlError === 0 && $httpCode === 0 && $dispatched) {
+            return [
+                'status' => 'metrika_indeterminate',
+                'http_code' => 0,
+                'error' => 'dispatch_unknown',
+            ];
+        }
+
+        return [
+            'status' => 'failed',
+            'http_code' => $httpCode,
+            'error' => $curlError !== 0 ? 'curl_' . $curlError : 'http_' . $httpCode,
+        ];
+    }
+
+    private static function buildMetrikaFields(
+        array $config,
+        string $clientId,
+        string $action,
+        string $title,
+        string $pageUrl
+    ): array {
+        return [
+            'tid' => (string) $config['counter_id'],
+            'cid' => $clientId,
+            't' => 'event',
+            'ea' => $action,
+            'et' => self::cleanText($title, 120),
+            'dl' => $pageUrl,
+            'ms' => $config['measurement_token'],
+        ];
+    }
+
+    private static function postMetrikaForm(array $fields): array
+    {
+        if (!extension_loaded('curl')) {
+            return ['http_code' => 0, 'curl_errno' => -1, 'dispatched' => false];
+        }
+
+        $encoded = http_build_query($fields, '', '&', PHP_QUERY_RFC3986);
+        $curl = curl_init(self::METRIKA_ENDPOINT);
+        curl_setopt_array($curl, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $encoded,
+            CURLOPT_HTTPHEADER => [
+                'Accept: */*',
+                'Content-Type: application/x-www-form-urlencoded',
+                'User-Agent: RosomahaLegacyBitrixBridge/2.0',
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 1,
+            CURLOPT_TIMEOUT => 2,
+            CURLOPT_NOSIGNAL => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_MAXREDIRS => 0,
+        ]);
+        curl_exec($curl);
+        $httpCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $requestSize = (int) curl_getinfo($curl, CURLINFO_REQUEST_SIZE);
+        $curlError = (int) curl_errno($curl);
+        curl_close($curl);
+
+        return [
+            'http_code' => $httpCode,
+            'curl_errno' => $curlError,
+            'dispatched' => $requestSize > 0,
+        ];
+    }
+
+    private static function metrikaGoalState(array $result): array
+    {
+        return array_filter([
+            'status' => in_array((string) ($result['status'] ?? ''), ['sent', 'failed', 'metrika_unattributed', 'metrika_indeterminate'], true)
+                ? (string) $result['status']
+                : 'failed',
+            'http_code' => (int) ($result['http_code'] ?? 0),
+            'error' => isset($result['error'])
+                ? preg_replace('/[^a-z0-9_-]/i', '_', mb_substr((string) $result['error'], 0, 80))
+                : null,
+            'completed_at' => date(DATE_ATOM),
+        ], static fn ($value) => $value !== null && $value !== '');
+    }
+
+    private static function hardGoalResumeAction(array $record): string
+    {
+        $status = (string) ($record['metrika']['hard_goal']['status'] ?? '');
+
+        return match ($status) {
+            '', 'failed' => 'send',
+            'sent' => 'finalize_sent',
+            'metrika_unattributed' => 'finalize_unattributed',
+            default => 'manual_review',
+        };
+    }
+
+    private static function requiresCrmDelivery(array $record): bool
+    {
+        $submissionId = trim((string) ($record['lead_submission_id'] ?? ''));
+        $ack = is_array($record['crm_ack'] ?? null) ? $record['crm_ack'] : [];
+        $ackSubmissionId = trim((string) ($ack['lead_submission_id'] ?? ''));
+
+        return $submissionId === ''
+            || ($ack['status'] ?? null) !== 'ok'
+            || $ackSubmissionId === ''
+            || !hash_equals($submissionId, $ackSubmissionId)
+            || self::normalizeDealId($ack['deal_id'] ?? null) === null;
+    }
+
+    private static function normalizeDealId($value): ?string
+    {
+        if ((!is_int($value) && !is_string($value)) || is_bool($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+        if ($value === ''
+            || $value === '0'
+            || mb_strlen($value) > 128
+            || preg_match('/^[a-z0-9._:-]+$/iD', $value) !== 1
+        ) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    private static function finalizeRecord(string $path, array $record, string $metrikaStatus): void
+    {
+        $receipt = self::buildCompletionReceipt($record, $metrikaStatus);
+        $completedPath = self::completedRecordPath(
+            (int) $record['form_id'],
+            (int) $record['result_id']
+        );
+        if (!is_file($completedPath)) {
+            self::writeRecord($completedPath, $receipt);
+        }
+
+        if (!@unlink($path) && is_file($path)) {
+            throw new RuntimeException('Could not finalize queue record.');
+        }
+    }
+
+    private static function buildCompletionReceipt(array $record, string $metrikaStatus): array
+    {
+        $ack = is_array($record['crm_ack'] ?? null) ? $record['crm_ack'] : [];
+        $metrika = is_array($record['metrika'] ?? null) ? $record['metrika'] : [];
+
+        return array_filter([
+            'version' => 2,
+            'form_id' => (int) ($record['form_id'] ?? 0),
+            'result_id' => (int) ($record['result_id'] ?? 0),
+            'lead_submission_id' => trim((string) ($record['lead_submission_id'] ?? '')),
+            'final_status' => match ($metrikaStatus) {
+                'metrika_unattributed' => 'metrika_unattributed',
+                'metrika_indeterminate' => 'metrika_indeterminate',
+                default => 'delivered',
+            },
+            'manual_review_required' => $metrikaStatus === 'metrika_indeterminate',
+            'crm_ack' => [
+                'status' => ($ack['status'] ?? null) === 'ok' ? 'ok' : 'invalid',
+                'lead_submission_id' => trim((string) ($ack['lead_submission_id'] ?? '')),
+                'deal_id' => self::normalizeDealId($ack['deal_id'] ?? null),
+                'acknowledged_at' => self::safeIsoTimestamp((string) ($ack['acknowledged_at'] ?? '')),
+            ],
+            'metrika' => [
+                'soft_goal' => self::receiptGoalState((array) ($metrika['soft_goal'] ?? [])),
+                'hard_goal' => self::receiptGoalState((array) ($metrika['hard_goal'] ?? [])),
+            ],
+            'created_at' => self::safeIsoTimestamp((string) ($record['created_at'] ?? '')),
+            'finalized_at' => date(DATE_ATOM),
+        ], static fn ($value) => $value !== null && $value !== '' && $value !== []);
+    }
+
+    private static function receiptGoalState(array $state): array
+    {
+        return array_filter([
+            'status' => in_array((string) ($state['status'] ?? ''), ['sent', 'failed', 'metrika_unattributed', 'metrika_indeterminate'], true)
+                ? (string) $state['status']
+                : 'unknown',
+            'http_code' => (int) ($state['http_code'] ?? 0),
+            'error' => isset($state['error'])
+                ? preg_replace('/[^a-z0-9_-]/i', '_', mb_substr((string) $state['error'], 0, 80))
+                : null,
+            'completed_at' => self::safeIsoTimestamp((string) ($state['completed_at'] ?? '')),
+        ], static fn ($value) => $value !== null && $value !== '');
     }
 
     private static function markFailure(string $path, array $record, string $error, int $httpCode): void
@@ -768,6 +1351,11 @@ final class RosomahaCrmBridge
         return self::storageDirectory() . '/pending-' . $webFormId . '-' . $resultId . '.json';
     }
 
+    private static function completedRecordPath(int $webFormId, int $resultId): string
+    {
+        return self::storageDirectory() . '/completed-' . $webFormId . '-' . $resultId . '.json';
+    }
+
     private static function pendingFlagPath(): string
     {
         return self::storageDirectory() . '/pending.flag';
@@ -805,9 +1393,12 @@ final class RosomahaCrmBridge
             'form_id' => $webFormId,
             'result_id' => $resultId,
             'http_code' => isset($context['http_code']) ? (int) $context['http_code'] : null,
-            'deal_id' => isset($context['deal_id']) ? (int) $context['deal_id'] : null,
+            'deal_id' => isset($context['deal_id']) ? self::normalizeDealId($context['deal_id']) : null,
             'error' => isset($context['error']) ? preg_replace('/[^a-z0-9_-]/i', '_', (string) $context['error']) : null,
             'exception' => isset($context['exception']) ? basename(str_replace('\\', '/', (string) $context['exception'])) : null,
+            'metrika_status' => isset($context['metrika_status'])
+                ? preg_replace('/[^a-z0-9_-]/i', '_', (string) $context['metrika_status'])
+                : null,
         ];
 
         AddMessage2Log('[RosomahaCrmBridge] ' . json_encode(array_filter($safe), JSON_UNESCAPED_SLASHES), 'rosomaha_crm_bridge');

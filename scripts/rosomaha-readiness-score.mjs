@@ -82,9 +82,9 @@ const gates = [
   ),
   ok(
     metrika.includes('leadSubmit: "lead_submit"') && metrika.includes('crmConversion: "crm_conversion"'),
-    "hard goals exist in client event layer",
-    "metrika.ts defines lead_submit and crm_conversion",
-    "Define hard-goal events",
+    "client keeps soft goal and namespaced hard-goal identifier",
+    "metrika.ts defines lead_submit while reserving crm_conversion for confirmed CRM events",
+    "Keep lead_submit in client layer and crm_conversion reserved for post-CRM confirmation",
   ),
   ok(
     dryRunScript.includes("Fetch.fulfillRequest") && dryRunScript.includes("ROSOMAHA_REAL_CRM_POST"),
@@ -93,9 +93,12 @@ const gates = [
     "Add guarded test runner",
   ),
   ok(
-    dryRun?.ok && dryRun?.mode === "dry-run" && dryRun?.reachedGoals?.includes("lead_submit") && dryRun?.reachedGoals?.includes("crm_conversion"),
+    dryRun?.ok
+      && dryRun?.mode === "dry-run"
+      && dryRun?.reachedGoals?.includes("lead_submit")
+      && !dryRun?.reachedGoals?.includes("crm_conversion"),
     "runtime dry-run proves site-side lead chain",
-    dryRun ? `dry-run artifact ${dryRun.artifact || "latest"} reached lead_submit and crm_conversion` : undefined,
+    dryRun ? `dry-run artifact ${dryRun.artifact || "latest"} reached lead_submit without synthetic crm_conversion` : undefined,
     "Run node scripts/dry-run-lead-chain.mjs",
   ),
   ok(

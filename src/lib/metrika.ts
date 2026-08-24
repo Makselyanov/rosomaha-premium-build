@@ -79,8 +79,9 @@ export const trackOrderCtaClick = (placement: string) => {
 };
 
 export const trackLeadSubmit = (params?: GoalParams) => {
+  // Hard goal crm_conversion must be emitted only after CRM confirms
+  // the exact deal_id for this submission. Frontend form submit stays soft.
   reachGoal(METRIKA_GOALS.leadSubmit, params);
-  reachGoal(LEGACY_METRIKA_GOALS.crmConversion, params);
   trackVkGoal(VK_PIXEL_GOALS.leadSubmit, params);
 };
 

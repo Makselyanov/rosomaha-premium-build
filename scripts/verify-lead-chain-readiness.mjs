@@ -41,7 +41,7 @@ const checks = [
       "rosomaha_last_lead_receipt",
       "Fetch.fulfillRequest",
       "lead_submit",
-      "crm_conversion",
+      "crm_conversion must not fire from frontend form submit",
       "codex_dry_run_9of10",
     ],
   },

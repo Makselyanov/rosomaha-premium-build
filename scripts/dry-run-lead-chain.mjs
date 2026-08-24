@@ -366,7 +366,7 @@ async function runDryRun() {
 
     const reachedGoals = getReachedGoals(client);
     assert(reachedGoals.includes("lead_submit"), "lead_submit goal was not reached");
-    assert(reachedGoals.includes("crm_conversion"), "crm_conversion goal was not reached");
+    assert(!reachedGoals.includes("crm_conversion"), "crm_conversion must not fire from frontend form submit");
 
     const result = {
       ok: true,
