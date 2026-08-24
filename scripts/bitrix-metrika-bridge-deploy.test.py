@@ -487,6 +487,33 @@ class ReceiptAndReadOnlyTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
 
+    def test_revision_change_produces_a_distinct_operation_id(self) -> None:
+        goal_ids = {"crm_conversion": 1, "lead_submit": 2}
+        current = operator._operation_id(
+            bridge=b"a",
+            init=b"b",
+            counter=b"c",
+            counter_id=operator.TARGET_COUNTER_ID,
+            goal_ids=goal_ids,
+        )
+        with mock.patch.object(
+            operator, "OPERATOR_REVISION", "bitrix-metrika-bridge-pinned-v1"
+        ):
+            previous = operator._operation_id(
+                bridge=b"a",
+                init=b"b",
+                counter=b"c",
+                counter_id=operator.TARGET_COUNTER_ID,
+                goal_ids=goal_ids,
+            )
+        self.assertNotEqual(current, previous)
+
+    def test_transaction_lock_observation_is_read_only(self) -> None:
+        sftp = baseline_sftp()
+        observed = operator._observe_transaction_lock(sftp)
+        self.assertEqual(observed["status"], "missing")
+        self.assertFalse(any(call[0] in {"open", "remove"} for call in sftp.calls))
+
     def test_audit_aspro_helper_contains_no_write_api(self) -> None:
         audit = operator._aspro_php("audit", operator.TARGET_COUNTER_ID)
         apply = operator._aspro_php("apply", operator.TARGET_COUNTER_ID)
@@ -702,6 +729,8 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(sftp.files[operator.CONFIG_PATH]["mode"]), 0o600)
         self.assertEqual(set(state.values()), {str(operator.TARGET_COUNTER_ID)})
         self.assertEqual(calls, ["audit", "apply"])
+        self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
+        self.assertIn(("open", operator.TRANSACTION_LOCK_PATH, "wx"), sftp.calls)
         renames = [call for call in sftp.calls if call[0] == "posix_rename"]
         self.assertEqual(len(renames), 3)
         self.assertFalse(any(".init." in call[1] for call in renames))
@@ -758,6 +787,132 @@ class TransactionTests(unittest.TestCase):
         self.assertNotIn(operator.CONFIG_PATH, sftp.files)
         self.assertEqual(set(state.values()), {str(operator.OLD_COUNTER_ID)})
         self.assertEqual(calls, ["audit", "apply", "rollback"])
+        self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
+
+    def test_concurrent_second_apply_is_blocked_before_write_or_aspro(self) -> None:
+        with fixture_pins() as counter_candidate:
+            sftp = baseline_sftp()
+            plans, operation_id = operator._plans_from_remote(
+                sftp, runtime(), FIXTURE_BRIDGE_CANDIDATE
+            )
+            self.assertEqual(plans[-1]["candidate"], counter_candidate)
+            owner = operator._acquire_transaction_lock(
+                sftp, mode="apply", operation_id=operation_id
+            )
+            write_calls_before = [
+                call
+                for call in sftp.calls
+                if call[0] in {"mkdir", "chmod", "chown", "posix_rename", "remove"}
+                or (call[0] == "open" and call[2] == "wx")
+            ]
+            client = FakeClient(sftp)
+            with (
+                mock.patch.object(operator, "discover_php") as discover,
+                mock.patch.object(operator, "aspro_options") as options,
+            ):
+                with self.assertRaisesRegex(
+                    operator.DeployError, "Transaction lock already exists"
+                ):
+                    operator.apply_remote(
+                        client,
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda counter: {
+                            "status": 200,
+                            "counter_id": counter,
+                        },
+                    )
+            write_calls_after = [
+                call
+                for call in sftp.calls
+                if call[0] in {"mkdir", "chmod", "chown", "posix_rename", "remove"}
+                or (call[0] == "open" and call[2] == "wx")
+            ]
+            self.assertEqual(write_calls_after, write_calls_before)
+            discover.assert_not_called()
+            options.assert_not_called()
+            self.assertEqual(sftp.files[operator.TRANSACTION_LOCK_PATH]["data"], owner["body"])
+            operator._release_transaction_lock(sftp, owner)
+
+    def test_owned_lock_is_released_on_failure_before_switch(self) -> None:
+        with fixture_pins():
+            sftp = baseline_sftp()
+            client = FakeClient(sftp)
+            with mock.patch.object(
+                operator, "discover_php", side_effect=operator.DeployError("offline discovery failure")
+            ):
+                with self.assertRaisesRegex(
+                    operator.DeployError, "offline discovery failure"
+                ):
+                    operator.apply_remote(
+                        client,
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda counter: {
+                            "status": 200,
+                            "counter_id": counter,
+                        },
+                    )
+        self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
+
+    def test_foreign_or_drifted_lock_is_never_deleted(self) -> None:
+        mutations = (
+            ("content", lambda item: item.update(data=item["data"] + b"foreign")),
+            ("mode", lambda item: item.update(mode=stat.S_IFREG | 0o640)),
+            ("uid", lambda item: item.update(uid=operator.EXPECTED_UID + 1)),
+            ("gid", lambda item: item.update(gid=operator.EXPECTED_GID + 1)),
+        )
+        with fixture_pins():
+            for case, mutate in mutations:
+                with self.subTest(case=case):
+                    sftp = baseline_sftp()
+                    _, operation_id = operator._plans_from_remote(
+                        sftp, runtime(), FIXTURE_BRIDGE_CANDIDATE
+                    )
+                    owner = operator._acquire_transaction_lock(
+                        sftp, mode="apply", operation_id=operation_id
+                    )
+                    mutate(sftp.files[operator.TRANSACTION_LOCK_PATH])
+                    with self.assertRaises(operator.DeployError):
+                        operator._release_transaction_lock(sftp, owner)
+                    self.assertIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
+
+    def test_rollback_respects_the_same_existing_transaction_lock(self) -> None:
+        state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
+        calls: list[str] = []
+        with fixture_pins() as counter_candidate:
+            sftp = baseline_sftp()
+            client = FakeClient(sftp)
+            first, second, third = self.patches(state, calls)
+            with first, second, third:
+                applied = operator.apply_remote(
+                    client,
+                    runtime(),
+                    FIXTURE_BRIDGE_CANDIDATE,
+                    public_verifier=lambda counter: {"status": 200, "counter_id": counter},
+                )
+                owner = operator._acquire_transaction_lock(
+                    sftp, mode="apply", operation_id=applied["operation_id"]
+                )
+                calls_before = list(calls)
+                with self.assertRaisesRegex(
+                    operator.DeployError, "Transaction lock already exists"
+                ):
+                    operator.rollback_remote(
+                        client,
+                        applied["operation_id"],
+                        runtime(),
+                        FIXTURE_BRIDGE_CANDIDATE,
+                        public_verifier=lambda counter: {
+                            "status": 200,
+                            "counter_id": counter,
+                        },
+                    )
+                self.assertEqual(calls, calls_before)
+                self.assertEqual(sftp.files[operator.BRIDGE_PATH]["data"], FIXTURE_BRIDGE_CANDIDATE)
+                self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], counter_candidate)
+                self.assertEqual(sftp.files[operator.TRANSACTION_LOCK_PATH]["data"], owner["body"])
+                operator._release_transaction_lock(sftp, owner)
 
     def test_exact_rolled_back_operation_is_reused_without_overwriting_backups(self) -> None:
         state = {"site_s1": str(operator.OLD_COUNTER_ID), "global": str(operator.OLD_COUNTER_ID)}
@@ -936,6 +1091,7 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(sftp.files[operator.COUNTER_PATH]["data"], FIXTURE_COUNTER_BASELINE)
         self.assertNotIn(operator.CONFIG_PATH, sftp.files)
         self.assertEqual(set(state.values()), {str(operator.OLD_COUNTER_ID)})
+        self.assertNotIn(operator.TRANSACTION_LOCK_PATH, sftp.files)
 
     def test_apply_and_rollback_guards_block_before_dispatch(self) -> None:
         with mock.patch.object(operator, "require_committed_operator") as committed:
