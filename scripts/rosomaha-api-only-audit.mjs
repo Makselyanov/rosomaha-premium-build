@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { LIVE4_ACCOUNT_URL, safeJsonRequest } from "./yandex-direct-balance.mjs";
+import { getAccessToken, gscRequest } from "./gsc-report.mjs";
 
 const rootDir = process.cwd();
 const envPath = path.join(rootDir, ".env.seo.local");
@@ -19,6 +21,7 @@ const allowedDirectJsonCalls = new Set([
   "ads.get",
   "sitelinks.get",
 ]);
+const allowedDirectSafeJsonCalls = new Set(["clients.get", "agencyclients.get", "strategies.get"]);
 const counters = [
   { name: "catalog", id: "107139619", hardGoalId: "517600157", site: "xn--80aa8ahaki9a.site" },
   { name: "quiz", id: "105918356", hardGoalId: "496461698", site: "rosomaha.site" },
@@ -160,6 +163,211 @@ function directJsonRequest(env, service, method, params) {
   if (!result.ok) return result;
   if (result.data?.error) return { ok: false, error: result.data.error };
   return { ok: true, data: result.data.result };
+}
+
+async function directSafeJsonRequest(env, service, method, params, options = {}) {
+  const call = `${service}.${method}`;
+  if (!allowedDirectSafeJsonCalls.has(call)) {
+    return { ok: false, error: `blocked non-read-only Direct call: ${call}` };
+  }
+  const token = env.YANDEX_DIRECT_OAUTH_TOKEN || env.YANDEX_OAUTH_TOKEN;
+  const login = directLoginForEnv(env);
+  if (!token) return { ok: false, error: "missing YANDEX_OAUTH_TOKEN" };
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Accept-Language": "ru",
+    "Content-Type": "application/json; charset=utf-8",
+  };
+  if (options.includeClientLogin !== false) headers["Client-Login"] = login;
+
+  let response;
+  try {
+    response = await safeJsonRequest(
+      `https://api.direct.yandex.com/json/v501/${service}`,
+      { method: "POST", headers, body: JSON.stringify({ method, params }) },
+      { secrets: [token] },
+    );
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+
+  if (!response.ok || response.data?.error) {
+    const providerError = response.data?.error || {};
+    return {
+      ok: false,
+      error: {
+        httpStatus: response.status,
+        error_code: providerError.error_code || null,
+        error_string: providerError.error_string || "provider error",
+        requestId: response.providerMeta?.requestId || null,
+      },
+    };
+  }
+  return {
+    ok: true,
+    data: response.data?.result,
+    requestId: response.providerMeta?.requestId || null,
+  };
+}
+
+async function directAccountScope(env) {
+  const fieldNames = ["ClientId", "Login", "Type", "Archived", "AvailableCampaignTypes"];
+  const owner = await directSafeJsonRequest(env, "clients", "get", { FieldNames: fieldNames }, { includeClientLogin: false });
+  const agency = await directSafeJsonRequest(env, "agencyclients", "get", {
+    SelectionCriteria: {},
+    FieldNames: fieldNames,
+    Page: { Limit: 10000, Offset: 0 },
+  }, { includeClientLogin: false });
+  const ownerClients = owner.ok ? owner.data?.Clients || [] : [];
+  const agencyClients = agency.ok ? agency.data?.Clients || [] : [];
+  const exactOwner = ownerClients.find((client) => client.Login === directLoginDefault) || null;
+
+  return {
+    ok: Boolean(owner.ok && exactOwner),
+    ownerError: owner.ok ? null : owner.error,
+    tokenOwner: exactOwner
+      ? {
+          login: exactOwner.Login,
+          clientId: Number(exactOwner.ClientId),
+          type: exactOwner.Type,
+          archived: exactOwner.Archived,
+          availableCampaignTypes: exactOwner.AvailableCampaignTypes || [],
+        }
+      : null,
+    agencyAccess: {
+      ok: agency.ok,
+      errorCode: agency.ok ? null : Number(agency.error?.error_code || 0) || null,
+      errorString: agency.ok ? null : agency.error?.error_string || null,
+      clientCount: agencyClients.length,
+      limitedBy: agency.data?.LimitedBy || null,
+    },
+    exactLoginVerified: exactOwner?.Login === directLoginDefault,
+    directClientVerified: exactOwner?.Type === "CLIENT",
+    scriptMutations: 0,
+  };
+}
+
+async function directPackageStrategies(env, accountScope) {
+  if (!accountScope?.exactLoginVerified || !accountScope?.directClientVerified) {
+    return {
+      ok: false,
+      error: "Контур Direct не подтверждён как точный прямой клиент rosomaha-rus999",
+      scriptMutations: 0,
+    };
+  }
+  const result = await directSafeJsonRequest(env, "strategies", "get", {
+    SelectionCriteria: {},
+    FieldNames: ["Id", "Name", "Type", "CounterIds", "PriorityGoals", "StatusArchived"],
+    Page: { Limit: 10000, Offset: 0 },
+  });
+  if (!result.ok) return { ok: false, error: result.error, scriptMutations: 0 };
+  if (result.data?.LimitedBy) {
+    return { ok: false, error: `strategies.get page truncated at ${result.data.LimitedBy}`, scriptMutations: 0 };
+  }
+
+  const strategies = result.data?.Strategies || [];
+  const targetCounterId = 50606578;
+  const bitrixStrategies = strategies
+    .filter((strategy) => (strategy.CounterIds?.Items || []).map(Number).includes(targetCounterId))
+    .map((strategy) => ({
+      id: Number(strategy.Id),
+      name: String(strategy.Name || "").slice(0, 250),
+      type: String(strategy.Type || "unknown"),
+      statusArchived: String(strategy.StatusArchived || "unknown"),
+      counterIds: uniqueSortedNumbers(strategy.CounterIds?.Items || []),
+      priorityGoalIds: uniqueSortedNumbers((strategy.PriorityGoals?.Items || []).map((goal) => goal.GoalId)),
+    }));
+
+  return {
+    ok: true,
+    strategyCount: strategies.length,
+    targetCounterId,
+    bitrixStrategyCount: bitrixStrategies.length,
+    bitrixStrategies,
+    requestId: result.requestId,
+    scriptMutations: 0,
+    limitation: "Проверка охватывает только пакетные стратегии и сама по себе не доказывает их использование кампанией.",
+  };
+}
+
+async function directAccessibleMetrikaGoals(env, accountScope) {
+  const token = env.YANDEX_DIRECT_OAUTH_TOKEN || env.YANDEX_OAUTH_TOKEN;
+  if (!token) return { ok: false, error: "missing YANDEX_OAUTH_TOKEN", scriptMutations: 0 };
+  if (!accountScope?.exactLoginVerified || !accountScope?.directClientVerified) {
+    return {
+      ok: false,
+      error: "Контур Direct не подтверждён как точный прямой клиент rosomaha-rus999",
+      scriptMutations: 0,
+    };
+  }
+
+  const body = {
+    method: "GetRetargetingGoals",
+    token,
+    locale: "ru",
+    param: {},
+  };
+  let response;
+  try {
+    response = await safeJsonRequest(
+      LIVE4_ACCOUNT_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+      },
+      { secrets: [token] },
+    );
+  } catch (error) {
+    return { ok: false, error: error.message, scriptMutations: 0 };
+  }
+
+  const providerError = response.data?.error || response.data?.error_code;
+  if (!response.ok || providerError != null) {
+    return {
+      ok: false,
+      error: {
+        httpStatus: response.status,
+        errorCode: response.data?.error_code || response.data?.error?.error_code || null,
+        errorString: response.data?.error_str || response.data?.error?.error_string || "provider error",
+        requestId: response.providerMeta?.requestId || null,
+      },
+      scriptMutations: 0,
+    };
+  }
+
+  const goals = response.data?.data;
+  if (!Array.isArray(goals)) {
+    return {
+      ok: false,
+      error: "GetRetargetingGoals returned no goal array",
+      requestId: response.providerMeta?.requestId || null,
+      scriptMutations: 0,
+    };
+  }
+
+  const bitrixGoals = goals
+    .filter((goal) => bitrixHosts.has(hostFromUrl(goal.GoalDomain)))
+    .map((goal) => ({
+      goalId: String(goal.GoalID || ""),
+      goalDomain: hostFromUrl(goal.GoalDomain),
+      name: String(goal.Name || "").slice(0, 250),
+      type: String(goal.Type || "unknown"),
+    }));
+
+  return {
+    ok: true,
+    method: "GetRetargetingGoals",
+    endpoint: LIVE4_ACCOUNT_URL,
+    exactLogin: directLoginDefault,
+    accessibleGoalCount: goals.length,
+    bitrixGoalCount: bitrixGoals.length,
+    bitrixGoals,
+    requestId: response.providerMeta?.requestId || null,
+    scriptMutations: 0,
+    limitation: "Проверка доказывает только цели Метрики, видимые клиенту Direct; она не доказывает владельца счётчика или связь с кампанией.",
+  };
 }
 
 function directBatchGet(env, service, resultKey, ids, batchSize, buildParams) {
@@ -418,10 +626,52 @@ function webmasterRequest(env, endpoint) {
   return { ok: true, data: result.data };
 }
 
-function gscStatus(env) {
+async function gscStatus(env) {
   const missing = ["GSC_CLIENT_ID", "GSC_REFRESH_TOKEN", "GSC_SITE_URL"].filter((key) => !env[key]);
   if (missing.length) return { ok: false, missing, reason: "missing_project_gsc_oauth_config" };
-  return { ok: true, note: "GSC config present; use npm run seo:gsc for detailed Search Console report" };
+
+  const siteUrl = env.GSC_SITE_URL;
+  let accessToken;
+  try {
+    accessToken = await getAccessToken({
+      clientId: env.GSC_CLIENT_ID,
+      clientSecret: env.GSC_CLIENT_SECRET || "",
+      refreshToken: env.GSC_REFRESH_TOKEN,
+    });
+  } catch (error) {
+    const detail = String(error?.message || "");
+    return {
+      ok: false,
+      reason: detail.includes("invalid_grant") ? "invalid_grant" : "gsc_oauth_failed",
+      detail,
+    };
+  }
+
+  let sitesResult;
+  try {
+    sitesResult = await gscRequest(accessToken, "GET", "/webmasters/v3/sites");
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "gsc_sites_request_failed",
+      detail: String(error?.message || error),
+    };
+  }
+
+  const siteEntry = (sitesResult?.siteEntry || []).find((entry) => entry.siteUrl === siteUrl);
+  if (!siteEntry) {
+    return {
+      ok: false,
+      reason: "token_valid_but_site_not_in_account",
+      siteUrl,
+    };
+  }
+
+  return {
+    ok: true,
+    siteUrl,
+    permissionLevel: siteEntry.permissionLevel || null,
+  };
 }
 
 function aggregateCampaignRows(rows, includeWatchedDefaults = true) {
@@ -492,11 +742,66 @@ function buildMarkdown(report) {
     "- Метрика: счетчики 107139619 каталог / 105918356 квиз, hard goals 517600157 (crm_conversion после ответа CRM) / 496461698 за 1, 7, 30 дней. Старую DOM-цель формы 517599639 считать мягкой.",
     "- rosomaha-rus.ru: отдельный объект; публично установлен счетчик 50606578, но API-доступ и hard goal этим запуском не переносятся с других доменов.",
     "- Yandex Webmaster: host xn--80aa8ahaki9a.site, summary, diagnostics, sitemaps, popular queries.",
-    "- Google Search Console: только наличие проектного API-конфига, без браузера и OAuth UI.",
+    "- Google Search Console: live OAuth probe без браузера; если токен недействителен, источник помечается недоступным.",
     "",
     "## Свежие цифры Direct",
     "",
   ];
+
+  lines.push("## Контур рекламодателя Direct");
+  lines.push("");
+  const scope = report.direct.accountScope;
+  if (scope.ok) {
+    lines.push(`- Владелец токена: ${scope.tokenOwner.login}; ClientId=${scope.tokenOwner.clientId}; Type=${scope.tokenOwner.type}; Archived=${scope.tokenOwner.archived}.`);
+    lines.push(`- Доступные API-типы кампаний: ${scope.tokenOwner.availableCampaignTypes.join(", ") || "не возвращены"}.`);
+    if (scope.agencyAccess.ok) {
+      lines.push(`- AgencyClients.get доступен: клиентов ${scope.agencyAccess.clientCount}; этот отчёт не переносит показатели между ними.`);
+    } else {
+      lines.push(`- AgencyClients.get недоступен: error_code=${scope.agencyAccess.errorCode || "n/a"}; токен не даёт агентского списка клиентов.`);
+    }
+    lines.push(`- Изоляция точного логина: ${scope.exactLoginVerified ? "PASS" : "FAIL"}; прямой рекламодатель Type=CLIENT: ${scope.directClientVerified ? "PASS" : "не подтверждено"}.`);
+    lines.push(`- Скрипт ничего не менял: mutations=${scope.scriptMutations}.`);
+  } else {
+    lines.push(`- Контур аккаунта не подтверждён: ${errorText(scope.ownerError)}.`);
+  }
+  lines.push("");
+
+  lines.push("## Пакетные стратегии и счётчик 50606578");
+  lines.push("");
+  const strategies = report.direct.packageStrategies;
+  if (strategies.ok) {
+    lines.push(`- Strategies.get: пакетных стратегий ${strategies.strategyCount}; со счётчиком ${strategies.targetCounterId} найдено ${strategies.bitrixStrategyCount}.`);
+    for (const strategy of strategies.bitrixStrategies) {
+      lines.push(`- StrategyId=${strategy.id}; тип=${strategy.type}; архив=${strategy.statusArchived}; цели=${strategy.priorityGoalIds.join(", ") || "не возвращены"}; название=${strategy.name || "не возвращено"}.`);
+    }
+    if (!strategies.bitrixStrategyCount) {
+      lines.push("- Счётчик 50606578 не найден ни в одной доступной пакетной стратегии Direct.");
+    }
+    lines.push(`- Скрипт ничего не менял: mutations=${strategies.scriptMutations}.`);
+    lines.push("- Ограничение: пакетная стратегия не является доказательством кампании, посадочной или фактических показов; непакетные стратегии этим методом не охватываются.");
+  } else {
+    lines.push(`- Источник недоступен: ${errorText(strategies.error)}.`);
+  }
+  lines.push("");
+
+  lines.push("## Доступ Direct к целям Метрики rosomaha-rus.ru");
+  lines.push("");
+  const directGoals = report.direct.accessibleMetrikaGoals;
+  if (directGoals.ok) {
+    lines.push(`- Live 4 ${directGoals.method}: доступно целей/сегментов ${directGoals.accessibleGoalCount}; для rosomaha-rus.ru найдено ${directGoals.bitrixGoalCount}.`);
+    if (directGoals.bitrixGoals.length) {
+      for (const goal of directGoals.bitrixGoals) {
+        lines.push(`- GoalID=${goal.goalId}; домен=${goal.goalDomain}; тип=${goal.type}; название=${goal.name || "не возвращено"}.`);
+      }
+    } else {
+      lines.push("- В доступном Direct-контуре нет цели с GoalDomain rosomaha-rus.ru; переносить цели других доменов запрещено.");
+    }
+    lines.push(`- Скрипт ничего не менял: mutations=${directGoals.scriptMutations}.`);
+    lines.push("- Ограничение: этот список доказывает только видимость целей для клиента Direct; он не доказывает владельца счётчика и не связывает цель с конкретной кампанией.");
+  } else {
+    lines.push(`- Источник недоступен: ${errorText(directGoals.error)}.`);
+  }
+  lines.push("");
 
   if (report.direct.campaignsSnapshot.ok) {
     const visible = report.direct.campaignsSnapshot.data.Campaigns || [];
@@ -600,9 +905,12 @@ function buildMarkdown(report) {
 
   lines.push("", "## GSC API");
   if (report.gsc.ok) {
-    lines.push("- Конфиг присутствует; подробный отчет можно снимать через `npm run seo:gsc`.");
+    lines.push(`- Live OAuth доступ подтвержден для ${report.gsc.siteUrl}; permission=${report.gsc.permissionLevel || "unknown"}.`);
   } else {
-    lines.push(`- Нельзя подтверждать Google clicks/impressions/positions: ${report.gsc.reason}; missing=${(report.gsc.missing || []).join(", ")}`);
+    const missingText = (report.gsc.missing || []).length ? `; missing=${report.gsc.missing.join(", ")}` : "";
+    const detailText = report.gsc.detail ? `; detail=${report.gsc.detail}` : "";
+    const siteText = report.gsc.siteUrl ? `; site=${report.gsc.siteUrl}` : "";
+    lines.push(`- Нельзя подтверждать Google clicks/impressions/positions: ${report.gsc.reason}${missingText}${detailText}${siteText}`);
   }
 
   lines.push(
@@ -613,11 +921,11 @@ function buildMarkdown(report) {
     "- Аналитик Метрики/CRM: заявкой считаются только 517600157 для каталога и 496461698 для квиза; DOM-цель формы 517599639, Direct conversions, телефоны, открытия квиза и мессенджеры отдельно.",
     "- SEO/Webmaster-аудитор: основной SEO-актив только xn--80aa8ahaki9a.site; rosomaha.site остается рекламной квиз-воронкой.",
     "- Маркетолог-стратег: главный следующий шаг не бюджет, а связка spend -> hard goal -> CRM unique lead.",
-    "- Критик рисков: GSC нельзя объявлять рабочим, пока нет project-specific refresh token; это конфиг-пробел, а не рыночный ноль.",
+    "- Критик рисков: GSC нельзя объявлять рабочим, пока project-specific refresh token не обновлён после invalid_grant; это контур доступа, а не рыночный ноль.",
     "",
     "## Один вывод",
     "",
-    `Готовность рекламы получать подтвержденные заявки: ${report.readinessScore}/10. Следующий безопасный шаг: подтвердить CRM-уникальность квизовых hard goals и подготовить минус-слова/исключения по мусорным запросам без запуска остановленных кампаний.`,
+    `Готовность рекламы получать подтвержденные заявки: ${report.readinessScore}/10. Следующий безопасный шаг: владелец счётчика 50606578 даёт rosomaha-rus999 доступ на чтение либо предоставляет отдельно зарегистрированный проектный OAuth владельца; затем повторяется фиксированный read-only probe. До этого запуск или масштабирование рекламы rosomaha-rus.ru — NO-GO.`,
     "",
   );
 
@@ -644,6 +952,9 @@ const campaignsSnapshot = directJsonRequest(env, "campaigns", "get", {
   TextCampaignFieldNames: ["BiddingStrategy", "Settings"],
   UnifiedCampaignFieldNames: ["CounterIds"],
 });
+const accountScope = await directAccountScope(env);
+const packageStrategies = await directPackageStrategies(env, accountScope);
+const accessibleMetrikaGoals = await directAccessibleMetrikaGoals(env, accountScope);
 
 const directRanges = [1, 7, 30].map((days) => {
   const range = rangeForDays(days);
@@ -712,6 +1023,9 @@ const report = {
   generatedAt: new Date().toISOString(),
   policy,
   direct: {
+    accountScope,
+    packageStrategies,
+    accessibleMetrikaGoals,
     campaignsSnapshot,
     ranges: directRanges,
     accountLandingMap: {
@@ -742,7 +1056,7 @@ const report = {
   },
   metrika,
   webmaster,
-  gsc: gscStatus(env),
+  gsc: await gscStatus(env),
   readinessScore: 4,
 };
 
