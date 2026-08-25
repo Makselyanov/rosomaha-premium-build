@@ -219,6 +219,16 @@ BASELINE_NEGATIVES = sorted(
 BASELINE_SITELINK_SET_ID = 1_504_788_500
 BASELINE_GENERIC_IMAGE_HASH = "s1UdPIWzqoERf75fEOE7hw"
 
+CREATIVE_MODEL_OIDS = {
+    "extrimeUaz": "812",
+    "extrimeToyota": "824",
+    "hunter": "800",
+}
+UNSUPPORTED_CLAIM_RE = re.compile(
+    r"(?i)(?:\b(?:скидк\w*|рассрочк\w*|гаранти\w*|в наличии|лучший|№\s*1)\b"
+    r"|\b(?:от\s*)?\d[\d\s]*(?:₽|руб(?:\.|ля|лей)?)\b)"
+)
+
 BASELINE_ADS = {
     EXISTING_AD_IDS["brand"]: {
         "group": GROUP_IDS["brand"],
@@ -445,6 +455,111 @@ def _assert_domain_urls(value: Any) -> None:
             raise OperatorError(f"URL вышел за разрешённый домен: {safe_text(child)}")
 
 
+def _validate_creative_contract(payload: Mapping[str, Any]) -> None:
+    """Validate source-bound copy and evidence without authorizing mutation."""
+    creatives = payload.get("creatives")
+    landing = payload.get("publicLandingEvidence")
+    images = payload.get("imageEvidence")
+    if not isinstance(creatives, Mapping) or not isinstance(landing, Mapping):
+        raise OperatorError("Creative public landing evidence отсутствует")
+    if landing.get("allStatus200") is not True or landing.get("exactHost") != EXPECTED_DOMAIN:
+        raise OperatorError("Creative public landing evidence не подтверждено")
+    if not isinstance(images, Mapping):
+        raise OperatorError("Creative image evidence отсутствует")
+    for key, creative in creatives.items():
+        if not isinstance(creative, Mapping):
+            raise OperatorError(f"Creative {key} имеет неверный формат")
+        href = creative.get("Href")
+        if not isinstance(href, str):
+            raise OperatorError(f"Creative {key} не содержит Href")
+        parsed = urlsplit(href)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        expected_utm = {
+            "utm_source": "yandex",
+            "utm_medium": "cpc",
+            "utm_campaign": "rosomaha_rus_search_models",
+            "utm_content": "{campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}",
+            "utm_term": "{keyword}",
+        }
+        if any(params.get(name) != value for name, value in expected_utm.items()):
+            raise OperatorError(f"Creative {key} потерял обязательные UTM/macros")
+        expected_oid = CREATIVE_MODEL_OIDS.get(key)
+        if expected_oid is not None and params.get("oid") != expected_oid:
+            raise OperatorError(f"Creative {key} потерял обязательный oid={expected_oid}")
+
+        copy_values = [*(creative.get("Titles") or []), *(creative.get("Texts") or [])]
+        if not copy_values or any(not isinstance(value, str) for value in copy_values):
+            raise OperatorError(f"Creative {key} не содержит проверяемый текст")
+        if any(UNSUPPORTED_CLAIM_RE.search(value) for value in copy_values):
+            raise OperatorError(f"Creative {key} содержит неподтверждённую цену/обещание")
+        if (
+            key == "category"
+            and parsed.path.rstrip("/") == "/product/kvadrotsikly"
+            and any("снегоболотоход" in value.casefold() for value in creative.get("Titles") or [])
+        ):
+            raise OperatorError("Category creative: снегоболотоходы ведут на /product/kvadrotsikly/")
+
+        hashes = creative.get("AdImageHashes", {}).get("Items")
+        if not isinstance(hashes, list) or len(hashes) != 1:
+            raise OperatorError(f"Creative {key}: image hash отсутствует")
+
+    # A legacy provider-accepted generic image is valid audit evidence only.
+    # It never satisfies the separate mutation gate below.
+    per_creative_images = images.get("perCreative")
+    if per_creative_images is None:
+        source_url = images.get("sourceUrl")
+        if not isinstance(source_url, str) or urlsplit(source_url).hostname != EXPECTED_DOMAIN:
+            raise OperatorError("Creative image source вышел за домен")
+        if images.get("hash") != BASELINE_GENERIC_IMAGE_HASH or not isinstance(
+            images.get("providerReceipt"), str
+        ):
+            raise OperatorError("Legacy creative image evidence не подтверждено")
+        if any(
+            creative["AdImageHashes"]["Items"] != [BASELINE_GENERIC_IMAGE_HASH]
+            for creative in creatives.values()
+        ):
+            raise OperatorError("Legacy image evidence не совпало с creatives")
+    elif not isinstance(per_creative_images, Mapping) or set(per_creative_images) != set(creatives):
+        raise OperatorError("Per-creative image evidence scope не совпал")
+    else:
+        for key, evidence in per_creative_images.items():
+            source_url = evidence.get("sourceUrl") if isinstance(evidence, Mapping) else None
+            if (
+                not isinstance(source_url, str)
+                or urlsplit(source_url).hostname != EXPECTED_DOMAIN
+                or evidence.get("hash") != creatives[key]["AdImageHashes"]["Items"][0]
+            ):
+                raise OperatorError(f"Creative {key}: per-creative image evidence не совпало")
+
+
+def _validate_mutation_image_contract(payload: Mapping[str, Any]) -> None:
+    """Require provider-accepted model images immediately before mutation."""
+    creatives = payload.get("creatives")
+    images = payload.get("imageEvidence")
+    per_creative = images.get("perCreative") if isinstance(images, Mapping) else None
+    if not isinstance(creatives, Mapping) or not isinstance(per_creative, Mapping):
+        raise OperatorError("Mutation blocked: per-creative image evidence отсутствует")
+    if set(per_creative) != set(creatives):
+        raise OperatorError("Mutation blocked: per-creative image evidence scope не совпал")
+    seen_model_hashes: set[str] = set()
+    for key, creative in creatives.items():
+        hashes = creative.get("AdImageHashes", {}).get("Items")
+        evidence = per_creative.get(key)
+        if not isinstance(hashes, list) or len(hashes) != 1 or not isinstance(evidence, Mapping):
+            raise OperatorError(f"Mutation blocked: creative {key} image evidence отсутствует")
+        if evidence.get("hash") != hashes[0] or evidence.get("providerAccepted") is not True:
+            raise OperatorError(f"Mutation blocked: creative {key} image не подтверждено провайдером")
+        source_url = evidence.get("sourceUrl")
+        if not isinstance(source_url, str) or urlsplit(source_url).hostname != EXPECTED_DOMAIN:
+            raise OperatorError(f"Mutation blocked: creative {key} image source вышел за домен")
+        if key in CREATIVE_MODEL_OIDS:
+            if evidence.get("modelSpecific") is not True or hashes[0] == BASELINE_GENERIC_IMAGE_HASH:
+                raise OperatorError(f"Mutation blocked: creative {key} model image подменено")
+            if hashes[0] in seen_model_hashes:
+                raise OperatorError("Mutation blocked: разные модели используют одну image")
+            seen_model_hashes.add(hashes[0])
+
+
 def validate_payload(payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise OperatorError("Payload должен быть JSON object")
@@ -535,6 +650,7 @@ def validate_payload(payload: Any) -> None:
         or semantic.get("providerNormalizedAliasCount") != 2
     ):
         raise OperatorError("Payload не доказал 23 YES phrases -> 21 unique keywords")
+    _validate_creative_contract(payload)
     _assert_domain_urls(payload)
     forbidden_keys = {
         "Campaigns",
@@ -2097,6 +2213,7 @@ def run_apply(
     lock_policy: MutationLockPolicy | None = None,
 ) -> dict[str, Any]:
     verify_apply_unlock(environ)
+    _validate_mutation_image_contract(payload)
     actual_plan_sha256 = (payload_metadata or {}).get("plan_sha256")
     assert_exact_cas(str(actual_plan_sha256 or ""), expected_plan_sha256)
     receipt = _base_receipt("apply", payload_metadata)
@@ -2271,6 +2388,7 @@ def run_partial_recovery(
 ) -> dict[str, Any]:
     """Continue only the v501 ad stages left after provider errors 8305/3500."""
     verify_recovery_unlock(environ)
+    _validate_mutation_image_contract(payload)
     recovery_kinds = frozenset({"ads_update", "ads_add", "ads_suspend"})
     # Defense in depth: even an accidental future call to a completed stage is
     # rejected inside CreativeDirectApi before any HTTP request is constructed.

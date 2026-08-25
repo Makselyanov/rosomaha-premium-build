@@ -15,6 +15,113 @@ sys.modules[SPEC.name] = op
 SPEC.loader.exec_module(op)
 
 
+class CreativeSafetyContractTests(unittest.TestCase):
+    def _payload(self):
+        def creative(path, image_hash, titles):
+            separator = "&" if "?" in path else "?"
+            return {
+                "Titles": titles,
+                "Texts": ["Комплектации и опции на сайте. Заявка производителю."],
+                "Href": (
+                    f"https://rosomaha-rus.ru{path}{separator}utm_source=yandex"
+                    "&utm_medium=cpc&utm_campaign=rosomaha_rus_search_models"
+                    "&utm_content={campaign_id}.{gbid}.{ad_id}.{phrase_id}.{source_type}.{device_type}"
+                    "&utm_term={keyword}"
+                ),
+                "AdImageHashes": {"Items": [image_hash]},
+            }
+
+        creatives = {
+            "brand": creative("/", "brand-image", ["Вездеходы Росомаха от завода"]),
+            "category": creative(
+                "/product/kvadrotsikly/", "catalog-image", ["Каталог вездеходов Росомаха"]
+            ),
+            "extrimeUaz": creative(
+                "/product/extrime-s-1-5l-dvs-1nz-fe/?oid=812",
+                "extrime-uaz-image",
+                ["Росомаха Экстрим с мостами УАЗ"],
+            ),
+            "extrimeToyota": creative(
+                "/product/extrime-1-5-litra-mosty-toyota/?oid=824",
+                "extrime-toyota-image",
+                ["Росомаха Экстрим с мостами Toyota"],
+            ),
+            "hunter": creative(
+                "/product/hunter-s-1-5l-dvs-1nz-fe/?oid=800",
+                "hunter-image",
+                ["Росомаха Хантер с мостами Toyota"],
+            ),
+        }
+        return {
+            "creatives": creatives,
+            "publicLandingEvidence": {"allStatus200": True, "exactHost": op.EXPECTED_DOMAIN},
+            "imageEvidence": {
+                "perCreative": {
+                    key: {
+                        "hash": value["AdImageHashes"]["Items"][0],
+                        "sourceUrl": f"https://rosomaha-rus.ru/images/{key}.jpg",
+                        "providerAccepted": True,
+                        "modelSpecific": key in op.CREATIVE_MODEL_OIDS,
+                    }
+                    for key, value in creatives.items()
+                }
+            },
+        }
+
+    def test_safe_creative_contract_accepts_exact_intent_utm_oid_and_images(self):
+        payload = self._payload()
+        op._validate_creative_contract(payload)
+        op._validate_mutation_image_contract(payload)
+
+    def test_category_snow_intent_cannot_target_kvadrotsikly_path(self):
+        payload = self._payload()
+        payload["creatives"]["category"]["Titles"] = ["Снегоболотоходы Росомаха"]
+        with self.assertRaisesRegex(op.OperatorError, "снегоболотоходы ведут"):
+            op._validate_creative_contract(payload)
+
+    def test_missing_utm_oid_and_unverified_claims_fail_closed(self):
+        cases = []
+        missing_utm = self._payload()
+        missing_utm["creatives"]["brand"]["Href"] = missing_utm["creatives"]["brand"]["Href"].replace(
+            "utm_medium=cpc", "utm_medium=organic"
+        )
+        cases.append(missing_utm)
+        missing_oid = self._payload()
+        missing_oid["creatives"]["hunter"]["Href"] = missing_oid["creatives"]["hunter"]["Href"].replace(
+            "oid=800&", ""
+        )
+        cases.append(missing_oid)
+        unsupported = self._payload()
+        unsupported["creatives"]["brand"]["Texts"] = ["Гарантия и цена от 1 000 000 руб."]
+        cases.append(unsupported)
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(op.OperatorError):
+                    op._validate_creative_contract(payload)
+
+    def test_model_image_substitution_fails_closed(self):
+        payload = self._payload()
+        payload["creatives"]["hunter"]["AdImageHashes"]["Items"] = [
+            op.BASELINE_GENERIC_IMAGE_HASH
+        ]
+        payload["imageEvidence"]["perCreative"]["hunter"]["hash"] = op.BASELINE_GENERIC_IMAGE_HASH
+        with self.assertRaisesRegex(op.OperatorError, "model image подменено"):
+            op._validate_mutation_image_contract(payload)
+
+    def test_legacy_generic_image_is_auditable_but_cannot_authorize_mutation(self):
+        payload = self._payload()
+        for creative in payload["creatives"].values():
+            creative["AdImageHashes"]["Items"] = [op.BASELINE_GENERIC_IMAGE_HASH]
+        payload["imageEvidence"] = {
+            "hash": op.BASELINE_GENERIC_IMAGE_HASH,
+            "sourceUrl": "https://rosomaha-rus.ru/images/generic.jpg",
+            "providerReceipt": "marketing-audits/yandex-direct/provider.json",
+        }
+        op._validate_creative_contract(payload)
+        with self.assertRaisesRegex(op.OperatorError, "Mutation blocked"):
+            op._validate_mutation_image_contract(payload)
+
+
 class CreativeOperatorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -267,6 +374,49 @@ class CreativeOperatorTests(unittest.TestCase):
         brand = next(row for row in params["AdGroups"] if row["Id"] == op.GROUP_IDS["brand"])
         self.assertIn("экстрим", brand["NegativeKeywords"]["Items"])
         self.assertIn("хантер", brand["NegativeKeywords"]["Items"])
+
+    def test_semantic_plan_excludes_proven_waste_and_unsafe_intent_mixing(self):
+        params = op._current_stage_params(self.payload, "adgroups", "update")
+        groups = {row["Id"]: row for row in params["AdGroups"]}
+        for group in groups.values():
+            negatives = set(group["NegativeKeywords"]["Items"])
+            self.assertTrue(
+                {"пистолет", "пневматика", "травмат", "охолощенный", "яхта"}
+                <= negatives
+            )
+
+        active = {
+            item["Keyword"].lower()
+            for item in [
+                *self.payload["keywords"]["update"],
+                *self.payload["keywords"]["add"],
+            ]
+        }
+        self.assertFalse(any("официальный сайт" in keyword for keyword in active))
+
+        category_group_id = op.GROUP_IDS["category"]
+        category_keywords = {
+            item["Keyword"].lower()
+            for item in [
+                *self.payload["keywords"]["update"],
+                *self.payload["keywords"]["add"],
+            ]
+            if item.get("AdGroupId") == category_group_id
+            or op.BASELINE_EXPLICIT_KEYWORDS.get(item.get("Id"), (None,))[0]
+            == category_group_id
+        }
+        self.assertFalse(any("снегоболотоход" in keyword for keyword in category_keywords))
+        category = self.payload["creatives"]["category"]
+        self.assertNotIn("снегоболотоход", " ".join(category["Titles"] + category["Texts"]).lower())
+        self.assertIn("kvadrotsikly", category["Href"])
+
+        gate = self.payload["sourceUncertaintyGate"]
+        self.assertEqual(gate["wordstatStatus"], "source_unavailable")
+        self.assertFalse(gate["mutationAllowed"])
+        self.assertEqual(
+            self.payload["intentArchitecture"]["navigation"]["status"],
+            "excluded_from_paid_plan",
+        )
 
     def test_sitelink_reuse_prevents_duplicates_after_partial_run(self):
         desired = self.payload["sitelinkSets"]
@@ -525,6 +675,24 @@ class CreativeOperatorTests(unittest.TestCase):
             {op.RECOVERY_GUARD_ENV: op.RECOVERY_GUARD_VALUE}
         )
 
+    def test_apply_with_legacy_generic_image_fails_before_any_api_request(self):
+        class FakeApi:
+            mutation_requests = 0
+            request_log = []
+
+        api = FakeApi()
+        with self.assertRaisesRegex(op.OperatorError, "Mutation blocked"):
+            op.run_apply(
+                api,
+                self.payload,
+                expected_cas_sha256="a" * 64,
+                expected_plan_sha256=self.metadata["plan_sha256"],
+                environ={op.APPLY_GUARD_ENV: op.APPLY_GUARD_VALUE},
+                payload_metadata=self.metadata,
+            )
+        self.assertEqual(api.mutation_requests, 0)
+        self.assertEqual(api.request_log, [])
+
     def test_recovery_executes_only_remaining_stages_and_stays_suspended(self):
         snapshot = self._third_partial_snapshot()
         post = {
@@ -571,6 +739,7 @@ class CreativeOperatorTests(unittest.TestCase):
             "semantic_sha256": "p",
         }
         with (
+            mock.patch.object(op, "_validate_mutation_image_contract", return_value=None),
             mock.patch.object(
                 op,
                 "public_http_preflight",
@@ -663,6 +832,7 @@ class CreativeOperatorTests(unittest.TestCase):
         }
         api = FakeApi()
         with (
+            mock.patch.object(op, "_validate_mutation_image_contract", return_value=None),
             mock.patch.object(
                 op,
                 "public_http_preflight",

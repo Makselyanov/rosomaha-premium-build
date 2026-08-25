@@ -5,6 +5,8 @@ const rootDir = process.cwd();
 const outDir = path.join(rootDir, "marketing-audits", "yandex-direct");
 const semanticReceiptRelative = "marketing-audits/yandex-direct/YANDEX_DIRECT_SEMANTIC_RESEARCH_713802902_2026-08-24T09-56-54-516Z.json";
 const semanticReceiptPath = path.join(rootDir, semanticReceiptRelative);
+const wasteEvidenceRelative = "seo-reports/dry-runs/2026-08-17-yandex-search-query-waste-brief.md";
+const wasteEvidencePath = path.join(rootDir, wasteEvidenceRelative);
 const campaignId = 713802902;
 const login = "rosomaha-rus999";
 const campaignUtm = "rosomaha_rus_search_models";
@@ -67,6 +69,8 @@ const baselineNegatives = [
   "озон",
   "оружие",
   "патроны",
+  "пистолет",
+  "пневматика",
   "персонаж",
   "прицел",
   "прокат",
@@ -74,6 +78,8 @@ const baselineNegatives = [
   "радиоуправляемый",
   "ремонт",
   "ружье",
+  "травмат",
+  "охолощенный",
   "самоделка",
   "самодельный",
   "скачать",
@@ -82,6 +88,7 @@ const baselineNegatives = [
   "винтовка",
   "волверин",
   "wolverine",
+  "яхта",
   "чертеж",
 ];
 
@@ -163,15 +170,15 @@ const creatives = {
   },
   category: {
     Titles: [
-      "Снегоболотоходы от завода Росомаха",
-      "Купить снегоболотоход Росомаха",
+      "Вездеходы от завода Росомаха",
+      "Купить квадроцикл-вездеход",
       "Вездеходы на шинах низкого давления",
       "Квадроциклы для охоты и рыбалки",
       "Каталог вездеходов Росомаха",
     ],
     Texts: [
       "Модели для охоты, рыбалки и хозяйства. Комплектации и доставка по России.",
-      "Выберите вездеход на шинах низкого давления и отправьте заявку заводу.",
+      "Выберите квадроцикл-вездеход и отправьте заявку заводу.",
       "Каталог техники Росомаха: модели, опции, комплектации и условия доставки.",
     ],
     Href: adHref(page.catalog),
@@ -248,10 +255,10 @@ const keywordUpdate = [
   [ids.keywords.brand[1], "вездеход росомаха цена"],
   [ids.keywords.brand[2], "квадроцикл росомаха купить"],
   [ids.keywords.brand[3], "снегоболотоход росомаха купить"],
-  [ids.keywords.brand[4], "вездеход росомаха официальный сайт"],
-  [ids.keywords.category[0], "снегоболотоход купить"],
-  [ids.keywords.category[1], "снегоболотоход цена"],
-  [ids.keywords.category[2], "снегоболотоход от производителя"],
+  [ids.keywords.brand[4], "снегоболотоход росомаха цена"],
+  [ids.keywords.category[0], "вездеход купить"],
+  [ids.keywords.category[1], "вездеход цена"],
+  [ids.keywords.category[2], "вездеход от производителя"],
   [ids.keywords.category[3], "вездеход на шинах низкого давления купить"],
   [ids.keywords.extrimeFamily[0], "росомаха экстрим"],
   [ids.keywords.extrimeFamily[1], "росомаха экстрим купить"],
@@ -326,7 +333,7 @@ const stagedRequests = [
       params: {
         AdGroups: [
           { Id: ids.groups.brand, Name: "S | RF | Brand | Rosomaha", NegativeKeywords: { Items: [...baselineNegatives, "экстрим", "хантер"] } },
-          { Id: ids.groups.category, Name: "S | RF | Category | Snow-swamp", NegativeKeywords: { Items: [...baselineNegatives, "росомаха", "экстрим", "хантер"] } },
+          { Id: ids.groups.category, Name: "S | RF | Category | ATV-all-terrain", NegativeKeywords: { Items: [...baselineNegatives, "росомаха", "экстрим", "хантер"] } },
           { Id: ids.groups.extrimeFamily, Name: "S | RF | Model | Extrime", NegativeKeywords: { Items: [...baselineNegatives, "хантер", "плюс"] } },
           { Id: ids.groups.parkedExtrimeToyota, Name: "PARKED | duplicate | Extrime Toyota", NegativeKeywords: { Items: baselineNegatives } },
           { Id: ids.groups.hunter, Name: "S | RF | Model | Hunter", NegativeKeywords: { Items: [...baselineNegatives, "экстрим"] } },
@@ -471,6 +478,15 @@ function validate() {
       }
     }
   }
+  if (!fs.existsSync(wasteEvidencePath)) {
+    errors.push(`missing search-query waste evidence ${wasteEvidenceRelative}`);
+  } else {
+    const wasteEvidence = fs.readFileSync(wasteEvidencePath, "utf8").toLowerCase();
+    for (const negative of ["пистолет", "пневматика", "травмат", "охолощенный", "яхта"]) {
+      if (!wasteEvidence.includes(negative)) errors.push(`negative lacks waste evidence: ${negative}`);
+      if (!baselineNegatives.includes(negative)) errors.push(`evidenced negative missing from plan: ${negative}`);
+    }
+  }
   const addResponsive = stagedRequests.find((item) => item.service === "ads" && item.request.method === "add")
     ?.request.params.Ads[0].ResponsiveAd;
   if (!Array.isArray(addResponsive?.AdImageHashes)) {
@@ -519,6 +535,28 @@ const payload = {
     materializedUniqueKeywordCount: keywordUpdate.length + keywordAdd.length,
     providerNormalizedAliasCount: providerNormalizedSemanticAliases.length,
   },
+  sourceUncertaintyGate: {
+    wordstatStatus: "source_unavailable",
+    mutationAllowed: false,
+    reason: "Wordstat did not return a provider response; keep this source-bound improvement as dry-run only.",
+  },
+  intentArchitecture: {
+    commercialBrand: {
+      status: "included",
+      landing: page.home,
+      intents: ["buy", "price", "manufacturer", "model"],
+    },
+    navigation: {
+      status: "excluded_from_paid_plan",
+      examples: ["вездеход росомаха официальный сайт", "росомаха вездеход официальный сайт"],
+      reason: "Navigation demand is kept separate from the paid commercial plan while Wordstat and conversion evidence remain unavailable.",
+    },
+    category: {
+      status: "included_without_snowmobile_terms",
+      landing: page.catalog,
+      reason: "The verified URL is /product/kvadrotsikly/; snow/swamp wording is not routed there without a proven matching landing URL.",
+    },
+  },
   providerNormalizationEvidence: {
     semanticAliases: providerNormalizedSemanticAliases,
     negativeAliases: providerNormalizedNegativeAliases,
@@ -556,11 +594,15 @@ const payload = {
       "main and sitelink UTM macros preserved",
       "all ads reuse the site-owned image already accepted and attached by Yandex",
       "every desired keyword has exact KeywordsResearch.hasSearchVolume=YES evidence",
+      "confirmed waste classes are present as negative keywords in every group",
+      "navigation intent is excluded from the paid commercial plan",
+      "snow/swamp terms are not routed to /product/kvadrotsikly/",
+      "Wordstat/source uncertainty keeps external mutation fail-closed",
       "23 YES evidence phrases map to 21 unique provider-normalized keyword rows",
       "Ads.add uses the array schema while Ads.update uses ArrayOfString.Items",
     ],
   },
-  applyGate: "BLOCKED until campaign/budget/priority goal owner completes launch gate; this artifact does not authorize mutation or resume.",
+  applyGate: "BLOCKED: Wordstat source is unavailable; campaign/budget/priority goal owner gate also remains incomplete. This artifact does not authorize mutation or resume.",
 };
 
 fs.mkdirSync(outDir, { recursive: true });
