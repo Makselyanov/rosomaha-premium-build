@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const rootDir = process.cwd();
 const outDir = path.join(rootDir, "marketing-audits", "yandex-direct");
@@ -9,10 +10,29 @@ const wasteEvidenceRelative = "seo-reports/dry-runs/2026-08-17-yandex-search-que
 const wasteEvidencePath = path.join(rootDir, wasteEvidenceRelative);
 const modelImageEvidenceRelative = "marketing-audits/yandex-direct/ROSOMAHA_RUS_MODEL_IMAGE_EVIDENCE_713802902_2026-08-25T16-45Z.md";
 const modelImageEvidencePath = path.join(rootDir, modelImageEvidenceRelative);
+const modelImageReceiptRelatives = {
+  extrimeUaz: "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-27-52-058511+00-00.json",
+  extrimeToyota: "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-29-10-095487+00-00.json",
+  hunter: "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-30-21-402835+00-00.json",
+};
 const campaignId = 713802902;
 const login = "rosomaha-rus999";
 const campaignUtm = "rosomaha_rus_search_models";
 const protectedCampaignIds = [708505950, 705770573, 710087376];
+
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function loadExactReceipt(relativePath) {
+  const receiptPath = path.join(rootDir, relativePath);
+  if (!fs.existsSync(receiptPath)) throw new Error(`missing exact provider receipt ${relativePath}`);
+  return JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+}
+
+const modelImageReceipts = Object.fromEntries(
+  Object.entries(modelImageReceiptRelatives).map(([key, relativePath]) => [key, loadExactReceipt(relativePath)]),
+);
 
 const ids = {
   groups: {
@@ -202,7 +222,7 @@ const creatives = {
     ],
     Href: adHref(page.extrimeUaz),
     DisplayUrlPath: "extrime-uaz",
-    AdImageHashes: { Items: [ids.existingGenericImageHash] },
+    AdImageHashes: { Items: [modelImageReceipts.extrimeUaz.provider_hash] },
     SitelinkSetId: "{{SITELINK_SET_ID:extrimeUaz}}",
   },
   extrimeToyota: {
@@ -219,7 +239,7 @@ const creatives = {
     ],
     Href: adHref(page.extrimeToyota),
     DisplayUrlPath: "extrime-toyota",
-    AdImageHashes: { Items: [ids.existingGenericImageHash] },
+    AdImageHashes: { Items: [modelImageReceipts.extrimeToyota.provider_hash] },
     SitelinkSetId: "{{SITELINK_SET_ID:extrimeToyota}}",
   },
   hunter: {
@@ -236,7 +256,7 @@ const creatives = {
     ],
     Href: adHref(page.hunter),
     DisplayUrlPath: "hunter-toyota",
-    AdImageHashes: { Items: [ids.existingGenericImageHash] },
+    AdImageHashes: { Items: [modelImageReceipts.hunter.provider_hash] },
     SitelinkSetId: "{{SITELINK_SET_ID:hunter}}",
   },
 };
@@ -261,8 +281,11 @@ const sourceOwnedModelImageEvidence = {
     width: 1164,
     height: 776,
     expectedSha256: "db2a178542248d7c22e5e76ee6816489e9d29ca1f2cfdf5158282d9ad2be843b",
-    providerAccepted: false,
-    directImageHash: null,
+    providerAccepted: true,
+    directImageHash: modelImageReceipts.extrimeUaz.provider_hash,
+    providerReceipt: modelImageReceiptRelatives.extrimeUaz,
+    providerReceiptSha256: sha256File(path.join(rootDir, modelImageReceiptRelatives.extrimeUaz)),
+    preparedSha256: modelImageReceipts.extrimeUaz.image_plan.images[0].prepared_sha256,
   },
   extrimeToyota: {
     exactModel: "Росомаха модель \"Экстрим\" (1.5 литра, мосты Toyota)",
@@ -272,8 +295,11 @@ const sourceOwnedModelImageEvidence = {
     width: 3895,
     height: 2597,
     expectedSha256: "e39e47bb3bcd6a55eff84a4ed0cea1964e5414e7ad3f1332c4fb1224cae2e43f",
-    providerAccepted: false,
-    directImageHash: null,
+    providerAccepted: true,
+    directImageHash: modelImageReceipts.extrimeToyota.provider_hash,
+    providerReceipt: modelImageReceiptRelatives.extrimeToyota,
+    providerReceiptSha256: sha256File(path.join(rootDir, modelImageReceiptRelatives.extrimeToyota)),
+    preparedSha256: modelImageReceipts.extrimeToyota.image_plan.images[0].prepared_sha256,
   },
   hunter: {
     exactModel: "Росомаха модель \"Хантер\" (1.5 литра, мосты Toyota)",
@@ -283,17 +309,21 @@ const sourceOwnedModelImageEvidence = {
     width: 1280,
     height: 719,
     expectedSha256: "9985da35d4d079658f2634093ab764fb5217b265b9355a456bd1eca16f904c55",
-    providerAccepted: false,
-    directImageHash: null,
+    providerAccepted: true,
+    directImageHash: modelImageReceipts.hunter.provider_hash,
+    providerReceipt: modelImageReceiptRelatives.hunter,
+    providerReceiptSha256: sha256File(path.join(rootDir, modelImageReceiptRelatives.hunter)),
+    preparedSha256: modelImageReceipts.hunter.image_plan.images[0].prepared_sha256,
   },
 };
 
 const modelImageMaterializationPlan = {
-  status: "source_image_upload_required",
+  status: "provider_upload_receipts_verified",
   evidenceReport: modelImageEvidenceRelative,
   phase1: {
     action: "upload_source_owned_images",
     externalMutationAuthorized: false,
+    completedFromReceipts: true,
     items: Object.entries(sourceOwnedModelImageEvidence).map(([creativeKey, evidence]) => ({
       creativeKey,
       exactModel: evidence.exactModel,
@@ -304,16 +334,16 @@ const modelImageMaterializationPlan = {
   },
   phase2: {
     action: "materialize_creative_hashes_after_provider_receipt",
-    blocked: true,
+    blocked: false,
     requires: [
       "provider upload receipt for each exact source URL and SHA-256",
       "provider-returned Direct image hash for each exact model mapping",
       "fresh creative payload validation and suspended-campaign readback",
     ],
     directImageHashes: {
-      extrimeUaz: null,
-      extrimeToyota: null,
-      hunter: null,
+      extrimeUaz: sourceOwnedModelImageEvidence.extrimeUaz.directImageHash,
+      extrimeToyota: sourceOwnedModelImageEvidence.extrimeToyota.directImageHash,
+      hunter: sourceOwnedModelImageEvidence.hunter.directImageHash,
     },
   },
 };
@@ -566,11 +596,13 @@ function validate() {
     };
     const seenSourceUrls = new Set();
     const seenHashes = new Set();
+    const evidenceReportSha256 = sha256File(modelImageEvidencePath);
     for (const [key, evidence] of Object.entries(sourceOwnedModelImageEvidence)) {
+      const receipt = modelImageReceipts[key];
+      const receiptImage = receipt?.image_plan?.images?.[0];
       if (evidence.landingUrl !== expectedMappings[key]) errors.push(`${key}: model landing mapping mismatch`);
-      if (evidence.providerAccepted !== false || evidence.directImageHash !== null) {
-        errors.push(`${key}: provider acceptance/hash must remain unmaterialized`);
-      }
+      if (evidence.providerAccepted !== true || !evidence.directImageHash) errors.push(`${key}: provider evidence not materialized`);
+      if (evidence.providerReceipt !== modelImageReceiptRelatives[key]) errors.push(`${key}: provider receipt provenance mismatch`);
       if (!/^https:\/\/rosomaha-rus\.ru\/upload\//u.test(evidence.sourceUrl)) errors.push(`${key}: source image is not site-owned`);
       if (!/^[a-f0-9]{64}$/u.test(evidence.expectedSha256)) errors.push(`${key}: invalid expected SHA-256`);
       if (evidence.width < 1080 || evidence.height < 607) errors.push(`${key}: source dimensions below Direct WIDE minimum`);
@@ -587,11 +619,57 @@ function validate() {
       if (seenHashes.has(evidence.expectedSha256)) errors.push(`${key}: source image SHA-256 reused across models`);
       seenSourceUrls.add(evidence.sourceUrl);
       seenHashes.add(evidence.expectedSha256);
+
+      if (receipt?.mode !== "image-upload-one-apply"
+        || receipt?.status !== "uploaded_one_verified_suspended"
+        || receipt?.selected_key !== key) errors.push(`${key}: provider receipt status/key mismatch`);
+      if (receipt?.account?.login !== login
+        || Number(receipt?.target?.campaign_id) !== campaignId
+        || receipt?.target?.state !== "SUSPENDED") errors.push(`${key}: provider receipt identity/state mismatch`);
+      if (receipt?.image_plan?.exact_login !== login
+        || Number(receipt?.image_plan?.campaign_id) !== campaignId
+        || receipt?.image_plan?.evidence_report_sha256 !== evidenceReportSha256) errors.push(`${key}: provider image plan identity/evidence mismatch`);
+      if (receipt?.image_plan?.campaign_remains_suspended !== true
+        || receipt?.protected_unchanged !== true
+        || receipt?.moderation_called !== false
+        || receipt?.resume_called !== false
+        || receipt?.budget_changed !== false
+        || receipt?.goal_changed !== false
+        || receipt?.creative_apply_authorized !== false) errors.push(`${key}: provider receipt safety boundary mismatch`);
+      if (receipt?.image_plan?.upload_count !== 1
+        || receipt?.image_plan?.selected_keys?.length !== 1
+        || receipt?.image_plan?.selected_keys?.[0] !== key
+        || receipt?.image_plan?.images?.length !== 1) errors.push(`${key}: provider receipt upload cardinality mismatch`);
+      if (receiptImage?.key !== key
+        || receiptImage?.source_url !== evidence.sourceUrl
+        || receiptImage?.source_sha256 !== evidence.expectedSha256
+        || receiptImage?.source_dimensions?.[0] !== evidence.width
+        || receiptImage?.source_dimensions?.[1] !== evidence.height) errors.push(`${key}: provider receipt source image mismatch`);
+      if (receipt?.provider_hash !== evidence.directImageHash) errors.push(`${key}: Direct image hash provenance mismatch`);
+      const mutationRequests = (receipt?.request_log || []).filter((item) => item.mutation_kind);
+      if (receipt?.mutation_requests !== 1
+        || mutationRequests.length !== 1
+        || mutationRequests[0]?.service !== "adimages"
+        || mutationRequests[0]?.method !== "add"
+        || mutationRequests[0]?.mutation_kind !== "model_image_add_one") errors.push(`${key}: provider receipt mutation scope mismatch`);
     }
   }
-  if (modelImageMaterializationPlan.phase2.blocked !== true
-    || Object.values(modelImageMaterializationPlan.phase2.directImageHashes).some((value) => value !== null)) {
-    errors.push("model image materialization must remain blocked until provider receipts exist");
+  if (modelImageMaterializationPlan.phase2.blocked !== false
+    || Object.values(modelImageMaterializationPlan.phase2.directImageHashes).some((value) => !value)) {
+    errors.push("model image materialization requires all exact provider receipts");
+  }
+  const expectedCreativeImageHashes = {
+    extrimeUaz: sourceOwnedModelImageEvidence.extrimeUaz.directImageHash,
+    extrimeToyota: sourceOwnedModelImageEvidence.extrimeToyota.directImageHash,
+    hunter: sourceOwnedModelImageEvidence.hunter.directImageHash,
+  };
+  for (const [key, expectedHash] of Object.entries(expectedCreativeImageHashes)) {
+    if (creatives[key].AdImageHashes.Items.length !== 1
+      || creatives[key].AdImageHashes.Items[0] !== expectedHash) errors.push(`${key}: creative image hash mismatch`);
+  }
+  for (const key of ["brand", "category"]) {
+    if (creatives[key].AdImageHashes.Items.length !== 1
+      || creatives[key].AdImageHashes.Items[0] !== ids.existingGenericImageHash) errors.push(`${key}: baseline generic image changed`);
   }
   const addResponsive = stagedRequests.find((item) => item.service === "ads" && item.request.method === "add")
     ?.request.params.Ads[0].ResponsiveAd;
@@ -604,6 +682,36 @@ function validate() {
 const validationErrors = validate();
 const generatedAt = new Date().toISOString();
 const stamp = generatedAt.replace(/[:.]/g, "-");
+const perCreativeImageEvidence = {
+  brand: {
+    type: "baseline_generic",
+    hash: ids.existingGenericImageHash,
+    sourceUrl: acceptedImageEvidence.sourceUrl,
+    providerAccepted: true,
+    modelSpecific: false,
+    providerReceipt: acceptedImageEvidence.providerReceipt,
+  },
+  category: {
+    type: "baseline_generic",
+    hash: ids.existingGenericImageHash,
+    sourceUrl: acceptedImageEvidence.sourceUrl,
+    providerAccepted: true,
+    modelSpecific: false,
+    providerReceipt: acceptedImageEvidence.providerReceipt,
+  },
+  ...Object.fromEntries(Object.entries(sourceOwnedModelImageEvidence).map(([key, evidence]) => [key, {
+    type: "exact_model_provider_receipt",
+    hash: evidence.directImageHash,
+    sourceUrl: evidence.sourceUrl,
+    providerAccepted: evidence.providerAccepted,
+    modelSpecific: true,
+    exactModel: evidence.exactModel,
+    providerReceipt: evidence.providerReceipt,
+    providerReceiptSha256: evidence.providerReceiptSha256,
+    preparedSha256: evidence.preparedSha256,
+    sourceSha256: evidence.expectedSha256,
+  }])),
+};
 const payload = {
   generatedAt,
   mode: "dry-run",
@@ -630,9 +738,10 @@ const payload = {
     pages: page,
     modelAnchorsVerified: ["price", "opt-price", "buy", "delivery"],
   },
-  imageEvidence: acceptedImageEvidence,
+  imageEvidence: { ...acceptedImageEvidence, perCreative: perCreativeImageEvidence },
   sourceOwnedModelImageEvidence,
   modelImageMaterializationPlan,
+  perCreativeImageEvidence,
   semanticEvidence: {
     source: "Yandex Direct KeywordsResearch.hasSearchVolume",
     receipt: semanticReceiptRelative,
@@ -646,7 +755,14 @@ const payload = {
   sourceUncertaintyGate: {
     wordstatStatus: "source_unavailable",
     mutationAllowed: false,
-    reason: "Wordstat did not return a provider response; keep this source-bound improvement as dry-run only.",
+    evidenceBackedCorrectiveCreativeMutationAllowed: true,
+    semanticExpansionAllowed: false,
+    reason: "Wordstat absence blocks semantic expansion, not receipt-backed corrective image/landing/negative-keyword changes while the campaign remains suspended.",
+  },
+  correctiveMutationBoundary: {
+    campaignMustRemainSuspended: true,
+    allowedServices: ["ads", "adgroups", "keywords"],
+    forbiddenActions: ["campaign update", "moderation", "resume", "budget change", "goal change", "semantic expansion"],
   },
   intentArchitecture: {
     commercialBrand: {
@@ -700,17 +816,17 @@ const payload = {
       "sitelink titles <=30 and descriptions <=60",
       "only rosomaha-rus.ru links",
       "main and sitelink UTM macros preserved",
-      "all ads reuse the site-owned image already accepted and attached by Yandex",
+      "brand/category retain the accepted generic image; each model creative uses its exact receipt-backed image hash",
       "every desired keyword has exact KeywordsResearch.hasSearchVolume=YES evidence",
       "confirmed waste classes are present as negative keywords in every group",
       "navigation intent is excluded from the paid commercial plan",
       "snow/swamp terms are not routed to /product/kvadrotsikly/",
-      "Wordstat/source uncertainty keeps external mutation fail-closed",
+      "Wordstat/source uncertainty blocks semantic expansion but not receipt-backed corrective changes",
       "23 YES evidence phrases map to 21 unique provider-normalized keyword rows",
       "Ads.add uses the array schema while Ads.update uses ArrayOfString.Items",
     ],
   },
-  applyGate: "BLOCKED: Wordstat source is unavailable; campaign/budget/priority goal owner gate also remains incomplete. This artifact does not authorize mutation or resume.",
+  applyGate: "CORRECTIVE_ONLY while campaign remains SUSPENDED: exact receipt-backed ads/adgroups/keywords corrections may be materialized; Wordstat blocks semantic expansion, and moderation/resume/budget/goal changes remain forbidden.",
 };
 
 fs.mkdirSync(outDir, { recursive: true });

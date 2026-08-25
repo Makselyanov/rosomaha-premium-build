@@ -71,7 +71,10 @@ class CreativeSafetyContractTests(unittest.TestCase):
     def test_safe_creative_contract_accepts_exact_intent_utm_oid_and_images(self):
         payload = self._payload()
         op._validate_creative_contract(payload)
-        op._validate_mutation_image_contract(payload)
+        with mock.patch.object(
+            op, "_validate_model_image_provider_receipt", return_value={}
+        ):
+            op._validate_mutation_image_contract(payload)
 
     def test_category_snow_intent_cannot_target_kvadrotsikly_path(self):
         payload = self._payload()
@@ -105,8 +108,11 @@ class CreativeSafetyContractTests(unittest.TestCase):
             op.BASELINE_GENERIC_IMAGE_HASH
         ]
         payload["imageEvidence"]["perCreative"]["hunter"]["hash"] = op.BASELINE_GENERIC_IMAGE_HASH
-        with self.assertRaisesRegex(op.OperatorError, "model image подменено"):
-            op._validate_mutation_image_contract(payload)
+        with mock.patch.object(
+            op, "_validate_model_image_provider_receipt", return_value={}
+        ):
+            with self.assertRaisesRegex(op.OperatorError, "model image подменено"):
+                op._validate_mutation_image_contract(payload)
 
     def test_legacy_generic_image_is_auditable_but_cannot_authorize_mutation(self):
         payload = self._payload()
@@ -210,6 +216,14 @@ class CreativeSafetyContractTests(unittest.TestCase):
             plan, actual = op.build_model_image_upload_plan(
                 download=lambda url: blobs[url.rsplit("/", 1)[-1].removesuffix(".jpg")]
             )
+            for key in sources:
+                one, one_blob = op.build_model_image_upload_plan(
+                    keys=[key],
+                    download=lambda url: blobs[url.rsplit("/", 1)[-1].removesuffix(".jpg")],
+                )
+                self.assertEqual(one["selected_keys"], [key])
+                self.assertEqual(one["upload_count"], 1)
+                self.assertEqual(set(one_blob), {key})
         self.assertEqual(plan["upload_count"], 3)
         self.assertRegex(plan["plan_sha256"], r"^[a-f0-9]{64}$")
         self.assertFalse(plan["moderation_called"])
@@ -242,6 +256,93 @@ class CreativeSafetyContractTests(unittest.TestCase):
         bad["AdImages"][0]["CampaignId"] = op.TARGET_CAMPAIGN_ID
         with self.assertRaises(op.OperatorError):
             op.assert_mutation_contract("v5", "adimages", "add", bad, "model_images_add")
+
+    def test_single_model_image_contract_is_key_bound(self):
+        for key in op.MODEL_IMAGE_SOURCES:
+            params = op._single_model_image_add_request(key, key.encode("ascii"))
+            self.assertEqual(len(params["AdImages"]), 1)
+            self.assertEqual(params["AdImages"][0]["Name"], f"rosomaha-713802902-{key}")
+            op.verify_single_image_upload_unlock(
+                key,
+                {
+                    op.IMAGE_UPLOAD_ONE_GUARD_ENV: op.IMAGE_UPLOAD_ONE_GUARD_VALUES[key]
+                },
+            )
+
+    def test_three_provider_receipts_are_exact_source_bound_proof(self):
+        for key, pinned in op.MODEL_IMAGE_PROVIDER_RECEIPTS.items():
+            evidence = {
+                "hash": pinned["provider_hash"],
+                "providerReceipt": pinned["path"],
+                "providerReceiptSha256": pinned["receipt_sha256"],
+                "preparedSha256": pinned["prepared_sha256"],
+            }
+            receipt = op._validate_model_image_provider_receipt(key, evidence)
+            self.assertEqual(receipt["selected_key"], key)
+            self.assertEqual(receipt["target"]["state"], "SUSPENDED")
+            self.assertFalse(receipt["creative_apply_authorized"])
+            drift = op.copy.deepcopy(evidence)
+            drift["hash"] += "x"
+            with self.assertRaises(op.OperatorError):
+                op._validate_model_image_provider_receipt(key, drift)
+
+    def test_materialization_accepts_only_exact_receipt_backed_model_hashes(self):
+        current, _ = op.build_current_payload()
+        payload = op.copy.deepcopy(current)
+        resolved = {
+            "brand": op.BASELINE_GENERIC_IMAGE_HASH,
+            "category": op.BASELINE_GENERIC_IMAGE_HASH,
+            **{
+                key: pinned["provider_hash"]
+                for key, pinned in op.MODEL_IMAGE_PROVIDER_RECEIPTS.items()
+            },
+        }
+        for key, image_hash in resolved.items():
+            payload["creatives"][key]["AdImageHashes"]["Items"] = [image_hash]
+        requests = op.build_materialized_requests(
+            payload,
+            image_hash=resolved,
+            sitelink_ids={
+                "generic": 9900000001,
+                "extrimeUaz": 9900000002,
+                "extrimeToyota": 9900000003,
+                "hunter": 9900000004,
+            },
+        )
+        by_id = {
+            row["Id"]: row["ResponsiveAd"]["AdImageHashes"]["Items"][0]
+            for row in requests["ads_update"]["params"]["Ads"]
+        }
+        self.assertEqual(by_id[op.EXISTING_AD_IDS["extrime_uaz"]], resolved["extrimeUaz"])
+        self.assertEqual(
+            by_id[op.EXISTING_AD_IDS["parked_extrime_toyota"]],
+            resolved["extrimeToyota"],
+        )
+        self.assertEqual(by_id[op.EXISTING_AD_IDS["hunter"]], resolved["hunter"])
+        drift = op.copy.deepcopy(resolved)
+        drift["hunter"] += "x"
+        with self.assertRaises(op.OperatorError):
+            op.build_materialized_requests(
+                payload,
+                image_hash=drift,
+                sitelink_ids={
+                    "generic": 9900000001,
+                    "extrimeUaz": 9900000002,
+                    "extrimeToyota": 9900000003,
+                    "hunter": 9900000004,
+                },
+            )
+        with self.assertRaises(op.OperatorError):
+            op._single_model_image_add_request("foreign", b"x")
+        with self.assertRaises(op.OperatorError):
+            op.verify_single_image_upload_unlock(
+                "hunter",
+                {
+                    op.IMAGE_UPLOAD_ONE_GUARD_ENV: op.IMAGE_UPLOAD_ONE_GUARD_VALUES[
+                        "extrimeUaz"
+                    ]
+                },
+            )
 
     def test_image_upload_apply_needs_unlock_and_exact_cas_before_mutation(self):
         class FakeApi:
@@ -312,9 +413,10 @@ class CreativeOperatorTests(unittest.TestCase):
         self.assertTrue(all(item > 2**53 for item in expected))
 
     def _requests(self):
+        image_hashes, _ = op.validate_reused_image(self.payload)
         return op.build_materialized_requests(
             self.payload,
-            image_hash=op.BASELINE_GENERIC_IMAGE_HASH,
+            image_hash=image_hashes,
             sitelink_ids={
                 "generic": 9900000001,
                 "extrimeUaz": 9900000002,
@@ -437,9 +539,10 @@ class CreativeOperatorTests(unittest.TestCase):
 
     def _post_snapshot(self, new_ad_id=1919379464991658999):
         snapshot = self._second_partial_snapshot()
+        image_hashes, _ = op.validate_reused_image(self.payload)
         requests = op.build_materialized_requests(
             self.payload,
-            image_hash=op.BASELINE_GENERIC_IMAGE_HASH,
+            image_hash=image_hashes,
             sitelink_ids=op.PARTIAL_SITELINK_IDS,
         )
 
@@ -476,6 +579,246 @@ class CreativeOperatorTests(unittest.TestCase):
             for key, links in self.payload["sitelinkSets"].items()
         ]
         return snapshot, requests, new_ad_id
+
+    def _corrective_preimage_snapshot(self):
+        old_payload = op.json.loads(
+            op.CORRECTIVE_PREIMAGE_PAYLOAD.read_text(encoding="utf-8")
+        )
+        snapshot = self._second_partial_snapshot()
+        old_groups = op._current_stage_params(
+            old_payload, "adgroups", "update"
+        )["AdGroups"]
+        snapshot["raw"]["adgroups"] = op.copy.deepcopy(old_groups)
+        old_updates = {
+            item["Id"]: item["Keyword"] for item in old_payload["keywords"]["update"]
+        }
+        for item in snapshot["raw"]["keywords"]:
+            if item["Id"] in old_updates:
+                item["Keyword"] = old_updates[item["Id"]]
+        old_requests = op.build_materialized_requests(
+            old_payload,
+            image_hash=op.BASELINE_GENERIC_IMAGE_HASH,
+            sitelink_ids=op.PARTIAL_SITELINK_IDS,
+        )
+
+        def readback_creative(value):
+            hashes = value["AdImageHashes"]
+            if isinstance(hashes, dict):
+                hashes = hashes["Items"]
+            return {
+                "Titles": [{"Title": item} for item in value["Titles"]],
+                "Texts": [{"Text": item} for item in value["Texts"]],
+                "Href": value["Href"],
+                "DisplayUrlPath": value["DisplayUrlPath"],
+                "SitelinkSetId": value["SitelinkSetId"],
+                "AdImages": {"Items": [{"ImageHash": item} for item in hashes]},
+            }
+
+        ads = {item["Id"]: item for item in snapshot["raw"]["ads"]}
+        for row in old_requests["ads_update"]["params"]["Ads"]:
+            ads[row["Id"]]["ResponsiveAd"] = readback_creative(row["ResponsiveAd"])
+        ads[op.PARKED_AD_ID]["State"] = "SUSPENDED"
+        added = old_requests["ads_add"]["params"]["Ads"][0]
+        ads[op.CORRECTIVE_PREIMAGE_NEW_AD_ID] = {
+            "Id": op.CORRECTIVE_PREIMAGE_NEW_AD_ID,
+            "AdGroupId": added["AdGroupId"],
+            "Status": "DRAFT",
+            "State": "OFF",
+            "ResponsiveAd": readback_creative(added["ResponsiveAd"]),
+        }
+        snapshot["raw"]["ads"] = list(ads.values())
+        snapshot["raw"]["sitelinks"] = [
+            {"Id": op.PARTIAL_SITELINK_IDS[key], "Sitelinks": links}
+            for key, links in old_payload["sitelinkSets"].items()
+        ]
+        return snapshot
+
+    def test_current_recovery_receipt_state_is_safe_corrective_preimage(self):
+        snapshot = self._corrective_preimage_snapshot()
+        for group in snapshot["raw"]["adgroups"]:
+            items = group["NegativeKeywords"]["Items"]
+            group["NegativeKeywords"]["Items"] = list(reversed(items)) + items[:2]
+        snapshot["raw"]["campaign"]["Status"] = "MODERATION"
+        for ad in snapshot["raw"]["ads"]:
+            ad["Status"] = "PREACCEPTED"
+            ad["StatusClarification"] = "provider lifecycle"
+        classification = op.classify_target_state(snapshot, self.payload)
+        self.assertEqual(classification["classification"], "safe_corrective_preimage")
+        self.assertEqual(
+            classification["historical_preimage_receipt_sha256"],
+            op.CORRECTIVE_PREIMAGE_RECEIPT_SHA256,
+        )
+        self.assertEqual(
+            classification["live_preflight_sha256"], op.LIVE_PREFLIGHT_REPORT_SHA256
+        )
+
+    def test_corrective_plan_updates_only_exact_existing_ids_and_never_adds(self):
+        image_hashes, _ = op.validate_reused_image(self.payload)
+        requests = op.build_corrective_requests(self.payload, image_hashes)
+        self.assertEqual(
+            set(requests),
+            {
+                "corrective_adgroups_update",
+                "corrective_keywords_update",
+                "corrective_ads_update",
+            },
+        )
+        self.assertTrue(all(item["method"] == "update" for item in requests.values()))
+        self.assertEqual(
+            {row["Id"] for row in requests["corrective_adgroups_update"]["params"]["AdGroups"]},
+            set(op.GROUP_IDS.values()),
+        )
+        self.assertEqual(
+            {row["Id"] for row in requests["corrective_keywords_update"]["params"]["Keywords"]},
+            op.KEYWORD_UPDATE_IDS,
+        )
+        self.assertEqual(
+            {row["Id"] for row in requests["corrective_ads_update"]["params"]["Ads"]},
+            set(op.EXISTING_AD_IDS.values()) | {op.CORRECTIVE_PREIMAGE_NEW_AD_ID},
+        )
+        self.assertNotIn("AdGroupId", requests["corrective_ads_update"]["params"]["Ads"][-1])
+
+    def test_corrective_apply_exact_three_updates_then_idempotent_noop(self):
+        preimage = self._corrective_preimage_snapshot()
+        target, _, _ = self._post_snapshot(op.CORRECTIVE_PREIMAGE_NEW_AD_ID)
+        preimage["sha256"] = "a" * 64
+        target["sha256"] = "b" * 64
+
+        class FakeApi:
+            mutation_requests = 0
+            request_log = []
+
+        class FakeLock:
+            def hold(self):
+                class Held:
+                    def __enter__(self_inner):
+                        return {"path": "test.lock", "released": False}
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return Held()
+
+        protected = {"campaigns": {}, "canonical_sha256": "p"}
+        called = []
+
+        def fake_stage(api_arg, kind, item, **kwargs):
+            called.append(kind)
+            api_arg.mutation_requests += 1
+            rows_key = {
+                "corrective_adgroups_update": "AdGroups",
+                "corrective_keywords_update": "Keywords",
+                "corrective_ads_update": "Ads",
+            }[kind]
+            ids = [row["Id"] for row in item["params"][rows_key]]
+            return {"result": {"UpdateResults": [{"Id": item_id} for item_id in ids]}}
+
+        api = FakeApi()
+        with (
+            mock.patch.object(op, "_validate_mutation_image_contract", return_value=None),
+            mock.patch.object(op, "public_http_preflight", return_value={"all_http_200": True}),
+            mock.patch.object(op.guard, "prove_identity", return_value={"login": op.EXPECTED_LOGIN}),
+            mock.patch.object(op.guard, "read_protected_snapshot", return_value=protected),
+            mock.patch.object(op.guard, "assert_protected_equal", return_value=None),
+            mock.patch.object(op, "read_target_snapshot", side_effect=[preimage, target]),
+            mock.patch.object(op, "_mutate_stage", side_effect=fake_stage),
+        ):
+            receipt = op.run_corrective_apply(
+                api,
+                self.payload,
+                expected_cas_sha256="a" * 64,
+                expected_plan_sha256=self.metadata["plan_sha256"],
+                environ={op.CORRECTIVE_GUARD_ENV: op.CORRECTIVE_GUARD_VALUE},
+                payload_metadata=self.metadata,
+                lock_policy=FakeLock(),
+            )
+        self.assertEqual(receipt["status"], "corrective_applied_verified_suspended")
+        self.assertEqual(receipt["mutation_requests"], 3)
+        self.assertEqual(called, [
+            "corrective_adgroups_update",
+            "corrective_keywords_update",
+            "corrective_ads_update",
+        ])
+        self.assertTrue(op.receipt_is_safe(receipt))
+
+        noop_api = FakeApi()
+        noop_api.mutation_requests = 0
+        with (
+            mock.patch.object(op, "_validate_mutation_image_contract", return_value=None),
+            mock.patch.object(op, "public_http_preflight", return_value={"all_http_200": True}),
+            mock.patch.object(op.guard, "prove_identity", return_value={"login": op.EXPECTED_LOGIN}),
+            mock.patch.object(op.guard, "read_protected_snapshot", return_value=protected),
+            mock.patch.object(op.guard, "assert_protected_equal", return_value=None),
+            mock.patch.object(op, "read_target_snapshot", return_value=target),
+        ):
+            noop = op.run_corrective_apply(
+                noop_api,
+                self.payload,
+                expected_cas_sha256="b" * 64,
+                expected_plan_sha256=self.metadata["plan_sha256"],
+                environ={op.CORRECTIVE_GUARD_ENV: op.CORRECTIVE_GUARD_VALUE},
+                payload_metadata=self.metadata,
+                lock_policy=FakeLock(),
+            )
+        self.assertEqual(noop["status"], "corrective_already_applied_noop")
+        self.assertEqual(noop["mutation_requests"], 0)
+        self.assertTrue(noop["idempotent_noop"])
+        self.assertTrue(op.receipt_is_safe(noop))
+
+    def test_corrective_dry_run_is_read_only_and_plans_only_three_updates(self):
+        snapshot = self._corrective_preimage_snapshot()
+        snapshot["sha256"] = "a" * 64
+
+        class FakeApi:
+            mutation_requests = 0
+
+        class FakeLock:
+            def inspect(self):
+                return {"available": True, "path": "test.lock"}
+
+        protected = {"campaigns": {}, "canonical_sha256": "p"}
+        with (
+            mock.patch.object(op, "public_http_preflight", return_value={"all_http_200": True}),
+            mock.patch.object(op.guard, "prove_identity", return_value={"login": op.EXPECTED_LOGIN}),
+            mock.patch.object(op.guard, "read_protected_snapshot", return_value=protected),
+            mock.patch.object(op, "read_target_snapshot", return_value=snapshot),
+        ):
+            receipt = op.run_corrective_dry_run(
+                FakeApi(),
+                self.payload,
+                payload_metadata=self.metadata,
+                lock_policy=FakeLock(),
+            )
+        self.assertEqual(receipt["status"], "ready_corrective")
+        self.assertEqual(receipt["mutation_requests"], 0)
+        self.assertEqual(
+            {row["mutation_kind"] for row in receipt["planned_requests"]},
+            {
+                "corrective_adgroups_update",
+                "corrective_keywords_update",
+                "corrective_ads_update",
+            },
+        )
+        self.assertTrue(op.receipt_is_safe(receipt))
+
+    def test_corrective_preimage_keeps_ids_state_content_utm_and_images_strict(self):
+        mutations = (
+            lambda value: value["raw"]["campaign"].update(State="ON"),
+            lambda value: value["raw"]["ads"][0].update(Id=1),
+            lambda value: value["raw"]["ads"][0].update(State="ON"),
+            lambda value: value["raw"]["ads"][0]["ResponsiveAd"].update(
+                Href="https://rosomaha-rus.ru/?utm_source=changed"
+            ),
+            lambda value: value["raw"]["ads"][0]["ResponsiveAd"].update(
+                AdImages={"Items": [{"ImageHash": "changed"}]}
+            ),
+        )
+        for mutate in mutations:
+            snapshot = self._corrective_preimage_snapshot()
+            mutate(snapshot)
+            with self.subTest(mutate=mutate):
+                with self.assertRaises(op.OperatorError):
+                    op.validate_corrective_preimage(snapshot, self.payload)
 
     def test_materialized_ads_update_all_exact_ids_and_add_array_hash(self):
         requests = self._requests()
@@ -778,6 +1121,20 @@ class CreativeOperatorTests(unittest.TestCase):
             op.strict_action_rows(result, "AddResults", expected_count=1, id_field="Id")
         self.assertIn("provider_warnings", caught.exception.partial)
 
+    def test_provider_error_receipt_preserves_exact_row_index(self):
+        result = {
+            "AddResults": [
+                {"AdImageHash": "ok"},
+                {"Errors": [{"Code": 5004, "Message": "bad", "Details": "size"}]},
+                {"AdImageHash": "unused"},
+            ]
+        }
+        with self.assertRaises(op.OperatorError) as caught:
+            op.strict_action_rows(
+                result, "AddResults", expected_count=3, id_field="AdImageHash"
+            )
+        self.assertEqual(caught.exception.partial["provider_error_row_index"], 1)
+
     def test_apply_requires_both_cas_values_and_exact_unlock(self):
         self.assertEqual(op.parse_args([]).mode, "dry-run")
         with self.assertRaises(SystemExit):
@@ -812,6 +1169,24 @@ class CreativeOperatorTests(unittest.TestCase):
             {op.RECOVERY_GUARD_ENV: op.RECOVERY_GUARD_VALUE}
         )
 
+        corrective_dry = op.parse_args(["--corrective-dry-run"])
+        self.assertEqual(corrective_dry.mode, "corrective-dry-run")
+        corrective_apply = op.parse_args(
+            [
+                "--corrective-apply",
+                "--expected-cas-sha256",
+                "a" * 64,
+                "--expected-plan-sha256",
+                "b" * 64,
+            ]
+        )
+        self.assertEqual(corrective_apply.mode, "corrective-apply")
+        with self.assertRaises(op.OperatorError):
+            op.verify_corrective_unlock({})
+        op.verify_corrective_unlock(
+            {op.CORRECTIVE_GUARD_ENV: op.CORRECTIVE_GUARD_VALUE}
+        )
+
         image_dry = op.parse_args(["--image-upload-dry-run"])
         self.assertEqual(image_dry.mode, "image-upload-dry-run")
         image_apply = op.parse_args(
@@ -824,6 +1199,21 @@ class CreativeOperatorTests(unittest.TestCase):
             ]
         )
         self.assertEqual(image_apply.mode, "image-upload-apply")
+        for key in op.MODEL_IMAGE_SOURCES:
+            one_dry = op.parse_args(["--image-upload-one-dry-run", key])
+            self.assertEqual(one_dry.mode, "image-upload-one-dry-run")
+            self.assertEqual(one_dry.image_upload_one_dry_run, key)
+            one_apply = op.parse_args(
+                [
+                    "--image-upload-one-apply",
+                    key,
+                    "--expected-cas-sha256",
+                    "a" * 64,
+                    "--expected-image-plan-sha256",
+                    "b" * 64,
+                ]
+            )
+            self.assertEqual(one_apply.mode, "image-upload-one-apply")
 
     def test_apply_with_legacy_generic_image_fails_before_any_api_request(self):
         class FakeApi:
@@ -831,10 +1221,14 @@ class CreativeOperatorTests(unittest.TestCase):
             request_log = []
 
         api = FakeApi()
+        legacy = op.copy.deepcopy(self.payload)
+        legacy["imageEvidence"].pop("perCreative", None)
+        for creative in legacy["creatives"].values():
+            creative["AdImageHashes"]["Items"] = [op.BASELINE_GENERIC_IMAGE_HASH]
         with self.assertRaisesRegex(op.OperatorError, "Mutation blocked"):
             op.run_apply(
                 api,
-                self.payload,
+                legacy,
                 expected_cas_sha256="a" * 64,
                 expected_plan_sha256=self.metadata["plan_sha256"],
                 environ={op.APPLY_GUARD_ENV: op.APPLY_GUARD_VALUE},
@@ -952,6 +1346,7 @@ class CreativeOperatorTests(unittest.TestCase):
             "canonical_bytes": 1,
             "semantic_sha256": "p",
         }
+        verified_hashes, _ = op.validate_reused_image(self.payload)
         with (
             mock.patch.object(op, "_validate_mutation_image_contract", return_value=None),
             mock.patch.object(
@@ -977,7 +1372,7 @@ class CreativeOperatorTests(unittest.TestCase):
                 op,
                 "validate_reused_image",
                 return_value=(
-                    op.BASELINE_GENERIC_IMAGE_HASH,
+                    verified_hashes,
                     {"readback_verified": True},
                 ),
             ),

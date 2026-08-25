@@ -187,6 +187,29 @@ THIRD_PARTIAL_PLAN_SHA256 = (
     "0881ecb51551c21fb682e5813afcb2a2f869f85b6ffe2583a2aee75b710b3872"
 )
 
+CORRECTIVE_PREIMAGE_RECEIPT = (
+    REPORT_ROOT
+    / "ROSOMAHA_RUS_DIRECT_CREATIVE_recover-partial_713802902_2026-08-24T22-50-05-520551+00-00.json"
+)
+CORRECTIVE_PREIMAGE_RECEIPT_SHA256 = (
+    "20c823d5f9fa05c7ded69a4047928cd6494f755521dd5ceddeb6e2d79b391db5"
+)
+CORRECTIVE_PREIMAGE_PAYLOAD = (
+    REPORT_ROOT
+    / "YANDEX_DIRECT_CREATIVE_SEMANTIC_DRY_RUN_713802902_2026-08-24T22-50-05-470Z.json"
+)
+CORRECTIVE_PREIMAGE_PAYLOAD_SHA256 = (
+    "445028f2cf9752756731eba01563054faf02653c7ea591886808ca60b2613bc6"
+)
+CORRECTIVE_PREIMAGE_NEW_AD_ID = 1_919_433_640_640_318_428
+LIVE_PREFLIGHT_REPORT = (
+    REPORT_ROOT
+    / "ROSOMAHA_RUS_DIRECT_LIVE_PREFLIGHT_713802902_2026-08-25T16-38Z.md"
+)
+LIVE_PREFLIGHT_REPORT_SHA256 = (
+    "927e9a86af196a311bb3f890e531cfa7732e453139b3db583cd6d19c0bb835a1"
+)
+
 MODEL_IMAGE_REPORT = REPORT_ROOT / "ROSOMAHA_RUS_MODEL_IMAGE_EVIDENCE_713802902_2026-08-25T16-45Z.md"
 MODEL_IMAGE_REPORT_SHA256 = "8131c115c19e22ee4d3f78ff91477f83d7b0211047a44099c6dbf8482b4471f2"
 MODEL_IMAGE_SOURCES = {
@@ -208,6 +231,32 @@ MODEL_IMAGE_SOURCES = {
 }
 IMAGE_UPLOAD_GUARD_ENV = "ROSOMAHA_DIRECT_MODEL_IMAGE_UPLOAD"
 IMAGE_UPLOAD_GUARD_VALUE = "UPLOAD_EXACT_3_MODEL_IMAGES_713802902_V1"
+IMAGE_UPLOAD_ONE_GUARD_ENV = "ROSOMAHA_DIRECT_MODEL_IMAGE_UPLOAD_ONE"
+IMAGE_UPLOAD_ONE_GUARD_VALUES = {
+    "extrimeUaz": "UPLOAD_ONE_EXTRIME_UAZ_713802902_V1",
+    "extrimeToyota": "UPLOAD_ONE_EXTRIME_TOYOTA_713802902_V1",
+    "hunter": "UPLOAD_ONE_HUNTER_713802902_V1",
+}
+MODEL_IMAGE_PROVIDER_RECEIPTS = {
+    "extrimeUaz": {
+        "path": "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-27-52-058511+00-00.json",
+        "receipt_sha256": "d524b0276e173b530ff49fbd7ae523654ffcd2cdec9a00d51185241ac62a23fc",
+        "provider_hash": "4e4EASCdH4-68IKrBvn0og",
+        "prepared_sha256": "ef9bb28609d4e1182ea739e834dd7e12f77135fc991be4bcd22d05a558d53f53",
+    },
+    "extrimeToyota": {
+        "path": "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-29-10-095487+00-00.json",
+        "receipt_sha256": "ef2ca982c02b30e8f7f36ee2e006717014177995cc78bb2dad31956a0b81903d",
+        "provider_hash": "GFg5M_5dT4q6L-949itRBA",
+        "prepared_sha256": "59848fa8a9f1b345bb0c0a7772d306cc5b8270039c303e287ecc2cc52f4bb674",
+    },
+    "hunter": {
+        "path": "marketing-audits/yandex-direct/ROSOMAHA_RUS_DIRECT_CREATIVE_image-upload-one-apply_713802902_2026-08-25T17-30-21-402835+00-00.json",
+        "receipt_sha256": "d23e230c60d4dc05c560d465f9025cd37a1cb3a270c5776d9d418c6975be55b0",
+        "provider_hash": "-e9I7NzC9ED4-I0ib73QcQ",
+        "prepared_sha256": "c7d44d24ff51c8db7d986ad339215f72e201bfbf563a6fc5af6a97bc32492786",
+    },
+}
 
 BASELINE_GROUP_NAMES = {
     GROUP_IDS["brand"]: "Brand Rosomaha",
@@ -307,6 +356,8 @@ APPLY_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_APPLY"
 APPLY_GUARD_VALUE = "APPLY_713802902_CREATIVE_SEMANTIC_V3_SOURCE_BOUND"
 RECOVERY_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_RECOVERY"
 RECOVERY_GUARD_VALUE = "RECOVER_713802902_EPK_ADS_V501_V3"
+CORRECTIVE_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_CORRECTIVE"
+CORRECTIVE_GUARD_VALUE = "CORRECT_EXISTING_6_ADS_713802902_V1"
 MUTATION_LOCK_PATH = guard.MUTATION_LOCK_PATH
 BROWSER_LOCK_PATHS = guard.BROWSER_LOCK_PATHS
 MAX_RESPONSE_BYTES = 4_000_000
@@ -615,6 +666,64 @@ def _validate_mutation_image_contract(payload: Mapping[str, Any]) -> None:
             if hashes[0] in seen_model_hashes:
                 raise OperatorError("Mutation blocked: разные модели используют одну image")
             seen_model_hashes.add(hashes[0])
+            _validate_model_image_provider_receipt(key, evidence)
+
+
+def _validate_model_image_provider_receipt(
+    key: str, evidence: Mapping[str, Any]
+) -> dict[str, Any]:
+    pinned = MODEL_IMAGE_PROVIDER_RECEIPTS.get(key)
+    if pinned is None:
+        raise OperatorError(f"Model image receipt key {key} не закреплён")
+    if (
+        evidence.get("providerReceipt") != pinned["path"]
+        or evidence.get("providerReceiptSha256") != pinned["receipt_sha256"]
+        or evidence.get("preparedSha256") != pinned["prepared_sha256"]
+        or evidence.get("hash") != pinned["provider_hash"]
+    ):
+        raise OperatorError(f"Model image {key}: source-bound receipt fields не совпали")
+    path = (PROJECT_ROOT / pinned["path"]).resolve(strict=True)
+    if path.parent != REPORT_ROOT.resolve() or path.is_symlink() or not path.is_file():
+        raise OperatorError(f"Model image {key}: provider receipt вышел за report scope")
+    if _sha256_file(path) != pinned["receipt_sha256"]:
+        raise OperatorError(f"Model image {key}: provider receipt SHA-256 drift")
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OperatorError(f"Model image {key}: provider receipt невалиден") from None
+    plan = receipt.get("image_plan")
+    rows = plan.get("images") if isinstance(plan, Mapping) else None
+    expected_source = MODEL_IMAGE_SOURCES[key]
+    if (
+        receipt.get("mode") != "image-upload-one-apply"
+        or receipt.get("status") != "uploaded_one_verified_suspended"
+        or receipt.get("selected_key") != key
+        or receipt.get("provider_hash") != pinned["provider_hash"]
+        or receipt.get("mutation_requests") != 1
+        or receipt.get("target", {}).get("campaign_id") != TARGET_CAMPAIGN_ID
+        or receipt.get("target", {}).get("state") != "SUSPENDED"
+        or receipt.get("protected_unchanged") is not True
+        or receipt.get("creative_apply_authorized") is not False
+        or any(
+            receipt.get(field) is not False
+            for field in ("moderation_called", "resume_called", "budget_changed", "goal_changed")
+        )
+        or not isinstance(plan, Mapping)
+        or plan.get("exact_login") != EXPECTED_LOGIN
+        or plan.get("campaign_id") != TARGET_CAMPAIGN_ID
+        or plan.get("selected_keys") != [key]
+        or plan.get("upload_count") != 1
+        or plan.get("campaign_remains_suspended") is not True
+        or not isinstance(rows, list)
+        or len(rows) != 1
+        or rows[0].get("key") != key
+        or rows[0].get("source_url") != expected_source["url"]
+        or rows[0].get("source_sha256") != expected_source["sha256"]
+        or rows[0].get("source_bytes") != expected_source["bytes"]
+        or rows[0].get("prepared_sha256") != pinned["prepared_sha256"]
+    ):
+        raise OperatorError(f"Model image {key}: provider receipt provenance не совпал")
+    return receipt
 
 
 def validate_payload(payload: Any) -> None:
@@ -898,9 +1007,13 @@ def assert_mutation_contract(
         "keywords_add": ("v5", "keywords", "add"),
         "keywords_suspend": ("v5", "keywords", "suspend"),
         "ads_update": ("v501", "ads", "update"),
+        "corrective_adgroups_update": ("v501", "adgroups", "update"),
+        "corrective_keywords_update": ("v5", "keywords", "update"),
+        "corrective_ads_update": ("v501", "ads", "update"),
         "ads_add": ("v501", "ads", "add"),
         "ads_suspend": ("v501", "ads", "suspend"),
         "model_images_add": ("v5", "adimages", "add"),
+        "model_image_add_one": ("v5", "adimages", "add"),
     }
     if allowed.get(mutation_kind) != (version, service, method):
         raise OperatorError("Mutation kind/service/method не совпали с allowlist")
@@ -928,11 +1041,11 @@ def assert_mutation_contract(
         signatures = [sha256_json(_normalise_sitelinks(row.get("Sitelinks"))) for row in rows]
         if len(signatures) != len(set(signatures)):
             raise OperatorError("Sitelinks.add содержит дубли вместо reuse")
-    elif mutation_kind == "adgroups_update":
+    elif mutation_kind in {"adgroups_update", "corrective_adgroups_update"}:
         rows = params.get("AdGroups") if set(params) == {"AdGroups"} else None
         if not isinstance(rows, list) or {exact_int(row.get("Id"), "AdGroup Id") for row in rows} != set(GROUP_IDS.values()):
             raise OperatorError("AdGroups.update должен содержать ровно пять целевых групп")
-    elif mutation_kind == "keywords_update":
+    elif mutation_kind in {"keywords_update", "corrective_keywords_update"}:
         rows = params.get("Keywords") if set(params) == {"Keywords"} else None
         if not isinstance(rows, list) or {exact_int(row.get("Id"), "Keyword Id") for row in rows} != KEYWORD_UPDATE_IDS:
             raise OperatorError("Keywords.update scope не совпал")
@@ -957,6 +1070,16 @@ def assert_mutation_contract(
             raise OperatorError("Ads.update требует все пять exact 64-bit IDs")
         if any(set(row) != {"Id", "ResponsiveAd"} for row in rows):
             raise OperatorError("Ads.update item содержит лишние поля")
+    elif mutation_kind == "corrective_ads_update":
+        rows = params.get("Ads") if set(params) == {"Ads"} else None
+        exact_ids = set(EXISTING_AD_IDS.values()) | {CORRECTIVE_PREIMAGE_NEW_AD_ID}
+        if (
+            not isinstance(rows, list)
+            or {exact_int(row.get("Id"), "Corrective Ad Id") for row in rows}
+            != exact_ids
+            or any(set(row) != {"Id", "ResponsiveAd"} for row in rows)
+        ):
+            raise OperatorError("Corrective Ads.update требует exact шесть существующих IDs")
     elif mutation_kind == "ads_add":
         rows = params.get("Ads") if set(params) == {"Ads"} else None
         if not isinstance(rows, list) or len(rows) != 1:
@@ -984,6 +1107,19 @@ def assert_mutation_contract(
             names.append(row.get("Name"))
         if names != [f"rosomaha-713802902-{key}" for key in MODEL_IMAGE_SOURCES]:
             raise OperatorError("AdImages.add Name/order вышли за exact plan")
+    elif mutation_kind == "model_image_add_one":
+        rows = params.get("AdImages") if set(params) == {"AdImages"} else None
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
+            raise OperatorError("Single AdImages.add требует ровно одну row")
+        row = rows[0]
+        allowed_names = {f"rosomaha-713802902-{key}" for key in MODEL_IMAGE_SOURCES}
+        if (
+            set(row) != {"ImageData", "Name"}
+            or row.get("Name") not in allowed_names
+            or not isinstance(row.get("ImageData"), str)
+            or not row["ImageData"]
+        ):
+            raise OperatorError("Single AdImages.add row вышла за exact allowlist")
 
 
 class CreativeDirectApi(guard.DirectApi):
@@ -1658,6 +1794,231 @@ def validate_partial_state(
     }
 
 
+def validate_corrective_preimage(
+    snapshot: Mapping[str, Any], payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Recognise the exact suspended state produced by the pinned recovery.
+
+    The historical payload is the content preimage for the corrective bundle.
+    Provider ordering/duplicate normalisation of negatives and moderation-only
+    fields are deliberately outside content CAS; entity IDs, mutable content,
+    URLs/images and every serving State remain exact.
+    """
+    if (
+        not CORRECTIVE_PREIMAGE_RECEIPT.is_file()
+        or _sha256_file(CORRECTIVE_PREIMAGE_RECEIPT)
+        != CORRECTIVE_PREIMAGE_RECEIPT_SHA256
+        or not CORRECTIVE_PREIMAGE_PAYLOAD.is_file()
+        or _sha256_file(CORRECTIVE_PREIMAGE_PAYLOAD)
+        != CORRECTIVE_PREIMAGE_PAYLOAD_SHA256
+        or not LIVE_PREFLIGHT_REPORT.is_file()
+        or _sha256_file(LIVE_PREFLIGHT_REPORT) != LIVE_PREFLIGHT_REPORT_SHA256
+    ):
+        raise OperatorError("Corrective preimage evidence missing or changed")
+    try:
+        receipt = json.loads(CORRECTIVE_PREIMAGE_RECEIPT.read_text(encoding="utf-8"))
+        old_payload = json.loads(CORRECTIVE_PREIMAGE_PAYLOAD.read_text(encoding="utf-8"))
+        preflight = LIVE_PREFLIGHT_REPORT.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as error:
+        raise OperatorError("Corrective preimage evidence unreadable") from error
+    if (
+        receipt.get("status") != "recovered_verified_suspended"
+        or receipt.get("scope", {}).get("login") != EXPECTED_LOGIN
+        or receipt.get("scope", {}).get("campaign_id") != TARGET_CAMPAIGN_ID
+        or receipt.get("readback", {}).get("new_ad_id")
+        != CORRECTIVE_PREIMAGE_NEW_AD_ID
+        or receipt.get("final_campaign_state") != "SUSPENDED"
+        or receipt.get("payload", {}).get("artifact_sha256")
+        != CORRECTIVE_PREIMAGE_PAYLOAD_SHA256
+        or receipt.get("mutation_requests") != 3
+        or receipt.get("readback", {}).get("moderation_called") is not False
+        or "safe_suspended_provider_normalization_drift" not in preflight
+        or str(CORRECTIVE_PREIMAGE_NEW_AD_ID) not in preflight
+    ):
+        raise OperatorError("Corrective preimage receipt/preflight contract drift")
+
+    raw = snapshot.get("raw")
+    if not isinstance(raw, Mapping):
+        raise OperatorError("Corrective preimage raw отсутствует")
+    campaign = raw.get("campaign")
+    if not isinstance(campaign, Mapping):
+        raise OperatorError("Corrective preimage campaign отсутствует")
+    if (
+        exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID
+        or campaign.get("Type") != "UNIFIED_CAMPAIGN"
+        or campaign.get("State") != "SUSPENDED"
+    ):
+        raise OperatorError("Corrective preimage campaign ID/type/State drift")
+    unified = guard.validate_canonical_campaign(
+        campaign, require_draft=False, allowed_states=("SUSPENDED",)
+    )
+    if unified.get("PackageBiddingStrategy") is not None:
+        raise OperatorError("Corrective preimage запрещён при package bidding")
+    if guard.measurement(campaign, allowed_states=("SUSPENDED",)) != {
+        "CounterIds": [EXPECTED_COUNTER_ID],
+        "PriorityGoals": None,
+    }:
+        raise OperatorError("Corrective preimage measurement drift")
+
+    old_requests = build_materialized_requests(
+        old_payload,
+        image_hash=BASELINE_GENERIC_IMAGE_HASH,
+        sitelink_ids=PARTIAL_SITELINK_IDS,
+    )
+    verified = verify_post_readback(
+        snapshot,
+        old_payload,
+        old_requests,
+        new_keyword_ids=sorted(PARTIAL_NEW_KEYWORDS),
+        new_ad_id=CORRECTIVE_PREIMAGE_NEW_AD_ID,
+        sitelink_ids=PARTIAL_SITELINK_IDS,
+    )
+
+    ads = {exact_int(item.get("Id"), "Ad Id"): item for item in raw.get("ads", [])}
+    for ad_id, item in ads.items():
+        expected_state = "SUSPENDED" if ad_id == PARKED_AD_ID else "OFF"
+        if item.get("State") != expected_state:
+            raise OperatorError(f"Corrective preimage ad State drift {ad_id}")
+    keywords = {
+        exact_int(item.get("Id"), "Keyword Id"): item
+        for item in raw.get("keywords", [])
+    }
+    for keyword_id, item in keywords.items():
+        expected_state = "SUSPENDED" if keyword_id in KEYWORD_SUSPEND_IDS else "ON"
+        if item.get("State") != expected_state:
+            raise OperatorError(f"Corrective preimage keyword State drift {keyword_id}")
+
+    return {
+        "classification": "safe_corrective_preimage",
+        "campaign_state": "SUSPENDED",
+        "completed_stages": [],
+        "remaining_stages": [
+            "adgroups_update",
+            "keywords_update",
+            "ads_update",
+            "ads_add",
+        ],
+        "historical_preimage_receipt": str(
+            CORRECTIVE_PREIMAGE_RECEIPT.relative_to(PROJECT_ROOT)
+        ),
+        "historical_preimage_receipt_sha256": CORRECTIVE_PREIMAGE_RECEIPT_SHA256,
+        "live_preflight_sha256": LIVE_PREFLIGHT_REPORT_SHA256,
+        "provider_normalization_ignored": [
+            "NegativeKeywords.Items order/duplicates",
+            "moderation lifecycle fields",
+        ],
+        "strict_fields": ["Ids", "State", "content", "UTM", "images"],
+        "readback": verified,
+        "target_plan_sha256": sha256_json(_stable_plan_view(payload)),
+    }
+
+
+def build_corrective_requests(
+    payload: Mapping[str, Any], image_hashes: Mapping[str, str]
+) -> dict[str, dict[str, Any]]:
+    materialized = build_materialized_requests(
+        payload,
+        image_hash=image_hashes,
+        sitelink_ids=PARTIAL_SITELINK_IDS,
+    )
+    added = copy.deepcopy(materialized["ads_add"]["params"]["Ads"][0]["ResponsiveAd"])
+    added_hashes = added.get("AdImageHashes")
+    if not isinstance(added_hashes, list) or len(added_hashes) != 1:
+        raise OperatorError("Corrective recovered ad image contract drift")
+    added["AdImageHashes"] = {"Items": added_hashes}
+    ad_rows = copy.deepcopy(materialized["ads_update"]["params"]["Ads"])
+    ad_rows.append({"Id": CORRECTIVE_PREIMAGE_NEW_AD_ID, "ResponsiveAd": added})
+    requests = {
+        "corrective_adgroups_update": {
+            **materialized["adgroups_update"],
+            "mutation_kind": "corrective_adgroups_update",
+        },
+        "corrective_keywords_update": {
+            **materialized["keywords_update"],
+            "mutation_kind": "corrective_keywords_update",
+        },
+        "corrective_ads_update": {
+            "version": "v501",
+            "service": "ads",
+            "method": "update",
+            "mutation_kind": "corrective_ads_update",
+            "params": {"Ads": ad_rows},
+        },
+    }
+    for request in requests.values():
+        assert_mutation_contract(
+            request["version"],
+            request["service"],
+            request["method"],
+            request["params"],
+            request["mutation_kind"],
+        )
+    return requests
+
+
+def validate_corrective_target(
+    snapshot: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    image_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    corrective = build_corrective_requests(payload, image_hashes)
+    regular = build_materialized_requests(
+        payload,
+        image_hash=image_hashes,
+        sitelink_ids=PARTIAL_SITELINK_IDS,
+    )
+    raw = snapshot.get("raw")
+    if not isinstance(raw, Mapping):
+        raise OperatorError("Corrective target raw отсутствует")
+    campaign = raw.get("campaign")
+    if not isinstance(campaign, Mapping):
+        raise OperatorError("Corrective target campaign отсутствует")
+    if (
+        exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID
+        or campaign.get("Type") != "UNIFIED_CAMPAIGN"
+        or campaign.get("State") != "SUSPENDED"
+    ):
+        raise OperatorError("Corrective target campaign ID/type/State drift")
+    unified = guard.validate_canonical_campaign(
+        campaign, require_draft=False, allowed_states=("SUSPENDED",)
+    )
+    if unified.get("PackageBiddingStrategy") is not None:
+        raise OperatorError("Corrective target запрещён при package bidding")
+    if guard.measurement(campaign, allowed_states=("SUSPENDED",)) != {
+        "CounterIds": [EXPECTED_COUNTER_ID],
+        "PriorityGoals": None,
+    }:
+        raise OperatorError("Corrective target measurement drift")
+    verified = verify_post_readback(
+        snapshot,
+        payload,
+        regular,
+        new_keyword_ids=sorted(PARTIAL_NEW_KEYWORDS),
+        new_ad_id=CORRECTIVE_PREIMAGE_NEW_AD_ID,
+        sitelink_ids=PARTIAL_SITELINK_IDS,
+    )
+    ads = {exact_int(item.get("Id"), "Ad Id"): item for item in raw.get("ads", [])}
+    for ad_id, item in ads.items():
+        expected_state = "SUSPENDED" if ad_id == PARKED_AD_ID else "OFF"
+        if item.get("State") != expected_state:
+            raise OperatorError(f"Corrective target ad State drift {ad_id}")
+    keywords = {
+        exact_int(item.get("Id"), "Keyword Id"): item
+        for item in raw.get("keywords", [])
+    }
+    for keyword_id, item in keywords.items():
+        expected_state = "SUSPENDED" if keyword_id in KEYWORD_SUSPEND_IDS else "ON"
+        if item.get("State") != expected_state:
+            raise OperatorError(f"Corrective target keyword State drift {keyword_id}")
+    return {
+        "classification": "corrective_target_exact",
+        "campaign_state": "SUSPENDED",
+        "mutation_requests_required": 0,
+        "request_contract_sha256": sha256_json(corrective),
+        "readback": verified,
+    }
+
+
 def classify_target_state(
     snapshot: Mapping[str, Any], payload: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1666,31 +2027,35 @@ def classify_target_state(
         return {"classification": "baseline", "campaign_state": "SUSPENDED"}
     except OperatorError as baseline_error:
         try:
-            return validate_partial_state(
-                snapshot,
-                payload,
-                after_autotarget_error=True,
-                after_epk_v5_error=True,
-            )
-        except OperatorError as third_partial_error:
+            return validate_corrective_preimage(snapshot, payload)
+        except OperatorError as corrective_error:
             try:
-                return validate_partial_state(snapshot, payload)
-            except OperatorError as partial_error:
+                return validate_partial_state(
+                    snapshot,
+                    payload,
+                    after_autotarget_error=True,
+                    after_epk_v5_error=True,
+                )
+            except OperatorError as third_partial_error:
                 try:
-                    return validate_partial_state(
-                        snapshot, payload, after_autotarget_error=True
-                    )
-                except OperatorError as second_partial_error:
-                    raise OperatorError(
-                        "Target state is not baseline/partial-v1/partial-v2/partial-v3: "
-                        f"baseline={safe_text(baseline_error)}; "
-                        f"partial_v1={safe_text(partial_error)}; "
-                        f"partial_v2={safe_text(second_partial_error)}; "
-                        f"partial_v3={safe_text(third_partial_error)}",
-                        partial={
-                            "partial_state_diagnostic": third_partial_error.partial
-                        },
-                    ) from None
+                    return validate_partial_state(snapshot, payload)
+                except OperatorError as partial_error:
+                    try:
+                        return validate_partial_state(
+                            snapshot, payload, after_autotarget_error=True
+                        )
+                    except OperatorError as second_partial_error:
+                        raise OperatorError(
+                            "Target state is not baseline/corrective-preimage/partial-v1/partial-v2/partial-v3: "
+                            f"baseline={safe_text(baseline_error)}; "
+                            f"corrective={safe_text(corrective_error)}; "
+                            f"partial_v1={safe_text(partial_error)}; "
+                            f"partial_v2={safe_text(second_partial_error)}; "
+                            f"partial_v3={safe_text(third_partial_error)}",
+                            partial={
+                                "partial_state_diagnostic": third_partial_error.partial
+                            },
+                        ) from None
 
 
 def assert_exact_cas(actual: str, expected: str | None) -> None:
@@ -1708,6 +2073,11 @@ def verify_apply_unlock(environ: Mapping[str, str]) -> None:
 def verify_recovery_unlock(environ: Mapping[str, str]) -> None:
     if environ.get(RECOVERY_GUARD_ENV) != RECOVERY_GUARD_VALUE:
         raise OperatorError("Partial recovery заблокирован: exact recovery unlock отсутствует")
+
+
+def verify_corrective_unlock(environ: Mapping[str, str]) -> None:
+    if environ.get(CORRECTIVE_GUARD_ENV) != CORRECTIVE_GUARD_VALUE:
+        raise OperatorError("Corrective apply заблокирован: distinct exact unlock отсутствует")
 
 
 def verify_image_upload_unlock(environ: Mapping[str, str]) -> None:
@@ -1788,7 +2158,9 @@ def _prepare_wide_model_image(key: str, source: bytes) -> tuple[bytes, dict[str,
 
 
 def build_model_image_upload_plan(
-    *, download: Any = _download_model_image
+    *,
+    keys: Sequence[str] | None = None,
+    download: Any = _download_model_image,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     if (
         not MODEL_IMAGE_REPORT.is_file()
@@ -1796,9 +2168,15 @@ def build_model_image_upload_plan(
         or _sha256_file(MODEL_IMAGE_REPORT) != MODEL_IMAGE_REPORT_SHA256
     ):
         raise OperatorError("Model image evidence report SHA-256 не совпал")
+    selected = list(MODEL_IMAGE_SOURCES) if keys is None else list(keys)
+    if not selected or len(selected) != len(set(selected)) or any(
+        key not in MODEL_IMAGE_SOURCES for key in selected
+    ):
+        raise OperatorError("Model image selection вышел за exact allowlist")
     blobs: dict[str, bytes] = {}
     rows: list[dict[str, Any]] = []
-    for key, expected in MODEL_IMAGE_SOURCES.items():
+    for key in selected:
+        expected = MODEL_IMAGE_SOURCES[key]
         data = download(expected["url"])
         actual_sha256 = hashlib.sha256(data).hexdigest()
         if len(data) != expected["bytes"] or actual_sha256 != expected["sha256"]:
@@ -1822,7 +2200,8 @@ def build_model_image_upload_plan(
         "evidence_report": str(MODEL_IMAGE_REPORT.relative_to(PROJECT_ROOT)),
         "evidence_report_sha256": MODEL_IMAGE_REPORT_SHA256,
         "images": rows,
-        "upload_count": 3,
+        "upload_count": len(selected),
+        "selected_keys": selected,
         "campaign_remains_suspended": True,
         "moderation_called": False,
         "resume_called": False,
@@ -1846,6 +2225,21 @@ def _model_image_add_request(blobs: Mapping[str, bytes]) -> dict[str, Any]:
         ]
     }
     assert_mutation_contract("v5", "adimages", "add", params, "model_images_add")
+    return params
+
+
+def _single_model_image_add_request(key: str, blob: bytes) -> dict[str, Any]:
+    if key not in MODEL_IMAGE_SOURCES or not blob:
+        raise OperatorError("Single model image selection/blob вышел за allowlist")
+    params = {
+        "AdImages": [
+            {
+                "ImageData": base64.b64encode(blob).decode("ascii"),
+                "Name": f"rosomaha-713802902-{key}",
+            }
+        ]
+    }
+    assert_mutation_contract("v5", "adimages", "add", params, "model_image_add_one")
     return params
 
 
@@ -1931,7 +2325,96 @@ def run_model_image_upload_apply(
         }
 
 
-def validate_reused_image(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def verify_single_image_upload_unlock(key: str, environ: Mapping[str, str]) -> None:
+    expected = IMAGE_UPLOAD_ONE_GUARD_VALUES.get(key)
+    if expected is None or environ.get(IMAGE_UPLOAD_ONE_GUARD_ENV) != expected:
+        raise OperatorError("Single model image upload: exact key-bound unlock отсутствует")
+
+
+def run_single_model_image_upload_dry_run(api: Any, *, key: str) -> dict[str, Any]:
+    if key not in MODEL_IMAGE_SOURCES:
+        raise OperatorError("Single model image key вышел за allowlist")
+    identity = guard.prove_identity(api)
+    snapshot = read_target_snapshot(api, require_baseline_ads=False)
+    campaign = snapshot["raw"]["campaign"]
+    if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID or campaign.get("State") != "SUSPENDED":
+        raise OperatorError("Single image dry-run требует exact SUSPENDED campaign")
+    plan, blobs = build_model_image_upload_plan(keys=[key])
+    _single_model_image_add_request(key, blobs[key])
+    return {
+        "mode": "image-upload-one-dry-run",
+        "generated_at": utc_now(),
+        "status": "ready",
+        "selected_key": key,
+        "account": identity,
+        "target": {"campaign_id": TARGET_CAMPAIGN_ID, "state": "SUSPENDED", "cas_sha256": snapshot["sha256"]},
+        "image_plan": plan,
+        "mutation_requests": 0,
+        "moderation_called": False,
+        "resume_called": False,
+        "budget_changed": False,
+        "goal_changed": False,
+    }
+
+
+def run_single_model_image_upload_apply(
+    api: Any,
+    *,
+    key: str,
+    expected_cas_sha256: str,
+    expected_image_plan_sha256: str,
+    environ: Mapping[str, str],
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    verify_single_image_upload_unlock(key, environ)
+    policy = lock_policy or MutationLockPolicy()
+    with policy.hold() as lock_evidence:
+        identity = guard.prove_identity(api)
+        protected_before = guard.read_protected_snapshot(api)
+        snapshot = read_target_snapshot(api, require_baseline_ads=False)
+        campaign = snapshot["raw"]["campaign"]
+        if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID or campaign.get("State") != "SUSPENDED":
+            raise OperatorError("Single image upload требует exact SUSPENDED campaign")
+        assert_exact_cas(snapshot["sha256"], expected_cas_sha256)
+        plan, blobs = build_model_image_upload_plan(keys=[key])
+        assert_exact_cas(plan["plan_sha256"], expected_image_plan_sha256)
+        result = api.call(
+            "v5",
+            "adimages",
+            "add",
+            _single_model_image_add_request(key, blobs[key]),
+            use_client_login=True,
+            mutation_kind="model_image_add_one",
+        )
+        provider_hash = strict_action_rows(
+            result, "AddResults", expected_count=1, id_field="AdImageHash"
+        )[0]
+        safety = _campaign_safety(api, campaign)
+        protected_after = guard.read_protected_snapshot(api)
+        guard.assert_protected_equal(protected_before, protected_after)
+        return {
+            "mode": "image-upload-one-apply",
+            "generated_at": utc_now(),
+            "status": "uploaded_one_verified_suspended",
+            "selected_key": key,
+            "account": identity,
+            "global_lock": lock_evidence,
+            "target": {"campaign_id": TARGET_CAMPAIGN_ID, "state": safety["state"], "cas_sha256": snapshot["sha256"]},
+            "image_plan": plan,
+            "provider_hash": provider_hash,
+            "mutation_requests": int(getattr(api, "mutation_requests", 0)),
+            "protected_unchanged": True,
+            "moderation_called": False,
+            "resume_called": False,
+            "budget_changed": False,
+            "goal_changed": False,
+            "creative_apply_authorized": False,
+        }
+
+
+def validate_reused_image(
+    payload: Mapping[str, Any],
+) -> tuple[str | dict[str, str], dict[str, Any]]:
     item = payload.get("imageEvidence")
     if not isinstance(item, Mapping):
         raise OperatorError("Payload image evidence отсутствует")
@@ -1970,7 +2453,7 @@ def validate_reused_image(payload: Mapping[str, Any]) -> tuple[str, dict[str, An
     ]
     if len(accepted) != 1 or accepted[0].get("expected", {}).get("sha256") != item.get("sha256"):
         raise OperatorError("Image provider receipt SHA/hash proof не совпал")
-    return image_hash, {
+    legacy_evidence = {
         "hash": image_hash,
         "source_url": item.get("sourceUrl"),
         "sha256": item.get("sha256"),
@@ -1978,6 +2461,32 @@ def validate_reused_image(payload: Mapping[str, Any]) -> tuple[str, dict[str, An
         "provider_receipt_sha256": _sha256_file(provider_path),
         "readback_verified": True,
         "upload_skipped_reuse": True,
+    }
+    per_creative = item.get("perCreative")
+    if per_creative is None:
+        return image_hash, legacy_evidence
+    _validate_mutation_image_contract(payload)
+    resolved = {
+        key: evidence.get("hash")
+        for key, evidence in per_creative.items()
+        if isinstance(evidence, Mapping)
+    }
+    if set(resolved) != set(payload.get("creatives", {})) or any(
+        not isinstance(value, str) or not value for value in resolved.values()
+    ):
+        raise OperatorError("Per-creative provider hash resolution не совпало")
+    return resolved, {
+        **legacy_evidence,
+        "per_creative": {
+            key: {
+                "hash": resolved[key],
+                "provider_receipt": per_creative[key].get("providerReceipt"),
+                "provider_receipt_sha256": per_creative[key].get(
+                    "providerReceiptSha256"
+                ),
+            }
+            for key in resolved
+        },
     }
 
 
@@ -2078,6 +2587,7 @@ def resolve_sitelink_ids(
 def _replace_creative_tokens(
     creative: Mapping[str, Any],
     *,
+    creative_key: str,
     image_hashes: Mapping[str, str],
     sitelink_ids: Mapping[str, int],
 ) -> dict[str, Any]:
@@ -2086,14 +2596,19 @@ def _replace_creative_tokens(
     if not isinstance(image_items, list) or len(image_items) != 1:
         raise OperatorError("Creative AdImageHashes placeholder некорректен")
     token = image_items[0]
-    image_map = {
-        "{{AD_IMAGE_HASH:extrime}}": image_hashes["extrime"],
-        "{{AD_IMAGE_HASH:hunter}}": image_hashes["hunter"],
-        BASELINE_GENERIC_IMAGE_HASH: BASELINE_GENERIC_IMAGE_HASH,
+    expected_hash = image_hashes.get(creative_key)
+    if not isinstance(expected_hash, str) or not expected_hash:
+        raise OperatorError(f"Creative {creative_key}: resolved image hash отсутствует")
+    allowed_tokens = {
+        expected_hash,
+        f"{{{{AD_IMAGE_HASH:{creative_key}}}}}",
+        BASELINE_GENERIC_IMAGE_HASH
+        if creative_key in {"brand", "category"}
+        else f"{{{{AD_IMAGE_HASH:{'extrime' if creative_key.startswith('extrime') else 'hunter'}}}}}",
     }
-    if token not in image_map:
+    if token not in allowed_tokens:
         raise OperatorError("Creative image placeholder неизвестен")
-    value["AdImageHashes"] = {"Items": [image_map[token]]}
+    value["AdImageHashes"] = {"Items": [expected_hash]}
     sitelink_token = value.get("SitelinkSetId")
     sitelink_map = {
         "{{SITELINK_SET_ID:generic}}": sitelink_ids["generic"],
@@ -2125,16 +2640,30 @@ def _current_stage_params(
 def build_materialized_requests(
     payload: Mapping[str, Any],
     *,
-    image_hash: str,
+    image_hash: str | Mapping[str, str],
     sitelink_ids: Mapping[str, int],
 ) -> dict[str, dict[str, Any]]:
-    if image_hash != BASELINE_GENERIC_IMAGE_HASH:
-        raise OperatorError("Materialization разрешает только provider-verified image hash")
+    if isinstance(image_hash, str):
+        if image_hash != BASELINE_GENERIC_IMAGE_HASH:
+            raise OperatorError("Materialization image hash не подтверждён")
+        resolved_hashes = {key: image_hash for key in payload["creatives"]}
+    elif isinstance(image_hash, Mapping):
+        resolved_hashes = dict(image_hash)
+        if set(resolved_hashes) != set(payload["creatives"]):
+            raise OperatorError("Materialization image hash scope не совпал")
+        if resolved_hashes.get("brand") != BASELINE_GENERIC_IMAGE_HASH or resolved_hashes.get("category") != BASELINE_GENERIC_IMAGE_HASH:
+            raise OperatorError("Brand/category generic image guard не совпал")
+        for key, pinned in MODEL_IMAGE_PROVIDER_RECEIPTS.items():
+            if resolved_hashes.get(key) != pinned["provider_hash"]:
+                raise OperatorError(f"Materialization {key} provider hash drift")
+    else:
+        raise OperatorError("Materialization image hash contract не совпал")
     creatives = payload["creatives"]
     resolved = {
         key: _replace_creative_tokens(
             value,
-            image_hashes={"extrime": image_hash, "hunter": image_hash},
+            creative_key=key,
+            image_hashes=resolved_hashes,
             sitelink_ids=sitelink_ids,
         )
         for key, value in creatives.items()
@@ -2680,6 +3209,212 @@ def run_apply(
     return receipt
 
 
+def run_corrective_dry_run(
+    api: Any,
+    payload: Mapping[str, Any],
+    *,
+    payload_metadata: Mapping[str, Any] | None = None,
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    receipt = _base_receipt("corrective-dry-run", payload_metadata)
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    public_preflight = public_http_preflight(payload)
+    identity = guard.prove_identity(api)
+    protected = guard.read_protected_snapshot(api)
+    snapshot = read_target_snapshot(api)
+    image_hashes, image_evidence = validate_reused_image(payload)
+    requests = build_corrective_requests(payload, image_hashes)
+    try:
+        target = validate_corrective_target(snapshot, payload, image_hashes)
+        classification = target
+        status = "corrective_already_applied_noop"
+        planned: dict[str, Mapping[str, Any]] = {}
+    except OperatorError:
+        classification = validate_corrective_preimage(snapshot, payload)
+        status = "ready_corrective"
+        planned = requests
+    if int(getattr(api, "mutation_requests", 0)) != mutations_before:
+        raise OperatorError("Corrective dry-run выполнил mutation request")
+    lock_state = (lock_policy or MutationLockPolicy()).inspect()
+    if not lock_state["available"] and status == "ready_corrective":
+        status = "blocked_by_lock"
+    receipt.update(
+        status=status,
+        account=identity,
+        protected={key: value for key, value in protected.items() if key != "campaigns"},
+        target={
+            "cas_sha256": snapshot["sha256"],
+            "state": snapshot["raw"]["campaign"].get("State"),
+            "counts": snapshot["counts"],
+            "classification": classification,
+        },
+        public_http_preflight=public_preflight,
+        image_evidence=image_evidence,
+        planned_requests=_request_summary(planned),
+        forbidden_mutations=[
+            "sitelinks.add",
+            "keywords.add",
+            "ads.add",
+            "ads.suspend",
+            "Ads.moderate",
+            "Campaigns.resume",
+            "campaign/budget/goal changes",
+        ],
+        global_lock=lock_state,
+        mutation_requests=0,
+        ready_for_corrective_apply=status == "ready_corrective",
+        idempotent_noop=status == "corrective_already_applied_noop",
+    )
+    return receipt
+
+
+def run_corrective_apply(
+    api: Any,
+    payload: Mapping[str, Any],
+    *,
+    expected_cas_sha256: str,
+    expected_plan_sha256: str,
+    environ: Mapping[str, str],
+    payload_metadata: Mapping[str, Any] | None = None,
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    verify_corrective_unlock(environ)
+    _validate_mutation_image_contract(payload)
+    actual_plan_sha256 = (payload_metadata or {}).get("plan_sha256")
+    assert_exact_cas(str(actual_plan_sha256 or ""), expected_plan_sha256)
+    receipt = _base_receipt("corrective-apply", payload_metadata)
+    receipt["public_http_preflight"] = public_http_preflight(payload)
+    allowed_kinds = frozenset(
+        {
+            "corrective_adgroups_update",
+            "corrective_keywords_update",
+            "corrective_ads_update",
+        }
+    )
+    setattr(api, "mutation_allowlist_override", allowed_kinds)
+    policy = lock_policy or MutationLockPolicy()
+    stage_receipts: list[dict[str, Any]] = []
+    protected_before: dict[str, Any] | None = None
+    preimage: dict[str, Any] | None = None
+    with policy.hold() as lock_evidence:
+        receipt["global_lock"] = lock_evidence
+        try:
+            identity = guard.prove_identity(api)
+            protected_before = guard.read_protected_snapshot(api)
+            preimage = read_target_snapshot(api)
+            assert_exact_cas(preimage["sha256"], expected_cas_sha256)
+            image_hashes, image_evidence = validate_reused_image(payload)
+            requests = build_corrective_requests(payload, image_hashes)
+            receipt.update(
+                account=identity,
+                preimage_cas_sha256=preimage["sha256"],
+                protected_before={
+                    key: value
+                    for key, value in protected_before.items()
+                    if key != "campaigns"
+                },
+                image_evidence=image_evidence,
+                exact_requests=_request_summary(requests),
+            )
+            try:
+                target = validate_corrective_target(preimage, payload, image_hashes)
+            except OperatorError:
+                target = None
+            if target is not None:
+                protected_after = guard.read_protected_snapshot(api)
+                guard.assert_protected_equal(protected_before, protected_after)
+                receipt.update(
+                    status="corrective_already_applied_noop",
+                    classification=target,
+                    stage_receipts=[],
+                    postimage_cas_sha256=preimage["sha256"],
+                    protected_unchanged=True,
+                    final_campaign_state="SUSPENDED",
+                    mutation_requests=0,
+                    idempotent_noop=True,
+                )
+                return receipt
+            classification = validate_corrective_preimage(preimage, payload)
+            baseline_campaign = preimage["raw"]["campaign"]
+            contracts = (
+                (
+                    "corrective_adgroups_update",
+                    "UpdateResults",
+                    sorted(GROUP_IDS.values()),
+                ),
+                (
+                    "corrective_keywords_update",
+                    "UpdateResults",
+                    sorted(KEYWORD_UPDATE_IDS),
+                ),
+                (
+                    "corrective_ads_update",
+                    "UpdateResults",
+                    sorted(set(EXISTING_AD_IDS.values()) | {CORRECTIVE_PREIMAGE_NEW_AD_ID}),
+                ),
+            )
+            for index, (kind, result_key, expected_ids) in enumerate(contracts, 1):
+                stage = _mutate_stage(
+                    api,
+                    kind,
+                    requests[kind],
+                    baseline_campaign=baseline_campaign,
+                    protected_before=protected_before,
+                )
+                values = strict_action_rows(
+                    stage["result"],
+                    result_key,
+                    expected_count=len(expected_ids),
+                    id_field="Id",
+                    expected_ids=expected_ids,
+                )
+                stage_receipts.append(
+                    {"stage": index, "kind": kind, "verified_ids": values}
+                )
+            post = read_target_snapshot(api, require_baseline_ads=False)
+            if _content_cas_sha256(post["raw"]["campaign"]) != _content_cas_sha256(
+                baseline_campaign
+            ):
+                raise OperatorError("Campaign changed during corrective apply")
+            readback = validate_corrective_target(post, payload, image_hashes)
+            protected_after = guard.read_protected_snapshot(api)
+            guard.assert_protected_equal(protected_before, protected_after)
+            receipt.update(
+                status="corrective_applied_verified_suspended",
+                classification=classification,
+                stage_receipts=stage_receipts,
+                postimage_cas_sha256=post["sha256"],
+                readback=readback,
+                protected_unchanged=True,
+                final_campaign_state="SUSPENDED",
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+                idempotent_noop=False,
+            )
+        except Exception as exc:
+            receipt.update(
+                status="manual_inspection_required_suspended",
+                error=safe_text(exc),
+                stage_receipts=stage_receipts,
+                mutation_requests=int(getattr(api, "mutation_requests", 0)),
+            )
+            try:
+                if preimage is not None:
+                    safety = _campaign_safety(api, preimage["raw"]["campaign"])
+                    receipt["final_campaign_state"] = safety["state"]
+                    receipt["campaign_unchanged"] = True
+            except Exception as safety_exc:
+                receipt["campaign_safety_error"] = safe_text(safety_exc)
+            try:
+                if protected_before is not None:
+                    protected_after = guard.read_protected_snapshot(api)
+                    guard.assert_protected_equal(protected_before, protected_after)
+                    receipt["protected_unchanged"] = True
+            except Exception as protected_exc:
+                receipt["protected_unchanged"] = False
+                receipt["protected_error"] = safe_text(protected_exc)
+    return receipt
+
+
 def run_partial_recovery(
     api: Any,
     payload: Mapping[str, Any],
@@ -2891,6 +3626,26 @@ def save_receipt(receipt: Mapping[str, Any], *, token: str = "") -> Path:
 
 def receipt_is_safe(receipt: Mapping[str, Any]) -> bool:
     mode = receipt.get("mode")
+    if mode == "image-upload-one-dry-run":
+        return (
+            receipt.get("status") == "ready"
+            and receipt.get("selected_key") in MODEL_IMAGE_SOURCES
+            and receipt.get("mutation_requests") == 0
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and receipt.get("image_plan", {}).get("selected_keys")
+            == [receipt.get("selected_key")]
+            and receipt.get("image_plan", {}).get("upload_count") == 1
+        )
+    if mode == "image-upload-one-apply":
+        return (
+            receipt.get("status") == "uploaded_one_verified_suspended"
+            and receipt.get("selected_key") in MODEL_IMAGE_SOURCES
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and receipt.get("mutation_requests") == 1
+            and isinstance(receipt.get("provider_hash"), str)
+            and receipt.get("protected_unchanged") is True
+            and receipt.get("creative_apply_authorized") is False
+        )
     if mode == "image-upload-dry-run":
         return (
             receipt.get("status") == "ready"
@@ -2934,6 +3689,26 @@ def receipt_is_safe(receipt: Mapping[str, Any]) -> bool:
             and receipt.get("protected_unchanged") is True
             and receipt.get("mutation_requests") == 3
         )
+    if mode == "corrective-dry-run":
+        return (
+            receipt.get("status")
+            in {"ready_corrective", "corrective_already_applied_noop", "blocked_by_lock"}
+            and receipt.get("mutation_requests") == 0
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and bool(receipt.get("target", {}).get("cas_sha256"))
+            and bool(receipt.get("payload", {}).get("plan_sha256"))
+        )
+    if mode == "corrective-apply":
+        return (
+            receipt.get("status")
+            in {
+                "corrective_applied_verified_suspended",
+                "corrective_already_applied_noop",
+            }
+            and receipt.get("final_campaign_state") == "SUSPENDED"
+            and receipt.get("protected_unchanged") is True
+            and receipt.get("mutation_requests") in {0, 3}
+        )
     return False
 
 
@@ -2950,6 +3725,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="continue only the exact classified partial state",
     )
     mode.add_argument(
+        "--corrective-dry-run",
+        action="store_true",
+        help="read-only exact plan for the existing six-ad corrective bundle",
+    )
+    mode.add_argument(
+        "--corrective-apply",
+        action="store_true",
+        help="update only exact existing groups/keywords/six ads",
+    )
+    mode.add_argument(
         "--image-upload-dry-run",
         action="store_true",
         help="read-only exact three-model image upload plan",
@@ -2958,6 +3743,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--image-upload-apply",
         action="store_true",
         help="upload exact three model images; never changes ads or campaign",
+    )
+    mode.add_argument(
+        "--image-upload-one-dry-run",
+        choices=tuple(MODEL_IMAGE_SOURCES),
+        metavar="MODEL_KEY",
+        help="read-only plan for one exact model image",
+    )
+    mode.add_argument(
+        "--image-upload-one-apply",
+        choices=tuple(MODEL_IMAGE_SOURCES),
+        metavar="MODEL_KEY",
+        help="upload one exact model image for per-row diagnosis",
     )
     parser.add_argument("--expected-cas-sha256", help="exact CAS SHA-256 from fresh dry-run")
     parser.add_argument(
@@ -2970,33 +3767,46 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     args.mode = (
-        "image-upload-apply"
+        "image-upload-one-apply"
+        if args.image_upload_one_apply
+        else "image-upload-one-dry-run"
+        if args.image_upload_one_dry_run
+        else "image-upload-apply"
         if args.image_upload_apply
         else "image-upload-dry-run"
         if args.image_upload_dry_run
+        else "corrective-apply"
+        if args.corrective_apply
+        else "corrective-dry-run"
+        if args.corrective_dry_run
         else "recover-partial"
         if args.recover_partial
         else "apply"
         if args.apply
         else "dry-run"
     )
-    if args.mode in {"dry-run", "image-upload-dry-run"} and (
+    if args.mode in {
+        "dry-run",
+        "corrective-dry-run",
+        "image-upload-dry-run",
+        "image-upload-one-dry-run",
+    } and (
         args.expected_cas_sha256
         or args.expected_plan_sha256
         or args.expected_image_plan_sha256
     ):
         parser.error("expected CAS/plan SHA-256 разрешены только с --apply")
-    if args.mode in {"apply", "recover-partial"} and (
+    if args.mode in {"apply", "recover-partial", "corrective-apply"} and (
         not args.expected_cas_sha256 or not args.expected_plan_sha256
     ):
         parser.error(
             "mutation mode требует exact --expected-cas-sha256 и --expected-plan-sha256"
         )
-    if args.mode == "image-upload-apply" and (
+    if args.mode in {"image-upload-apply", "image-upload-one-apply"} and (
         not args.expected_cas_sha256 or not args.expected_image_plan_sha256
     ):
         parser.error("image upload apply требует exact CAS и image plan SHA-256")
-    if args.mode == "image-upload-apply" and args.expected_plan_sha256:
+    if args.mode in {"image-upload-apply", "image-upload-one-apply"} and args.expected_plan_sha256:
         parser.error("image upload apply не принимает creative plan SHA-256")
     return args
 
@@ -3011,7 +3821,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload, payload_metadata = build_current_payload()
         token = guard.load_project_token()
         api = CreativeDirectApi(token)
-        if args.mode == "image-upload-apply":
+        if args.mode == "image-upload-one-apply":
+            receipt = run_single_model_image_upload_apply(
+                api,
+                key=args.image_upload_one_apply,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_image_plan_sha256=args.expected_image_plan_sha256,
+                environ=os.environ,
+            )
+        elif args.mode == "image-upload-one-dry-run":
+            receipt = run_single_model_image_upload_dry_run(
+                api, key=args.image_upload_one_dry_run
+            )
+        elif args.mode == "image-upload-apply":
             receipt = run_model_image_upload_apply(
                 api,
                 expected_cas_sha256=args.expected_cas_sha256,
@@ -3037,6 +3859,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_plan_sha256=args.expected_plan_sha256,
                 environ=os.environ,
                 payload_metadata=payload_metadata,
+            )
+        elif args.mode == "corrective-apply":
+            receipt = run_corrective_apply(
+                api,
+                payload,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_plan_sha256=args.expected_plan_sha256,
+                environ=os.environ,
+                payload_metadata=payload_metadata,
+            )
+        elif args.mode == "corrective-dry-run":
+            receipt = run_corrective_dry_run(
+                api, payload, payload_metadata=payload_metadata
             )
         else:
             receipt = run_dry_run(
