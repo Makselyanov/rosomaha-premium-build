@@ -121,6 +121,143 @@ class CreativeSafetyContractTests(unittest.TestCase):
         with self.assertRaisesRegex(op.OperatorError, "Mutation blocked"):
             op._validate_mutation_image_contract(payload)
 
+    def test_content_cas_normalises_negative_order_duplicates_and_moderation(self):
+        baseline = {
+            "campaign": {"Id": op.TARGET_CAMPAIGN_ID, "State": "SUSPENDED", "Status": "ACCEPTED"},
+            "adgroups": [
+                {
+                    "Id": op.GROUP_IDS["brand"],
+                    "Name": "Brand",
+                    "NegativeKeywords": {"Items": ["ремонт", "аренда"]},
+                }
+            ],
+            "ads": [
+                {
+                    "Id": op.EXISTING_AD_IDS["brand"],
+                    "State": "OFF",
+                    "Status": "ACCEPTED",
+                    "StatusClarification": "accepted",
+                    "ResponsiveAd": {"Href": "https://rosomaha-rus.ru/?utm_source=yandex"},
+                }
+            ],
+        }
+        provider_variant = op.copy.deepcopy(baseline)
+        provider_variant["adgroups"][0]["NegativeKeywords"]["Items"] = [
+            "аренда",
+            "ремонт",
+            "аренда",
+        ]
+        provider_variant["campaign"]["Status"] = "MODERATION"
+        provider_variant["ads"][0]["Status"] = "PREACCEPTED"
+        provider_variant["ads"][0]["StatusClarification"] = "provider lifecycle changed"
+        provider_variant["ads"][0]["ModerationDiagnostics"] = {"note": "transient"}
+        self.assertEqual(
+            op._content_cas_sha256(baseline),
+            op._content_cas_sha256(provider_variant),
+        )
+
+    def test_content_cas_keeps_ids_content_images_and_paused_state_exact(self):
+        baseline = {
+            "campaign": {"Id": op.TARGET_CAMPAIGN_ID, "State": "SUSPENDED"},
+            "ads": [
+                {
+                    "Id": op.EXISTING_AD_IDS["brand"],
+                    "AdImages": ["hash-a"],
+                    "Href": "https://rosomaha-rus.ru/?utm_source=yandex",
+                }
+            ],
+        }
+        for mutate in (
+            lambda value: value["campaign"].update(State="ON"),
+            lambda value: value["campaign"].update(Id=op.TARGET_CAMPAIGN_ID + 1),
+            lambda value: value["ads"][0].update(Id=op.EXISTING_AD_IDS["brand"] + 1),
+            lambda value: value["ads"][0].update(AdImages=["hash-b"]),
+            lambda value: value["ads"][0].update(
+                Href="https://rosomaha-rus.ru/?utm_source=changed"
+            ),
+        ):
+            changed = op.copy.deepcopy(baseline)
+            mutate(changed)
+            with self.subTest(changed=changed):
+                self.assertNotEqual(
+                    op._content_cas_sha256(baseline),
+                    op._content_cas_sha256(changed),
+                )
+
+    def test_negative_canonicalization_rejects_non_string_items(self):
+        with self.assertRaises(op.OperatorError):
+            op._content_cas_sha256({"NegativeKeywords": {"Items": ["аренда", 7]}})
+
+    def test_model_image_plan_pins_exact_sources_bytes_and_sha(self):
+        blobs = {}
+        for key, size, image_format in (
+            ("extrimeUaz", (1164, 776), "PNG"),
+            ("extrimeToyota", (3895, 2597), "JPEG"),
+            ("hunter", (1280, 719), "JPEG"),
+        ):
+            output = op.io.BytesIO()
+            op.Image.new("RGB", size, (80, 100, 120)).save(output, format=image_format)
+            blobs[key] = output.getvalue()
+        sources = {
+            key: {
+                "url": f"https://rosomaha-rus.ru/model/{key}.jpg",
+                "sha256": op.hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+            }
+            for key, data in blobs.items()
+        }
+        with mock.patch.dict(op.MODEL_IMAGE_SOURCES, sources, clear=True):
+            plan, actual = op.build_model_image_upload_plan(
+                download=lambda url: blobs[url.rsplit("/", 1)[-1].removesuffix(".jpg")]
+            )
+        self.assertEqual(plan["upload_count"], 3)
+        self.assertRegex(plan["plan_sha256"], r"^[a-f0-9]{64}$")
+        self.assertFalse(plan["moderation_called"])
+        self.assertFalse(plan["resume_called"])
+        dimensions = {item["key"]: item["prepared_dimensions"] for item in plan["images"]}
+        self.assertEqual(dimensions["extrimeUaz"], [1152, 648])
+        self.assertEqual(dimensions["extrimeToyota"], [3888, 2187])
+        self.assertEqual(dimensions["hunter"], [1264, 711])
+        self.assertEqual(set(actual), set(blobs))
+        self.assertTrue(all(actual[key] for key in blobs))
+
+    def test_wide_transform_is_deterministic_exact_ratio_and_no_upscale(self):
+        source = op.io.BytesIO()
+        op.Image.new("RGB", (1280, 719), (12, 34, 56)).save(source, format="JPEG")
+        first, evidence = op._prepare_wide_model_image("hunter", source.getvalue())
+        second, repeated = op._prepare_wide_model_image("hunter", source.getvalue())
+        self.assertEqual(first, second)
+        self.assertEqual(evidence, repeated)
+        self.assertEqual(evidence["prepared_dimensions"], [1264, 711])
+        self.assertEqual(1264 * 9, 711 * 16)
+        self.assertLessEqual(1264, 1280)
+        self.assertLessEqual(711, 719)
+
+    def test_model_image_upload_contract_allows_only_exact_three_rows(self):
+        blobs = {key: key.encode("ascii") for key in op.MODEL_IMAGE_SOURCES}
+        params = op._model_image_add_request(blobs)
+        self.assertEqual(len(params["AdImages"]), 3)
+        op.assert_mutation_contract("v5", "adimages", "add", params, "model_images_add")
+        bad = op.copy.deepcopy(params)
+        bad["AdImages"][0]["CampaignId"] = op.TARGET_CAMPAIGN_ID
+        with self.assertRaises(op.OperatorError):
+            op.assert_mutation_contract("v5", "adimages", "add", bad, "model_images_add")
+
+    def test_image_upload_apply_needs_unlock_and_exact_cas_before_mutation(self):
+        class FakeApi:
+            mutation_requests = 0
+            request_log = []
+
+        api = FakeApi()
+        with self.assertRaises(op.OperatorError):
+            op.run_model_image_upload_apply(
+                api,
+                expected_cas_sha256="a" * 64,
+                expected_image_plan_sha256="b" * 64,
+                environ={},
+            )
+        self.assertEqual(api.mutation_requests, 0)
+
 
 class CreativeOperatorTests(unittest.TestCase):
     @classmethod
@@ -675,6 +812,19 @@ class CreativeOperatorTests(unittest.TestCase):
             {op.RECOVERY_GUARD_ENV: op.RECOVERY_GUARD_VALUE}
         )
 
+        image_dry = op.parse_args(["--image-upload-dry-run"])
+        self.assertEqual(image_dry.mode, "image-upload-dry-run")
+        image_apply = op.parse_args(
+            [
+                "--image-upload-apply",
+                "--expected-cas-sha256",
+                "a" * 64,
+                "--expected-image-plan-sha256",
+                "b" * 64,
+            ]
+        )
+        self.assertEqual(image_apply.mode, "image-upload-apply")
+
     def test_apply_with_legacy_generic_image_fails_before_any_api_request(self):
         class FakeApi:
             mutation_requests = 0
@@ -692,6 +842,70 @@ class CreativeOperatorTests(unittest.TestCase):
             )
         self.assertEqual(api.mutation_requests, 0)
         self.assertEqual(api.request_log, [])
+
+    def test_model_image_upload_apply_returns_provider_hashes_only(self):
+        class FakeApi:
+            mutation_requests = 0
+            request_log = []
+
+            def call(self, version, service, method, params, **kwargs):
+                self.mutation_requests += 1
+                self.request_log.append((version, service, method, kwargs.get("mutation_kind")))
+                return {
+                    "AddResults": [
+                        {"AdImageHash": "provider-uaz"},
+                        {"AdImageHash": "provider-toyota"},
+                        {"AdImageHash": "provider-hunter"},
+                    ]
+                }
+
+        class FakeLock:
+            def hold(self):
+                class Held:
+                    def __enter__(self_inner):
+                        return {"path": "test.lock", "released": False}
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return Held()
+
+        campaign = {
+            "Id": op.TARGET_CAMPAIGN_ID,
+            "Type": "UNIFIED_CAMPAIGN",
+            "Status": "ACCEPTED",
+            "State": "SUSPENDED",
+        }
+        snapshot = {"raw": {"campaign": campaign}, "sha256": "a" * 64}
+        plan = {"plan_sha256": "b" * 64, "upload_count": 3}
+        blobs = {key: key.encode("ascii") for key in op.MODEL_IMAGE_SOURCES}
+        protected = {"campaigns": {}, "canonical_sha256": "p"}
+        api = FakeApi()
+        with (
+            mock.patch.object(op.guard, "prove_identity", return_value={"login": op.EXPECTED_LOGIN}),
+            mock.patch.object(op.guard, "read_protected_snapshot", return_value=protected),
+            mock.patch.object(op.guard, "assert_protected_equal", return_value=None),
+            mock.patch.object(op, "read_target_snapshot", return_value=snapshot),
+            mock.patch.object(op, "build_model_image_upload_plan", return_value=(plan, blobs)),
+            mock.patch.object(
+                op,
+                "_campaign_safety",
+                return_value={"state": "SUSPENDED", "status": "ACCEPTED", "sha256": "c" * 64},
+            ),
+        ):
+            receipt = op.run_model_image_upload_apply(
+                api,
+                expected_cas_sha256="a" * 64,
+                expected_image_plan_sha256="b" * 64,
+                environ={op.IMAGE_UPLOAD_GUARD_ENV: op.IMAGE_UPLOAD_GUARD_VALUE},
+                lock_policy=FakeLock(),
+            )
+        self.assertEqual(receipt["status"], "uploaded_verified_suspended")
+        self.assertEqual(receipt["mutation_requests"], 1)
+        self.assertEqual(set(receipt["provider_hashes"]), set(op.MODEL_IMAGE_SOURCES))
+        self.assertFalse(receipt["creative_apply_authorized"])
+        self.assertTrue(op.receipt_is_safe(receipt))
+        self.assertEqual(api.request_log, [("v5", "adimages", "add", "model_images_add")])
 
     def test_recovery_executes_only_remaining_stages_and_stays_suspended(self):
         snapshot = self._third_partial_snapshot()

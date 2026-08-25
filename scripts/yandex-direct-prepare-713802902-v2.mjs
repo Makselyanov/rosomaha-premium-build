@@ -7,6 +7,8 @@ const semanticReceiptRelative = "marketing-audits/yandex-direct/YANDEX_DIRECT_SE
 const semanticReceiptPath = path.join(rootDir, semanticReceiptRelative);
 const wasteEvidenceRelative = "seo-reports/dry-runs/2026-08-17-yandex-search-query-waste-brief.md";
 const wasteEvidencePath = path.join(rootDir, wasteEvidenceRelative);
+const modelImageEvidenceRelative = "marketing-audits/yandex-direct/ROSOMAHA_RUS_MODEL_IMAGE_EVIDENCE_713802902_2026-08-25T16-45Z.md";
+const modelImageEvidencePath = path.join(rootDir, modelImageEvidenceRelative);
 const campaignId = 713802902;
 const login = "rosomaha-rus999";
 const campaignUtm = "rosomaha_rus_search_models";
@@ -250,6 +252,72 @@ const acceptedImageEvidence = {
   reason: "Model OG images are 1000x561 and fail the official WIDE minimum 1080x607; reuse the site-owned provider-accepted image instead of uploading invalid files.",
 };
 
+const sourceOwnedModelImageEvidence = {
+  extrimeUaz: {
+    exactModel: "Росомаха модель \"Экстрим\" (1.5 литра, мосты УАЗ)",
+    landingUrl: page.extrimeUaz,
+    sourceUrl: "https://rosomaha-rus.ru/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png",
+    mime: "image/png",
+    width: 1164,
+    height: 776,
+    expectedSha256: "db2a178542248d7c22e5e76ee6816489e9d29ca1f2cfdf5158282d9ad2be843b",
+    providerAccepted: false,
+    directImageHash: null,
+  },
+  extrimeToyota: {
+    exactModel: "Росомаха модель \"Экстрим\" (1.5 литра, мосты Toyota)",
+    landingUrl: page.extrimeToyota,
+    sourceUrl: "https://rosomaha-rus.ru/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg",
+    mime: "image/jpeg",
+    width: 3895,
+    height: 2597,
+    expectedSha256: "e39e47bb3bcd6a55eff84a4ed0cea1964e5414e7ad3f1332c4fb1224cae2e43f",
+    providerAccepted: false,
+    directImageHash: null,
+  },
+  hunter: {
+    exactModel: "Росомаха модель \"Хантер\" (1.5 литра, мосты Toyota)",
+    landingUrl: page.hunter,
+    sourceUrl: "https://rosomaha-rus.ru/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg",
+    mime: "image/jpeg",
+    width: 1280,
+    height: 719,
+    expectedSha256: "9985da35d4d079658f2634093ab764fb5217b265b9355a456bd1eca16f904c55",
+    providerAccepted: false,
+    directImageHash: null,
+  },
+};
+
+const modelImageMaterializationPlan = {
+  status: "source_image_upload_required",
+  evidenceReport: modelImageEvidenceRelative,
+  phase1: {
+    action: "upload_source_owned_images",
+    externalMutationAuthorized: false,
+    items: Object.entries(sourceOwnedModelImageEvidence).map(([creativeKey, evidence]) => ({
+      creativeKey,
+      exactModel: evidence.exactModel,
+      sourceUrl: evidence.sourceUrl,
+      expectedSha256: evidence.expectedSha256,
+      dimensions: { width: evidence.width, height: evidence.height },
+    })),
+  },
+  phase2: {
+    action: "materialize_creative_hashes_after_provider_receipt",
+    blocked: true,
+    requires: [
+      "provider upload receipt for each exact source URL and SHA-256",
+      "provider-returned Direct image hash for each exact model mapping",
+      "fresh creative payload validation and suspended-campaign readback",
+    ],
+    directImageHashes: {
+      extrimeUaz: null,
+      extrimeToyota: null,
+      hunter: null,
+    },
+  },
+};
+
 const keywordUpdate = [
   [ids.keywords.brand[0], "росомаха вездеход купить"],
   [ids.keywords.brand[1], "вездеход росомаха цена"],
@@ -487,6 +555,44 @@ function validate() {
       if (!baselineNegatives.includes(negative)) errors.push(`evidenced negative missing from plan: ${negative}`);
     }
   }
+  if (!fs.existsSync(modelImageEvidencePath)) {
+    errors.push(`missing model image evidence ${modelImageEvidenceRelative}`);
+  } else {
+    const report = fs.readFileSync(modelImageEvidencePath, "utf8");
+    const expectedMappings = {
+      extrimeUaz: page.extrimeUaz,
+      extrimeToyota: page.extrimeToyota,
+      hunter: page.hunter,
+    };
+    const seenSourceUrls = new Set();
+    const seenHashes = new Set();
+    for (const [key, evidence] of Object.entries(sourceOwnedModelImageEvidence)) {
+      if (evidence.landingUrl !== expectedMappings[key]) errors.push(`${key}: model landing mapping mismatch`);
+      if (evidence.providerAccepted !== false || evidence.directImageHash !== null) {
+        errors.push(`${key}: provider acceptance/hash must remain unmaterialized`);
+      }
+      if (!/^https:\/\/rosomaha-rus\.ru\/upload\//u.test(evidence.sourceUrl)) errors.push(`${key}: source image is not site-owned`);
+      if (!/^[a-f0-9]{64}$/u.test(evidence.expectedSha256)) errors.push(`${key}: invalid expected SHA-256`);
+      if (evidence.width < 1080 || evidence.height < 607) errors.push(`${key}: source dimensions below Direct WIDE minimum`);
+      for (const exactValue of [
+        evidence.exactModel,
+        evidence.landingUrl,
+        evidence.sourceUrl,
+        evidence.expectedSha256,
+        `${evidence.width}×${evidence.height}`,
+      ]) {
+        if (!report.includes(exactValue)) errors.push(`${key}: evidence report mismatch for ${exactValue}`);
+      }
+      if (seenSourceUrls.has(evidence.sourceUrl)) errors.push(`${key}: source image URL reused across models`);
+      if (seenHashes.has(evidence.expectedSha256)) errors.push(`${key}: source image SHA-256 reused across models`);
+      seenSourceUrls.add(evidence.sourceUrl);
+      seenHashes.add(evidence.expectedSha256);
+    }
+  }
+  if (modelImageMaterializationPlan.phase2.blocked !== true
+    || Object.values(modelImageMaterializationPlan.phase2.directImageHashes).some((value) => value !== null)) {
+    errors.push("model image materialization must remain blocked until provider receipts exist");
+  }
   const addResponsive = stagedRequests.find((item) => item.service === "ads" && item.request.method === "add")
     ?.request.params.Ads[0].ResponsiveAd;
   if (!Array.isArray(addResponsive?.AdImageHashes)) {
@@ -525,6 +631,8 @@ const payload = {
     modelAnchorsVerified: ["price", "opt-price", "buy", "delivery"],
   },
   imageEvidence: acceptedImageEvidence,
+  sourceOwnedModelImageEvidence,
+  modelImageMaterializationPlan,
   semanticEvidence: {
     source: "Yandex Direct KeywordsResearch.hasSearchVolume",
     receipt: semanticReceiptRelative,

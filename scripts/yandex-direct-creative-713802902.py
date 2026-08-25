@@ -15,9 +15,11 @@ campaign are larger than JavaScript's exact integer range.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -32,6 +34,8 @@ from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +187,28 @@ THIRD_PARTIAL_PLAN_SHA256 = (
     "0881ecb51551c21fb682e5813afcb2a2f869f85b6ffe2583a2aee75b710b3872"
 )
 
+MODEL_IMAGE_REPORT = REPORT_ROOT / "ROSOMAHA_RUS_MODEL_IMAGE_EVIDENCE_713802902_2026-08-25T16-45Z.md"
+MODEL_IMAGE_REPORT_SHA256 = "8131c115c19e22ee4d3f78ff91477f83d7b0211047a44099c6dbf8482b4471f2"
+MODEL_IMAGE_SOURCES = {
+    "extrimeUaz": {
+        "url": "https://rosomaha-rus.ru/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png",
+        "sha256": "db2a178542248d7c22e5e76ee6816489e9d29ca1f2cfdf5158282d9ad2be843b",
+        "bytes": 338_201,
+    },
+    "extrimeToyota": {
+        "url": "https://rosomaha-rus.ru/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg",
+        "sha256": "e39e47bb3bcd6a55eff84a4ed0cea1964e5414e7ad3f1332c4fb1224cae2e43f",
+        "bytes": 760_518,
+    },
+    "hunter": {
+        "url": "https://rosomaha-rus.ru/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg",
+        "sha256": "9985da35d4d079658f2634093ab764fb5217b265b9355a456bd1eca16f904c55",
+        "bytes": 271_814,
+    },
+}
+IMAGE_UPLOAD_GUARD_ENV = "ROSOMAHA_DIRECT_MODEL_IMAGE_UPLOAD"
+IMAGE_UPLOAD_GUARD_VALUE = "UPLOAD_EXACT_3_MODEL_IMAGES_713802902_V1"
+
 BASELINE_GROUP_NAMES = {
     GROUP_IDS["brand"]: "Brand Rosomaha",
     GROUP_IDS["category"]: "Commercial category",
@@ -316,6 +342,37 @@ def canonical_bytes(value: Any) -> bytes:
 
 def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _normalise_negative_items(value: Any, label: str = "NegativeKeywords") -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise OperatorError(f"{label}: Items должны быть списком строк")
+    return sorted(set(value))
+
+
+def _content_cas_view(value: Any) -> Any:
+    """Canonical provider view: exact content/state, no moderation lifecycle noise."""
+    if isinstance(value, list):
+        return [_content_cas_view(item) for item in value]
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            if key in {"Status", "StatusClarification", "ServingStatus"} or "Moderation" in key:
+                continue
+            if key == "NegativeKeywords" and isinstance(child, Mapping):
+                normalised = dict(child)
+                normalised["Items"] = _normalise_negative_items(child.get("Items"))
+                result[key] = _content_cas_view(normalised)
+            else:
+                result[key] = _content_cas_view(child)
+        return result
+    return value
+
+
+def _content_cas_sha256(value: Any) -> str:
+    return sha256_json(_content_cas_view(value))
 
 
 def exact_int(value: Any, label: str) -> int:
@@ -804,6 +861,7 @@ def endpoint(version: str, service: str) -> str:
         ("v501", "adgroups"),
         ("v501", "ads"),
         ("v5", "keywords"),
+        ("v5", "adimages"),
     }
     if (version, service) not in allowed:
         raise OperatorError("Creative mutation endpoint не входит в allowlist")
@@ -842,6 +900,7 @@ def assert_mutation_contract(
         "ads_update": ("v501", "ads", "update"),
         "ads_add": ("v501", "ads", "add"),
         "ads_suspend": ("v501", "ads", "suspend"),
+        "model_images_add": ("v5", "adimages", "add"),
     }
     if allowed.get(mutation_kind) != (version, service, method):
         raise OperatorError("Mutation kind/service/method не совпали с allowlist")
@@ -912,6 +971,19 @@ def assert_mutation_contract(
         ids = params.get("SelectionCriteria", {}).get("Ids")
         if ids != [PARKED_AD_ID]:
             raise OperatorError("Ads.suspend разрешён только для parked ad exact ID")
+    elif mutation_kind == "model_images_add":
+        rows = params.get("AdImages") if set(params) == {"AdImages"} else None
+        if not isinstance(rows, list) or len(rows) != len(MODEL_IMAGE_SOURCES):
+            raise OperatorError("AdImages.add требует ровно три model image")
+        names = []
+        for row in rows:
+            if not isinstance(row, Mapping) or set(row) != {"ImageData", "Name"}:
+                raise OperatorError("AdImages.add row содержит лишние поля")
+            if not isinstance(row.get("ImageData"), str) or not row["ImageData"]:
+                raise OperatorError("AdImages.add ImageData отсутствует")
+            names.append(row.get("Name"))
+        if names != [f"rosomaha-713802902-{key}" for key in MODEL_IMAGE_SOURCES]:
+            raise OperatorError("AdImages.add Name/order вышли за exact plan")
 
 
 class CreativeDirectApi(guard.DirectApi):
@@ -1024,13 +1096,16 @@ def strict_action_rows(
         raise OperatorError(f"Direct mutation не вернула точный {key}")
     warnings = _notifications(result.get("Warnings"))
     values: list[Any] = []
-    for row in rows:
+    for row_index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise OperatorError(f"{key} row имеет неверный тип")
         errors = _notifications(row.get("Errors"))
         warnings.extend(_notifications(row.get("Warnings")))
         if errors:
-            raise OperatorError("Direct mutation вернула Errors", partial={"provider_errors": errors})
+            raise OperatorError(
+                "Direct mutation вернула Errors",
+                partial={"provider_error_row_index": row_index, "provider_errors": errors},
+            )
         value = row.get(id_field)
         if id_field == "AdImageHash":
             if not isinstance(value, str) or not value:
@@ -1121,7 +1196,10 @@ def read_target_snapshot(api: Any, *, require_baseline_ads: bool = True) -> dict
     }
     return {
         "raw": raw,
-        "sha256": sha256_json(raw),
+        "sha256": _content_cas_sha256(raw),
+        # Kept only to verify the already-issued pinned partial receipt. New
+        # dry-runs and all new CAS handoffs use the canonical content hash.
+        "legacy_raw_sha256": sha256_json(raw),
         "counts": {
             "adgroups": len(groups),
             "ads": len(ads),
@@ -1159,8 +1237,10 @@ def validate_baseline(snapshot: Mapping[str, Any]) -> None:
         raise OperatorError("Baseline должен содержать ровно пять exact groups")
     for item in groups:
         group_id = exact_int(item.get("Id"), "AdGroup Id")
-        negatives = item.get("NegativeKeywords", {}).get("Items")
-        if item.get("Name") != BASELINE_GROUP_NAMES[group_id] or sorted(negatives or []) != BASELINE_NEGATIVES:
+        negatives = _normalise_negative_items(
+            item.get("NegativeKeywords", {}).get("Items"), f"AdGroup {group_id} negatives"
+        )
+        if item.get("Name") != BASELINE_GROUP_NAMES[group_id] or negatives != sorted(set(BASELINE_NEGATIVES)):
             raise OperatorError(f"AdGroup {group_id} baseline drift")
 
     ads = raw.get("ads")
@@ -1372,7 +1452,8 @@ def validate_partial_state(
     )
     if (
         after_epk_v5_error
-        and snapshot.get("sha256") != THIRD_PARTIAL_PREIMAGE_CAS_SHA256
+        and snapshot.get("legacy_raw_sha256", snapshot.get("sha256"))
+        != THIRD_PARTIAL_PREIMAGE_CAS_SHA256
     ):
         raise OperatorError(
             "Fresh post-3500 snapshot не совпал с exact preimage CAS third receipt"
@@ -1415,8 +1496,8 @@ def validate_partial_state(
         actual = groups[group_id]
         if (
             actual.get("Name") != desired.get("Name")
-            or sorted(actual.get("NegativeKeywords", {}).get("Items") or [])
-            != sorted(desired.get("NegativeKeywords", {}).get("Items") or [])
+            or _normalise_negative_items(actual.get("NegativeKeywords", {}).get("Items"))
+            != _normalise_negative_items(desired.get("NegativeKeywords", {}).get("Items"))
         ):
             actual_negatives = set(actual.get("NegativeKeywords", {}).get("Items") or [])
             desired_negatives = set(desired.get("NegativeKeywords", {}).get("Items") or [])
@@ -1627,6 +1708,227 @@ def verify_apply_unlock(environ: Mapping[str, str]) -> None:
 def verify_recovery_unlock(environ: Mapping[str, str]) -> None:
     if environ.get(RECOVERY_GUARD_ENV) != RECOVERY_GUARD_VALUE:
         raise OperatorError("Partial recovery заблокирован: exact recovery unlock отсутствует")
+
+
+def verify_image_upload_unlock(environ: Mapping[str, str]) -> None:
+    if environ.get(IMAGE_UPLOAD_GUARD_ENV) != IMAGE_UPLOAD_GUARD_VALUE:
+        raise OperatorError("Model image upload заблокирован: exact environment unlock отсутствует")
+
+
+def _download_model_image(url: str, *, timeout: float = 20.0) -> bytes:
+    _assert_domain_urls({"sourceUrl": url})
+    request = Request(
+        url,
+        headers={"User-Agent": "Rosomaha-Direct-Model-Image/1.0", "Accept": "image/*"},
+        method="GET",
+    )
+    try:
+        with build_opener(RejectRedirects()).open(request, timeout=timeout) as response:
+            if int(getattr(response, "status", response.getcode())) != 200:
+                raise OperatorError("Model image download требует HTTP 200")
+            data = response.read(1_500_001)
+    except HTTPError as exc:
+        raise OperatorError(f"Model image download HTTP {exc.code}") from None
+    except (URLError, TimeoutError, OSError, ProviderError) as exc:
+        raise OperatorError(f"Model image download transport: {safe_text(exc)}") from None
+    if not data or len(data) > 1_500_000:
+        raise OperatorError("Model image download имеет небезопасный размер")
+    return data
+
+
+def _prepare_wide_model_image(key: str, source: bytes) -> tuple[bytes, dict[str, Any]]:
+    """Center-crop to the largest exact 16:9 frame; never upscale or synthesize."""
+    try:
+        with Image.open(io.BytesIO(source)) as image:
+            image.load()
+            source_format = image.format
+            width, height = image.size
+            factor = min(width // 16, height // 9)
+            target = (factor * 16, factor * 9)
+            if factor <= 0 or target[0] < 1080 or target[1] < 607:
+                raise OperatorError(f"Model image {key} нельзя source-preserving привести к WIDE")
+            left = (width - target[0]) // 2
+            top = (height - target[1]) // 2
+            crop_box = (left, top, left + target[0], top + target[1])
+            cropped = image.crop(crop_box)
+            output = io.BytesIO()
+            if source_format == "PNG":
+                cropped.save(output, format="PNG", optimize=False)
+                output_format = "PNG"
+            elif source_format in {"JPEG", "JPG"}:
+                if cropped.mode not in {"RGB", "L"}:
+                    cropped = cropped.convert("RGB")
+                cropped.save(
+                    output,
+                    format="JPEG",
+                    quality=95,
+                    optimize=False,
+                    progressive=False,
+                    subsampling=2,
+                )
+                output_format = "JPEG"
+            else:
+                raise OperatorError(f"Model image {key} имеет неподдерживаемый source format")
+    except OperatorError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise OperatorError(f"Model image {key} decode/crop failed: {safe_text(exc)}") from None
+    prepared = output.getvalue()
+    if not prepared or len(prepared) > 10_000_000:
+        raise OperatorError(f"Model image {key} prepared file size вышел за API limit")
+    return prepared, {
+        "source_dimensions": [width, height],
+        "prepared_dimensions": list(target),
+        "crop_box": list(crop_box),
+        "format": output_format,
+        "transform": "center-crop-largest-exact-16x9-no-upscale",
+        "prepared_bytes": len(prepared),
+        "prepared_sha256": hashlib.sha256(prepared).hexdigest(),
+    }
+
+
+def build_model_image_upload_plan(
+    *, download: Any = _download_model_image
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    if (
+        not MODEL_IMAGE_REPORT.is_file()
+        or MODEL_IMAGE_REPORT.is_symlink()
+        or _sha256_file(MODEL_IMAGE_REPORT) != MODEL_IMAGE_REPORT_SHA256
+    ):
+        raise OperatorError("Model image evidence report SHA-256 не совпал")
+    blobs: dict[str, bytes] = {}
+    rows: list[dict[str, Any]] = []
+    for key, expected in MODEL_IMAGE_SOURCES.items():
+        data = download(expected["url"])
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if len(data) != expected["bytes"] or actual_sha256 != expected["sha256"]:
+            raise OperatorError(f"Model image {key} bytes/SHA-256 не совпали")
+        prepared, transform = _prepare_wide_model_image(key, data)
+        blobs[key] = prepared
+        rows.append(
+            {
+                "key": key,
+                "source_url": expected["url"],
+                "source_sha256": actual_sha256,
+                "source_bytes": len(data),
+                "provider_name": f"rosomaha-713802902-{key}",
+                **transform,
+            }
+        )
+    plan = {
+        "schema": "rosomaha-direct-model-images-v1",
+        "campaign_id": TARGET_CAMPAIGN_ID,
+        "exact_login": EXPECTED_LOGIN,
+        "evidence_report": str(MODEL_IMAGE_REPORT.relative_to(PROJECT_ROOT)),
+        "evidence_report_sha256": MODEL_IMAGE_REPORT_SHA256,
+        "images": rows,
+        "upload_count": 3,
+        "campaign_remains_suspended": True,
+        "moderation_called": False,
+        "resume_called": False,
+        "budget_changed": False,
+        "goal_changed": False,
+    }
+    plan["plan_sha256"] = sha256_json(plan)
+    return plan, blobs
+
+
+def _model_image_add_request(blobs: Mapping[str, bytes]) -> dict[str, Any]:
+    if set(blobs) != set(MODEL_IMAGE_SOURCES):
+        raise OperatorError("Model image blob scope не совпал")
+    params = {
+        "AdImages": [
+            {
+                "ImageData": base64.b64encode(blobs[key]).decode("ascii"),
+                "Name": f"rosomaha-713802902-{key}",
+            }
+            for key in MODEL_IMAGE_SOURCES
+        ]
+    }
+    assert_mutation_contract("v5", "adimages", "add", params, "model_images_add")
+    return params
+
+
+def run_model_image_upload_dry_run(api: Any) -> dict[str, Any]:
+    identity = guard.prove_identity(api)
+    snapshot = read_target_snapshot(api, require_baseline_ads=False)
+    campaign = snapshot["raw"]["campaign"]
+    if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID or campaign.get("State") != "SUSPENDED":
+        raise OperatorError("Model image dry-run требует exact SUSPENDED campaign")
+    plan, blobs = build_model_image_upload_plan()
+    _model_image_add_request(blobs)
+    return {
+        "mode": "image-upload-dry-run",
+        "generated_at": utc_now(),
+        "status": "ready",
+        "account": identity,
+        "target": {"campaign_id": TARGET_CAMPAIGN_ID, "state": "SUSPENDED", "cas_sha256": snapshot["sha256"]},
+        "image_plan": plan,
+        "mutation_requests": 0,
+        "moderation_called": False,
+        "resume_called": False,
+        "budget_changed": False,
+        "goal_changed": False,
+    }
+
+
+def run_model_image_upload_apply(
+    api: Any,
+    *,
+    expected_cas_sha256: str,
+    expected_image_plan_sha256: str,
+    environ: Mapping[str, str],
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    verify_image_upload_unlock(environ)
+    policy = lock_policy or MutationLockPolicy()
+    with policy.hold() as lock_evidence:
+        identity = guard.prove_identity(api)
+        protected_before = guard.read_protected_snapshot(api)
+        snapshot = read_target_snapshot(api, require_baseline_ads=False)
+        campaign = snapshot["raw"]["campaign"]
+        if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID or campaign.get("State") != "SUSPENDED":
+            raise OperatorError("Model image upload требует exact SUSPENDED campaign")
+        assert_exact_cas(snapshot["sha256"], expected_cas_sha256)
+        plan, blobs = build_model_image_upload_plan()
+        assert_exact_cas(plan["plan_sha256"], expected_image_plan_sha256)
+        params = _model_image_add_request(blobs)
+        result = api.call(
+            "v5",
+            "adimages",
+            "add",
+            params,
+            use_client_login=True,
+            mutation_kind="model_images_add",
+        )
+        hashes = strict_action_rows(
+            result,
+            "AddResults",
+            expected_count=3,
+            id_field="AdImageHash",
+        )
+        if len(set(hashes)) != 3:
+            raise OperatorError("Provider вернул duplicate model image hashes")
+        safety = _campaign_safety(api, campaign)
+        protected_after = guard.read_protected_snapshot(api)
+        guard.assert_protected_equal(protected_before, protected_after)
+        return {
+            "mode": "image-upload-apply",
+            "generated_at": utc_now(),
+            "status": "uploaded_verified_suspended",
+            "account": identity,
+            "global_lock": lock_evidence,
+            "target": {"campaign_id": TARGET_CAMPAIGN_ID, "state": safety["state"], "cas_sha256": snapshot["sha256"]},
+            "image_plan": plan,
+            "provider_hashes": dict(zip(MODEL_IMAGE_SOURCES, hashes, strict=True)),
+            "mutation_requests": int(getattr(api, "mutation_requests", 0)),
+            "protected_unchanged": True,
+            "moderation_called": False,
+            "resume_called": False,
+            "budget_changed": False,
+            "goal_changed": False,
+            "creative_apply_authorized": False,
+        }
 
 
 def validate_reused_image(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -1931,12 +2233,12 @@ def _request_summary(requests: Mapping[str, Mapping[str, Any]]) -> list[dict[str
 def _campaign_safety(api: Any, baseline_campaign: Mapping[str, Any]) -> dict[str, Any]:
     current = guard.read_campaign(api, guard.CANONICAL_API_VERSION)
     guard.validate_canonical_campaign(current, require_draft=False, allowed_states=("SUSPENDED",))
-    if guard.sha256_json(current) != guard.sha256_json(baseline_campaign):
+    if _content_cas_sha256(current) != _content_cas_sha256(baseline_campaign):
         raise OperatorError("Campaign CAS изменился во время creative stages")
     return {
         "state": current.get("State"),
         "status": current.get("Status"),
-        "sha256": guard.sha256_json(current),
+        "sha256": _content_cas_sha256(current),
     }
 
 
@@ -1997,7 +2299,9 @@ def verify_post_readback(
         actual = groups[desired["Id"]]
         if actual.get("Name") != desired.get("Name"):
             raise OperatorError(f"Post-readback group name mismatch {desired['Id']}")
-        if sorted(actual.get("NegativeKeywords", {}).get("Items") or []) != sorted(desired["NegativeKeywords"]["Items"]):
+        if _normalise_negative_items(
+            actual.get("NegativeKeywords", {}).get("Items")
+        ) != _normalise_negative_items(desired["NegativeKeywords"]["Items"]):
             raise OperatorError(f"Post-readback negatives mismatch {desired['Id']}")
 
     ads = {exact_int(item.get("Id"), "Ad Id"): item for item in raw["ads"]}
@@ -2328,7 +2632,7 @@ def run_apply(
             if new_ad_id is None or len(new_keyword_ids) != KEYWORD_ADD_COUNT:
                 raise OperatorError("Provider IDs не были полностью разрешены")
             post = read_target_snapshot(api, require_baseline_ads=False)
-            if guard.sha256_json(post["raw"]["campaign"]) != guard.sha256_json(baseline_campaign):
+            if _content_cas_sha256(post["raw"]["campaign"]) != _content_cas_sha256(baseline_campaign):
                 raise OperatorError("Campaign changed despite creative-only scope")
             readback = verify_post_readback(
                 post,
@@ -2423,7 +2727,12 @@ def run_partial_recovery(
                 is not True
             ):
                 raise OperatorError("Recovery-v3 requires exact post-3500 state")
-            assert_exact_cas(partial_snapshot["sha256"], expected_cas_sha256)
+            recovery_cas = (
+                partial_snapshot.get("legacy_raw_sha256") or partial_snapshot["sha256"]
+                if expected_cas_sha256 == THIRD_PARTIAL_PREIMAGE_CAS_SHA256
+                else partial_snapshot["sha256"]
+            )
+            assert_exact_cas(str(recovery_cas or ""), expected_cas_sha256)
             baseline_campaign = partial_snapshot["raw"]["campaign"]
             image_hash, image_evidence = validate_reused_image(payload)
             sitelink_ids = classification["sitelink_ids"]
@@ -2447,7 +2756,8 @@ def run_partial_recovery(
                 raise OperatorError("Recovery-v3 permits only v501 EPK ad mutations")
             receipt.update(
                 account=identity,
-                preimage_cas_sha256=partial_snapshot["sha256"],
+                preimage_cas_sha256=recovery_cas,
+                canonical_content_cas_sha256=partial_snapshot["sha256"],
                 partial_classification=classification,
                 protected_before={
                     key: value
@@ -2508,7 +2818,7 @@ def run_partial_recovery(
             if new_ad_id is None:
                 raise OperatorError("Recovery provider did not resolve new ad ID")
             post = read_target_snapshot(api, require_baseline_ads=False)
-            if guard.sha256_json(post["raw"]["campaign"]) != guard.sha256_json(
+            if _content_cas_sha256(post["raw"]["campaign"]) != _content_cas_sha256(
                 baseline_campaign
             ):
                 raise OperatorError("Campaign changed during partial recovery")
@@ -2581,6 +2891,25 @@ def save_receipt(receipt: Mapping[str, Any], *, token: str = "") -> Path:
 
 def receipt_is_safe(receipt: Mapping[str, Any]) -> bool:
     mode = receipt.get("mode")
+    if mode == "image-upload-dry-run":
+        return (
+            receipt.get("status") == "ready"
+            and receipt.get("mutation_requests") == 0
+            and receipt.get("target", {}).get("campaign_id") == TARGET_CAMPAIGN_ID
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and bool(receipt.get("target", {}).get("cas_sha256"))
+            and receipt.get("image_plan", {}).get("upload_count") == 3
+            and bool(receipt.get("image_plan", {}).get("plan_sha256"))
+        )
+    if mode == "image-upload-apply":
+        return (
+            receipt.get("status") == "uploaded_verified_suspended"
+            and receipt.get("target", {}).get("state") == "SUSPENDED"
+            and receipt.get("mutation_requests") == 1
+            and receipt.get("protected_unchanged") is True
+            and set(receipt.get("provider_hashes", {})) == set(MODEL_IMAGE_SOURCES)
+            and receipt.get("creative_apply_authorized") is False
+        )
     if mode == "dry-run":
         return (
             receipt.get("status")
@@ -2620,20 +2949,42 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="continue only the exact classified partial state",
     )
+    mode.add_argument(
+        "--image-upload-dry-run",
+        action="store_true",
+        help="read-only exact three-model image upload plan",
+    )
+    mode.add_argument(
+        "--image-upload-apply",
+        action="store_true",
+        help="upload exact three model images; never changes ads or campaign",
+    )
     parser.add_argument("--expected-cas-sha256", help="exact CAS SHA-256 from fresh dry-run")
     parser.add_argument(
         "--expected-plan-sha256",
         help="exact source-bound plan SHA-256 from the same fresh dry-run",
     )
+    parser.add_argument(
+        "--expected-image-plan-sha256",
+        help="exact model image plan SHA-256 from image upload dry-run",
+    )
     args = parser.parse_args(argv)
     args.mode = (
-        "recover-partial"
+        "image-upload-apply"
+        if args.image_upload_apply
+        else "image-upload-dry-run"
+        if args.image_upload_dry_run
+        else "recover-partial"
         if args.recover_partial
         else "apply"
         if args.apply
         else "dry-run"
     )
-    if args.mode == "dry-run" and (args.expected_cas_sha256 or args.expected_plan_sha256):
+    if args.mode in {"dry-run", "image-upload-dry-run"} and (
+        args.expected_cas_sha256
+        or args.expected_plan_sha256
+        or args.expected_image_plan_sha256
+    ):
         parser.error("expected CAS/plan SHA-256 разрешены только с --apply")
     if args.mode in {"apply", "recover-partial"} and (
         not args.expected_cas_sha256 or not args.expected_plan_sha256
@@ -2641,6 +2992,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error(
             "mutation mode требует exact --expected-cas-sha256 и --expected-plan-sha256"
         )
+    if args.mode == "image-upload-apply" and (
+        not args.expected_cas_sha256 or not args.expected_image_plan_sha256
+    ):
+        parser.error("image upload apply требует exact CAS и image plan SHA-256")
+    if args.mode == "image-upload-apply" and args.expected_plan_sha256:
+        parser.error("image upload apply не принимает creative plan SHA-256")
     return args
 
 
@@ -2654,7 +3011,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload, payload_metadata = build_current_payload()
         token = guard.load_project_token()
         api = CreativeDirectApi(token)
-        if args.mode == "apply":
+        if args.mode == "image-upload-apply":
+            receipt = run_model_image_upload_apply(
+                api,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_image_plan_sha256=args.expected_image_plan_sha256,
+                environ=os.environ,
+            )
+        elif args.mode == "image-upload-dry-run":
+            receipt = run_model_image_upload_dry_run(api)
+        elif args.mode == "apply":
             receipt = run_apply(
                 api,
                 payload,
@@ -2697,6 +3063,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "mutation_requests": receipt.get("mutation_requests", 0),
                 "cas_sha256": receipt.get("target", {}).get("cas_sha256"),
                 "plan_sha256": receipt.get("payload", {}).get("plan_sha256"),
+                "image_plan_sha256": receipt.get("image_plan", {}).get("plan_sha256"),
                 "classification": receipt.get("target", {})
                 .get("classification", {})
                 .get("classification"),
