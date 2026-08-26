@@ -160,9 +160,9 @@ export const productOptions: ProductOption[] = [
   {
     id: 'tire-bagira',
     name: 'Шина «Багира» (1200 х 530)',
-    price: 60000,
-    priceFormatted: '60 000 ₽',
-    image: '/upload/iblock/f87/3jsk5h67d0tg2igtv5n2gdejubimtqqw.jpeg',
+    price: 150000,
+    priceFormatted: '150 000 ₽',
+    image: '/upload/iblock/c8d/6dlcx3pwtzxz7ib6wf7jl4vg331jzle0.jpeg',
   },
   {
     id: 'kofr-side-improved',

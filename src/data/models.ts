@@ -490,10 +490,10 @@ export const accessories = [
     id: 'tire-bagira',
     name: 'Шина "Багира" (1200 х 530)',
     category: 'Шины',
-    price: 60000,
-    priceFormatted: '60 000 ₽',
+    price: 150000,
+    priceFormatted: '150 000 ₽',
     available: true,
-    image: '/upload/iblock/f87/3jsk5h67d0tg2igtv5n2gdejubimtqqw.jpeg',
+    image: '/upload/iblock/c8d/6dlcx3pwtzxz7ib6wf7jl4vg331jzle0.jpeg',
   },
   {
     id: 'tire-avtoros-max',
