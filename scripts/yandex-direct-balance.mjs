@@ -511,6 +511,9 @@ export function nativeHttpsRequest(url, requestOptions, timeoutMs = DEFAULT_TIME
       {
         method: requestOptions.method,
         headers: requestOptions.headers,
+        ...(requestOptions.family === 4 || requestOptions.family === 6
+          ? { family: requestOptions.family }
+          : {}),
       },
       (response) => {
         const chunks = [];

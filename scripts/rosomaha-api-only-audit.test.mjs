@@ -15,6 +15,7 @@ import {
   rosomahaRusPublicTargets,
   selectExactWebmasterProperty,
   targetRosomahaRusCampaignId,
+  webmasterApiGet,
   webmasterExactHostReport,
 } from "./rosomaha-api-only-audit.mjs";
 
@@ -208,6 +209,35 @@ test("Webmaster выбирает только точный non-www host, не о
   ];
   assert.equal(selectExactWebmasterProperty(properties, "rosomaha-rus.ru"), exact);
   assert.equal(selectExactWebmasterProperty(properties.slice(0, 2), "rosomaha-rus.ru"), null);
+});
+
+test("Webmaster повторяет безопасный GET после сетевого тайм-аута", async () => {
+  const calls = [];
+  const request = async (url, options, transportOptions) => {
+    calls.push({ url, options, transportOptions });
+    if (calls.length === 1) throw new Error("HTTPS timeout after 30000 ms");
+    return {
+      ok: true,
+      status: 200,
+      data: { hosts: [] },
+      providerMeta: { requestId: "request-2" },
+    };
+  };
+
+  const result = await webmasterApiGet(
+    { YANDEX_WEBMASTER_TOKEN: "offline-token" },
+    "https://api.webmaster.yandex.net/v4/user/2301393527/hosts/",
+    request,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.requestId, "request-2");
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((call) => call.options.method === "GET"));
+  assert.ok(calls.every((call) => call.options.family === 4));
+  assert.ok(calls.every((call) => call.transportOptions.fetchImpl === null));
+  assert.ok(calls.every((call) => call.transportOptions.timeoutMs === 30_000));
 });
 
 test("если точного Webmaster property нет, endpoint не вызываются и все source_unavailable", async () => {

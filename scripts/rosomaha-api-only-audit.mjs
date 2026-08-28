@@ -14,6 +14,8 @@ const directLoginDefault = "rosomaha-rus999";
 const directChangesSince = "2025-01-01T00:00:00Z";
 const webmasterMainHost = "xn--80aa8ahaki9a.site";
 const webmasterRosomahaRusHost = "rosomaha-rus.ru";
+const webmasterRequestTimeoutMs = 30_000;
+const webmasterRequestAttempts = 2;
 const publicHttpBodyLimit = 2_000_000;
 export const protectedCampaignIds = Object.freeze(["708505950", "705770573", "710087376"]);
 export const targetRosomahaRusCampaignId = "713802902";
@@ -1052,49 +1054,61 @@ function unavailableWebmasterEndpoints(reason) {
   );
 }
 
-async function webmasterApiGet(env, url) {
+export async function webmasterApiGet(env, url, request = safeJsonRequest) {
   const token = env.YANDEX_WEBMASTER_TOKEN;
-  try {
-    const response = await safeJsonRequest(
-      url,
-      {
-        method: "GET",
-        headers: {
-          Authorization: "OAuth " + token,
-          Accept: "application/json",
+  let lastError = null;
+  for (let attempt = 1; attempt <= webmasterRequestAttempts; attempt += 1) {
+    try {
+      const response = await request(
+        url,
+        {
+          method: "GET",
+          family: 4,
+          headers: {
+            Authorization: "OAuth " + token,
+            Accept: "application/json",
+          },
         },
-      },
-      { secrets: [token] },
-    );
-    const providerError = response.data?.error_code || response.data?.error?.error_code;
-    if (!response.ok || providerError) {
+        {
+          fetchImpl: null,
+          secrets: [token],
+          timeoutMs: webmasterRequestTimeoutMs,
+        },
+      );
+      const providerError = response.data?.error_code || response.data?.error?.error_code;
+      if (!response.ok || providerError) {
+        return {
+          ok: false,
+          sourceStatus: "source_unavailable",
+          httpStatus: response.status,
+          errorCode: providerError || null,
+          error: response.data?.error_message
+            || response.data?.error?.error_string
+            || "Webmaster HTTP " + response.status,
+          requestId: response.providerMeta?.requestId || null,
+          attempts: attempt,
+        };
+      }
       return {
-        ok: false,
-        sourceStatus: "source_unavailable",
-        httpStatus: response.status,
-        errorCode: providerError || null,
-        error: response.data?.error_message
-          || response.data?.error?.error_string
-          || "Webmaster HTTP " + response.status,
+        ok: true,
+        sourceStatus: "available",
+        data: response.data,
         requestId: response.providerMeta?.requestId || null,
+        attempts: attempt,
       };
+    } catch (error) {
+      lastError = error;
     }
-    return {
-      ok: true,
-      sourceStatus: "available",
-      data: response.data,
-      requestId: response.providerMeta?.requestId || null,
-    };
-  } catch (error) {
-    const detail = String(error?.message || error)
-      .replace("Оба сетевых транспорта Яндекс Директа недоступны:", "Сетевой транспорт Webmaster недоступен:")
-      .replace("Яндекс Директ вернул не JSON", "Webmaster вернул не JSON");
-    return {
-      ok: false,
-      sourceStatus: "source_unavailable",
-      error: detail,
-    };
   }
+  const detail = String(lastError?.message || lastError)
+    .replace("Оба сетевых транспорта Яндекс Директа недоступны:", "Сетевой транспорт Webmaster недоступен:")
+    .replace("Яндекс Директ вернул не JSON", "Webmaster вернул не JSON");
+  return {
+    ok: false,
+    sourceStatus: "source_unavailable",
+    error: detail,
+    attempts: webmasterRequestAttempts,
+  };
 }
 
 export async function webmasterExactHostReport(
