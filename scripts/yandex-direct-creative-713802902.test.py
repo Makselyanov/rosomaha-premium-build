@@ -1521,6 +1521,119 @@ class CreativeOperatorTests(unittest.TestCase):
                     self.fail("lock must not be acquired")
             self.assertEqual(lock.read_text(encoding="utf-8"), "other owner")
 
+    def _model_clarity_snapshot(self, *, target=False):
+        ads = []
+        for ad_id, values in op.MODEL_CLARITY_ADS.items():
+            titles = [values["title"]] if target else values["old_titles"]
+            texts = [values["text"]] if target else values["old_texts"]
+            ads.append(
+                {
+                    "Id": ad_id,
+                    "State": "OFF" if ad_id == op.CORRECTIVE_PREIMAGE_NEW_AD_ID else "ON",
+                    "ResponsiveAd": {
+                        "Titles": [{"Title": item} for item in titles],
+                        "Texts": [{"Text": item} for item in texts],
+                        "Href": f"https://{op.EXPECTED_DOMAIN}/product/model/",
+                        "DisplayUrlPath": "model",
+                        "SitelinkSetId": 123,
+                        "AdImages": {"Items": [{"ImageHash": "image"}]},
+                    },
+                }
+            )
+        ads.append(
+            {
+                "Id": op.PARKED_AD_ID,
+                "State": "SUSPENDED",
+                "ResponsiveAd": {
+                    "Titles": [{"Title": "parked"}], "Texts": [{"Text": "parked"}],
+                    "Href": f"https://{op.EXPECTED_DOMAIN}/", "DisplayUrlPath": "parked",
+                    "SitelinkSetId": 123, "AdImages": {"Items": []},
+                },
+            }
+        )
+        raw = {
+            "campaign": {"Id": op.TARGET_CAMPAIGN_ID, "State": "ON", "Type": "UNIFIED_CAMPAIGN"},
+            "ads": ads,
+        }
+        return {"raw": raw, "sha256": op._content_cas_sha256(raw), "counts": {"ads": 4}}
+
+    def test_model_clarity_request_is_full_preimage_with_only_title_text_changed(self):
+        snapshot = self._model_clarity_snapshot()
+        request = op.build_model_clarity_request(snapshot)
+        rows = request["params"]["Ads"]
+        self.assertEqual({row["Id"] for row in rows}, set(op.MODEL_CLARITY_ADS))
+        self.assertNotIn(op.PARKED_AD_ID, {row["Id"] for row in rows})
+        for row in rows:
+            expected = op.MODEL_CLARITY_ADS[row["Id"]]
+            creative = row["ResponsiveAd"]
+            self.assertEqual(creative["Titles"], [expected["title"]])
+            self.assertEqual(creative["Texts"], [expected["text"]])
+            self.assertEqual(
+                set(creative),
+                {"Titles", "Texts", "Href", "DisplayUrlPath", "SitelinkSetId", "AdImageHashes"},
+            )
+            original = next(item for item in snapshot["raw"]["ads"] if item["Id"] == row["Id"])
+            values = op._responsive_values(original)
+            self.assertEqual(creative["Href"], values["href"])
+            self.assertEqual(creative["DisplayUrlPath"], values["display"])
+            self.assertEqual(creative["SitelinkSetId"], values["sitelink"])
+            self.assertEqual(creative["AdImageHashes"], {"Items": values["images"]})
+        self.assertNotIn("CampaignId", str(request))
+
+    def test_model_clarity_plan_hash_is_bound_to_full_live_creative(self):
+        first = self._model_clarity_snapshot()
+        second = op.copy.deepcopy(first)
+        second["raw"]["ads"][0]["ResponsiveAd"]["Href"] += "?source-drift=1"
+        first_hash = op.sha256_json(op.build_model_clarity_request(first))
+        second_hash = op.sha256_json(op.build_model_clarity_request(second))
+        self.assertNotEqual(first_hash, second_hash)
+
+    def test_model_clarity_dry_run_is_zero_mutation_and_source_bound(self):
+        snapshot = self._model_clarity_snapshot()
+
+        class FakeApi:
+            mutation_requests = 0
+
+        class FreeLock:
+            def inspect(self):
+                return {"browser_locks": [], "mutation_lock_present": False, "available": True}
+
+        with (
+            mock.patch.object(op.guard, "prove_identity", return_value={"login": op.EXPECTED_LOGIN}),
+            mock.patch.object(op.guard, "read_protected_snapshot", return_value={"canonical_sha256": "p", "campaigns": {}}),
+            mock.patch.object(op, "read_model_clarity_snapshot", return_value=snapshot),
+        ):
+            receipt = op.run_model_clarity_dry_run(FakeApi(), lock_policy=FreeLock())
+        self.assertEqual(receipt["status"], "ready_model_clarity_corrective")
+        self.assertEqual(receipt["mutation_requests"], 0)
+        self.assertEqual(receipt["target"]["cas_sha256"], snapshot["sha256"])
+        self.assertEqual(receipt["plan_sha256"], op.sha256_json(op.build_model_clarity_request(snapshot)))
+        self.assertEqual(receipt["parked_ad_untouched"], op.PARKED_AD_ID)
+
+    def test_model_clarity_rejects_parked_ad_drift_and_wrong_unlock(self):
+        snapshot = self._model_clarity_snapshot()
+        parked = next(item for item in snapshot["raw"]["ads"] if item["Id"] == op.PARKED_AD_ID)
+        parked["State"] = "ON"
+        with self.assertRaises(op.OperatorError):
+            op.validate_model_clarity_state(snapshot, target=False)
+        with self.assertRaises(op.OperatorError):
+            op.verify_model_clarity_unlock({})
+        op.verify_model_clarity_unlock(
+            {op.MODEL_CLARITY_GUARD_ENV: op.MODEL_CLARITY_GUARD_VALUE}
+        )
+
+    def test_model_clarity_cli_requires_fresh_cas_and_plan(self):
+        dry = op.parse_args(["--model-clarity-corrective-dry-run"])
+        self.assertEqual(dry.mode, "model-clarity-corrective-dry-run")
+        apply_args = op.parse_args(
+            [
+                "--model-clarity-corrective-apply",
+                "--expected-cas-sha256", "a" * 64,
+                "--expected-plan-sha256", "b" * 64,
+            ]
+        )
+        self.assertEqual(apply_args.mode, "model-clarity-corrective-apply")
+
     def test_payload_identity_drift_is_rejected(self):
         bad = op.copy.deepcopy(self.payload)
         bad["exactLogin"] = "foreign-login"

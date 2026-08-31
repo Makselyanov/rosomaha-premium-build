@@ -358,6 +358,28 @@ RECOVERY_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_RECOVERY"
 RECOVERY_GUARD_VALUE = "RECOVER_713802902_EPK_ADS_V501_V3"
 CORRECTIVE_GUARD_ENV = "ROSOMAHA_DIRECT_CREATIVE_CORRECTIVE"
 CORRECTIVE_GUARD_VALUE = "CORRECT_EXISTING_6_ADS_713802902_V1"
+MODEL_CLARITY_GUARD_ENV = "ROSOMAHA_DIRECT_MODEL_CLARITY_APPLY"
+MODEL_CLARITY_GUARD_VALUE = "APPLY_EXACT_3_MODEL_CLARITY_ADS_713802902_V1"
+MODEL_CLARITY_ADS = {
+    EXISTING_AD_IDS["extrime_uaz"]: {
+        "old_titles": ["Росомаха Экстрим с мостами УАЗ", "Экстрим 1.5 с двигателем 1NZ-FE", "Экстрим с мостами УАЗ от завода", "Купить Росомаху Экстрим УАЗ"],
+        "old_texts": ["Модель Экстрим: двигатель 1NZ-FE и мосты УАЗ. Выберите комплектацию.", "Доставка по России и дополнительные опции. Получите консультацию завода.", "Характеристики, комплектация и заявка на модель Экстрим — на сайте."],
+        "title": "Квадроцикл Росомаха Экстрим 1.5 УАЗ",
+        "text": "Квадроцикл Росомаха Экстрим 1.5 с мостами УАЗ. Комплектация и заявка.",
+    },
+    CORRECTIVE_PREIMAGE_NEW_AD_ID: {
+        "old_titles": ["Росомаха Экстрим с мостами Toyota", "Экстрим 1.5 с двигателем 1NZ-FE", "Экстрим Toyota от завода Росомаха", "Купить Росомаху Экстрим Toyota"],
+        "old_texts": ["Модель Экстрим: двигатель 1NZ-FE и мосты Toyota. Выберите комплектацию.", "Доставка по России и дополнительные опции. Получите консультацию завода.", "Характеристики, комплектация и заявка на модель Экстрим — на сайте."],
+        "title": "Квадроцикл Росомаха Экстрим 1.5 Toyota",
+        "text": "Квадроцикл Росомаха Экстрим 1.5 с мостами Toyota. Комплектация и заявка.",
+    },
+    EXISTING_AD_IDS["hunter"]: {
+        "old_titles": ["Росомаха Хантер с мостами Toyota", "Хантер 1.5 с двигателем 1NZ-FE", "Хантер Toyota от завода Росомаха", "Купить Росомаху Хантер Toyota"],
+        "old_texts": ["Модель Хантер: двигатель 1NZ-FE и мосты Toyota. Выберите комплектацию.", "Доставка по России и дополнительные опции. Получите консультацию завода.", "Характеристики, комплектация и заявка на модель Хантер — на сайте."],
+        "title": "Квадроцикл Росомаха Хантер 1.5 Toyota",
+        "text": "Квадроцикл Росомаха Хантер 1.5 с мостами Toyota. Комплектация и заявка.",
+    },
+}
 MUTATION_LOCK_PATH = guard.MUTATION_LOCK_PATH
 BROWSER_LOCK_PATHS = guard.BROWSER_LOCK_PATHS
 MAX_RESPONSE_BYTES = 4_000_000
@@ -1010,6 +1032,7 @@ def assert_mutation_contract(
         "corrective_adgroups_update": ("v501", "adgroups", "update"),
         "corrective_keywords_update": ("v5", "keywords", "update"),
         "corrective_ads_update": ("v501", "ads", "update"),
+        "model_clarity_ads_update": ("v501", "ads", "update"),
         "ads_add": ("v501", "ads", "add"),
         "ads_suspend": ("v501", "ads", "suspend"),
         "model_images_add": ("v5", "adimages", "add"),
@@ -1080,6 +1103,24 @@ def assert_mutation_contract(
             or any(set(row) != {"Id", "ResponsiveAd"} for row in rows)
         ):
             raise OperatorError("Corrective Ads.update требует exact шесть существующих IDs")
+    elif mutation_kind == "model_clarity_ads_update":
+        rows = params.get("Ads") if set(params) == {"Ads"} else None
+        if (
+            not isinstance(rows, list)
+            or {exact_int(row.get("Id"), "Model clarity Ad Id") for row in rows}
+            != set(MODEL_CLARITY_ADS)
+            or any(set(row) != {"Id", "ResponsiveAd"} for row in rows)
+            or any(not isinstance(row.get("ResponsiveAd"), Mapping) for row in rows)
+            or any(
+                set(row["ResponsiveAd"])
+                != {"Titles", "Texts", "Href", "DisplayUrlPath", "SitelinkSetId", "AdImageHashes"}
+                for row in rows
+                if isinstance(row.get("ResponsiveAd"), Mapping)
+            )
+        ):
+            raise OperatorError("Model clarity Ads.update требует ровно три exact active ad IDs")
+        if PARKED_AD_ID in _all_ints(rows):
+            raise OperatorError("Model clarity запрещает parked ad")
     elif mutation_kind == "ads_add":
         rows = params.get("Ads") if set(params) == {"Ads"} else None
         if not isinstance(rows, list) or len(rows) != 1:
@@ -2078,6 +2119,106 @@ def verify_recovery_unlock(environ: Mapping[str, str]) -> None:
 def verify_corrective_unlock(environ: Mapping[str, str]) -> None:
     if environ.get(CORRECTIVE_GUARD_ENV) != CORRECTIVE_GUARD_VALUE:
         raise OperatorError("Corrective apply заблокирован: distinct exact unlock отсутствует")
+
+
+def verify_model_clarity_unlock(environ: Mapping[str, str]) -> None:
+    if environ.get(MODEL_CLARITY_GUARD_ENV) != MODEL_CLARITY_GUARD_VALUE:
+        raise OperatorError("Model clarity apply заблокирован: distinct exact unlock отсутствует")
+
+
+def build_model_clarity_request(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    raw = snapshot.get("raw")
+    ads_value = raw.get("ads") if isinstance(raw, Mapping) else None
+    if not isinstance(ads_value, list):
+        raise OperatorError("Model clarity request требует live ads preimage")
+    ads = {exact_int(item.get("Id"), "Ad Id"): item for item in ads_value}
+    rows = []
+    for ad_id, values in MODEL_CLARITY_ADS.items():
+        if ad_id not in ads:
+            raise OperatorError("Model clarity request не нашёл exact live ad")
+        current = _responsive_values(ads[ad_id])
+        creative = {
+            "Titles": [values["title"]],
+            "Texts": [values["text"]],
+            "Href": current["href"],
+            "DisplayUrlPath": current["display"],
+            "SitelinkSetId": current["sitelink"],
+            "AdImageHashes": {"Items": current["images"]},
+        }
+        rows.append({"Id": ad_id, "ResponsiveAd": creative})
+    request = {
+        "version": "v501", "service": "ads", "method": "update",
+        "mutation_kind": "model_clarity_ads_update", "params": {"Ads": rows},
+    }
+    assert_mutation_contract(
+        request["version"], request["service"], request["method"],
+        request["params"], request["mutation_kind"],
+    )
+    return request
+
+
+def read_model_clarity_snapshot(api: Any) -> dict[str, Any]:
+    campaign = guard.read_campaign(api, guard.CANONICAL_API_VERSION)
+    guard.validate_canonical_campaign(
+        campaign, require_draft=False, allowed_states=("ON", "SUSPENDED")
+    )
+    ads = guard.read_ads(api, include_creatives=True)
+    raw = {"campaign": campaign, "ads": ads}
+    return {
+        "raw": raw,
+        "sha256": _content_cas_sha256(raw),
+        "counts": {"ads": len(ads)},
+    }
+
+
+def validate_model_clarity_state(snapshot: Mapping[str, Any], *, target: bool) -> dict[str, Any]:
+    raw = snapshot.get("raw")
+    campaign = raw.get("campaign") if isinstance(raw, Mapping) else None
+    ads_value = raw.get("ads") if isinstance(raw, Mapping) else None
+    if not isinstance(campaign, Mapping) or not isinstance(ads_value, list):
+        raise OperatorError("Model clarity snapshot неполон")
+    if exact_int(campaign.get("Id"), "Campaign Id") != TARGET_CAMPAIGN_ID:
+        raise OperatorError("Model clarity snapshot содержит другую кампанию")
+    campaign_state = campaign.get("State")
+    if campaign_state not in {"ON", "SUSPENDED"}:
+        raise OperatorError("Model clarity разрешён только для ON/SUSPENDED campaign")
+    ads = {exact_int(item.get("Id"), "Ad Id"): item for item in ads_value}
+    if not set(MODEL_CLARITY_ADS) <= set(ads):
+        raise OperatorError("Model clarity snapshot не содержит все три exact ad IDs")
+    if PARKED_AD_ID not in ads or ads[PARKED_AD_ID].get("State") != "SUSPENDED":
+        raise OperatorError("Parked ad identity/state drift")
+    for ad_id, values in MODEL_CLARITY_ADS.items():
+        ad = ads[ad_id]
+        if ad.get("State") not in {"ON", "OFF"}:
+            raise OperatorError(f"Model clarity ad {ad_id} suspended/deleted state")
+        responsive = _responsive_values(ad)
+        expected_titles = [values["title"]] if target else values["old_titles"]
+        expected_texts = [values["text"]] if target else values["old_texts"]
+        if responsive["titles"] != expected_titles or responsive["texts"] != expected_texts:
+            raise OperatorError(f"Model clarity ad {ad_id} title/text drift")
+    return {
+        "classification": "model_clarity_target_exact" if target else "model_clarity_preimage_exact",
+        "campaign_state": campaign_state,
+        "ad_ids": sorted(MODEL_CLARITY_ADS),
+        "parked_ad_untouched": PARKED_AD_ID,
+    }
+
+
+def _model_clarity_normalized(snapshot: Mapping[str, Any], *, target: bool) -> Any:
+    value = copy.deepcopy(snapshot.get("raw"))
+    ads = value.get("ads") if isinstance(value, Mapping) else None
+    if not isinstance(ads, list):
+        raise OperatorError("Model clarity comparison snapshot неполон")
+    by_id = {exact_int(item.get("Id"), "Ad Id"): item for item in ads}
+    for ad_id, fields in MODEL_CLARITY_ADS.items():
+        creative = by_id[ad_id].get("ResponsiveAd")
+        if not isinstance(creative, Mapping):
+            raise OperatorError("Model clarity ResponsiveAd отсутствует")
+        titles = [fields["title"]] if target else fields["old_titles"]
+        texts = [fields["text"]] if target else fields["old_texts"]
+        creative["Titles"] = [{"Title": item} for item in titles]
+        creative["Texts"] = [{"Text": item} for item in texts]
+    return _content_cas_view(value)
 
 
 def verify_image_upload_unlock(environ: Mapping[str, str]) -> None:
@@ -3209,6 +3350,114 @@ def run_apply(
     return receipt
 
 
+def run_model_clarity_dry_run(
+    api: Any, *, lock_policy: MutationLockPolicy | None = None
+) -> dict[str, Any]:
+    receipt = _base_receipt("model-clarity-corrective-dry-run")
+    mutations_before = int(getattr(api, "mutation_requests", 0))
+    identity = guard.prove_identity(api)
+    protected = guard.read_protected_snapshot(api)
+    snapshot = read_model_clarity_snapshot(api)
+    request = build_model_clarity_request(snapshot)
+    plan_sha256 = sha256_json(request)
+    try:
+        classification = validate_model_clarity_state(snapshot, target=True)
+        status = "model_clarity_already_applied_noop"
+        planned: dict[str, Mapping[str, Any]] = {}
+    except OperatorError:
+        classification = validate_model_clarity_state(snapshot, target=False)
+        status = "ready_model_clarity_corrective"
+        planned = {"model_clarity_ads_update": request}
+    if int(getattr(api, "mutation_requests", 0)) != mutations_before:
+        raise OperatorError("Model clarity dry-run выполнил mutation request")
+    lock_state = (lock_policy or MutationLockPolicy()).inspect()
+    if not lock_state["available"] and status == "ready_model_clarity_corrective":
+        status = "blocked_by_lock"
+    receipt.update(
+        status=status,
+        account=identity,
+        protected={key: value for key, value in protected.items() if key != "campaigns"},
+        target={
+            "cas_sha256": snapshot["sha256"],
+            "state": snapshot["raw"]["campaign"].get("State"),
+            "counts": snapshot["counts"],
+            "classification": classification,
+        },
+        plan_sha256=plan_sha256,
+        planned_requests=_request_summary(planned),
+        exact_ad_ids=sorted(MODEL_CLARITY_ADS),
+        parked_ad_untouched=PARKED_AD_ID,
+        forbidden_mutations=[
+            "campaign/budget/strategy/geo/goal changes", "status changes",
+            "keywords", "ad groups", "parked ad",
+        ],
+        global_lock=lock_state,
+        mutation_requests=0,
+    )
+    return receipt
+
+
+def run_model_clarity_apply(
+    api: Any,
+    *,
+    expected_cas_sha256: str,
+    expected_plan_sha256: str,
+    environ: Mapping[str, str],
+    lock_policy: MutationLockPolicy | None = None,
+) -> dict[str, Any]:
+    verify_model_clarity_unlock(environ)
+    receipt = _base_receipt("model-clarity-corrective-apply")
+    setattr(api, "mutation_allowlist_override", frozenset({"model_clarity_ads_update"}))
+    policy = lock_policy or MutationLockPolicy()
+    with policy.hold() as lock_evidence:
+        receipt["global_lock"] = lock_evidence
+        identity = guard.prove_identity(api)
+        protected_before = guard.read_protected_snapshot(api)
+        preimage = read_model_clarity_snapshot(api)
+        assert_exact_cas(preimage["sha256"], expected_cas_sha256)
+        request = build_model_clarity_request(preimage)
+        assert_exact_cas(sha256_json(request), expected_plan_sha256)
+        try:
+            target = validate_model_clarity_state(preimage, target=True)
+        except OperatorError:
+            target = None
+        if target is not None:
+            receipt.update(
+                status="model_clarity_already_applied_noop", account=identity,
+                classification=target, mutation_requests=0,
+                final_campaign_state=preimage["raw"]["campaign"].get("State"),
+                protected_unchanged=True,
+            )
+            return receipt
+        classification = validate_model_clarity_state(preimage, target=False)
+        baseline_campaign = preimage["raw"]["campaign"]
+        result = api.call(
+            request["version"], request["service"], request["method"], request["params"],
+            use_client_login=True, mutation_kind=request["mutation_kind"],
+        )
+        ids = strict_action_rows(
+            result, "UpdateResults", expected_count=3, id_field="Id",
+            expected_ids=sorted(MODEL_CLARITY_ADS),
+        )
+        post = read_model_clarity_snapshot(api)
+        readback = validate_model_clarity_state(post, target=True)
+        if _model_clarity_normalized(preimage, target=True) != _model_clarity_normalized(post, target=True):
+            raise OperatorError("Model clarity post-readback изменил поля вне title/text")
+        if _content_cas_sha256(post["raw"]["campaign"]) != _content_cas_sha256(baseline_campaign):
+            raise OperatorError("Campaign changed during model clarity apply")
+        protected_after = guard.read_protected_snapshot(api)
+        guard.assert_protected_equal(protected_before, protected_after)
+        receipt.update(
+            status="model_clarity_applied_verified", account=identity,
+            classification=classification, verified_ids=ids, readback=readback,
+            preimage_cas_sha256=preimage["sha256"], postimage_cas_sha256=post["sha256"],
+            plan_sha256=sha256_json(request), mutation_requests=1,
+            final_campaign_state=post["raw"]["campaign"].get("State"),
+            protected_unchanged=True, parked_ad_untouched=PARKED_AD_ID,
+        )
+    return receipt
+
+
 def run_corrective_dry_run(
     api: Any,
     payload: Mapping[str, Any],
@@ -3709,6 +3958,22 @@ def receipt_is_safe(receipt: Mapping[str, Any]) -> bool:
             and receipt.get("protected_unchanged") is True
             and receipt.get("mutation_requests") in {0, 3}
         )
+    if mode == "model-clarity-corrective-dry-run":
+        return (
+            receipt.get("status")
+            in {"ready_model_clarity_corrective", "model_clarity_already_applied_noop", "blocked_by_lock"}
+            and receipt.get("mutation_requests") == 0
+            and receipt.get("target", {}).get("state") in {"ON", "SUSPENDED"}
+            and bool(receipt.get("target", {}).get("cas_sha256"))
+            and bool(receipt.get("plan_sha256"))
+        )
+    if mode == "model-clarity-corrective-apply":
+        return (
+            receipt.get("status") in {"model_clarity_applied_verified", "model_clarity_already_applied_noop"}
+            and receipt.get("final_campaign_state") in {"ON", "SUSPENDED"}
+            and receipt.get("protected_unchanged") is True
+            and receipt.get("mutation_requests") in {0, 1}
+        )
     return False
 
 
@@ -3733,6 +3998,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--corrective-apply",
         action="store_true",
         help="update only exact existing groups/keywords/six ads",
+    )
+    mode.add_argument(
+        "--model-clarity-corrective-dry-run", action="store_true",
+        help="read-only plan for exact title/text updates on three active model ads",
+    )
+    mode.add_argument(
+        "--model-clarity-corrective-apply", action="store_true",
+        help="update title/text only on exact three active model ads",
     )
     mode.add_argument(
         "--image-upload-dry-run",
@@ -3767,7 +4040,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     args.mode = (
-        "image-upload-one-apply"
+        "model-clarity-corrective-apply"
+        if args.model_clarity_corrective_apply
+        else "model-clarity-corrective-dry-run"
+        if args.model_clarity_corrective_dry_run
+        else "image-upload-one-apply"
         if args.image_upload_one_apply
         else "image-upload-one-dry-run"
         if args.image_upload_one_dry_run
@@ -3788,6 +4065,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.mode in {
         "dry-run",
         "corrective-dry-run",
+        "model-clarity-corrective-dry-run",
         "image-upload-dry-run",
         "image-upload-one-dry-run",
     } and (
@@ -3796,7 +4074,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         or args.expected_image_plan_sha256
     ):
         parser.error("expected CAS/plan SHA-256 разрешены только с --apply")
-    if args.mode in {"apply", "recover-partial", "corrective-apply"} and (
+    if args.mode in {"apply", "recover-partial", "corrective-apply", "model-clarity-corrective-apply"} and (
         not args.expected_cas_sha256 or not args.expected_plan_sha256
     ):
         parser.error(
@@ -3821,7 +4099,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload, payload_metadata = build_current_payload()
         token = guard.load_project_token()
         api = CreativeDirectApi(token)
-        if args.mode == "image-upload-one-apply":
+        if args.mode == "model-clarity-corrective-apply":
+            receipt = run_model_clarity_apply(
+                api,
+                expected_cas_sha256=args.expected_cas_sha256,
+                expected_plan_sha256=args.expected_plan_sha256,
+                environ=os.environ,
+            )
+        elif args.mode == "model-clarity-corrective-dry-run":
+            receipt = run_model_clarity_dry_run(api)
+        elif args.mode == "image-upload-one-apply":
             receipt = run_single_model_image_upload_apply(
                 api,
                 key=args.image_upload_one_apply,
@@ -3897,7 +4184,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or receipt.get("target", {}).get("state"),
                 "mutation_requests": receipt.get("mutation_requests", 0),
                 "cas_sha256": receipt.get("target", {}).get("cas_sha256"),
-                "plan_sha256": receipt.get("payload", {}).get("plan_sha256"),
+                "plan_sha256": receipt.get("plan_sha256")
+                or receipt.get("payload", {}).get("plan_sha256"),
                 "image_plan_sha256": receipt.get("image_plan", {}).get("plan_sha256"),
                 "classification": receipt.get("target", {})
                 .get("classification", {})
