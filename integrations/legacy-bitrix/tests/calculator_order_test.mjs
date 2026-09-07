@@ -1,0 +1,17 @@
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const source = readFileSync(new URL('../bitrix/templates/aspro-allcorp3/components/bitrix/catalog.element/main_custom/script.js', import.meta.url), 'utf8');
+const button = { dataset: {} };
+const sandbox = { document: { querySelector: () => button }, $: () => ({ ready() {} }) };
+vm.runInNewContext(source + '\nthis.Calculator = PriceCalculator;', sandbox);
+const calc = Object.create(sandbox.Calculator.prototype);
+Object.assign(calc, { totalSum: 2153000, selectedOptionsIds: ['895','998','855','854','853'], optPriceElement: {}, deliveryCalculator: { value: '5000' }, optionsList: { querySelector: () => null }, createDeliveryListItem() {} });
+calc.updateDisplayPrice();
+assert.equal(button.dataset.autoloadParams, "{'options':['895','998','855','854','853'],'totalSum':2153000}");
+calc.addDelivery();
+assert.ok(button.dataset.autoloadParams.includes("'totalSum':2158000"));
+calc.optionsList.querySelector = () => ({ dataset: { sum: '5000' }, remove() {} });
+calc.removeDelivery();
+assert.ok(button.dataset.autoloadParams.includes("'totalSum':2153000"));
+console.log('PASS: serialized 5 options + total; delivery add/remove updates submitted total');

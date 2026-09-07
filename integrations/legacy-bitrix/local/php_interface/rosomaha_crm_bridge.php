@@ -92,7 +92,7 @@ final class RosomahaCrmBridge
                 return;
             }
 
-            self::flushPending(1, true);
+            self::flushPending(1, true, $webFormId, $resultId);
         } catch (Throwable $exception) {
             self::log('enqueue_exception', $webFormId, $resultId, [
                 'exception' => get_class($exception),
@@ -118,8 +118,9 @@ final class RosomahaCrmBridge
         return self::enqueueResult($webFormId, $resultId, $context);
     }
 
-    public static function flushPending(int $limit = 20, bool $force = false): array
+    public static function flushPending(int $limit = 20, bool $force = false, ?int $onlyFormId = null, ?int $onlyResultId = null): array
     {
+        self::validatePendingTarget($onlyFormId, $onlyResultId);
         if (self::$processing) {
             return ['processed' => 0, 'delivered' => 0, 'failed' => 0, 'locked' => true];
         }
@@ -138,8 +139,7 @@ final class RosomahaCrmBridge
         $summary = ['processed' => 0, 'delivered' => 0, 'failed' => 0, 'locked' => false];
 
         try {
-            $files = glob(self::storageDirectory() . '/pending-*.json') ?: [];
-            sort($files, SORT_NATURAL);
+            $files = self::selectPendingFiles(glob(self::storageDirectory() . '/pending-*.json') ?: [], $onlyFormId, $onlyResultId);
             $now = time();
 
             foreach ($files as $path) {
@@ -463,7 +463,7 @@ final class RosomahaCrmBridge
 
         $values = [];
         foreach ($data as $sid => $answers) {
-            $value = self::answerValue((array) $answers);
+            $value = self::answerValue((array) $answers, $webFormId === 3 && mb_strtoupper((string) $sid) === 'PARAMS' ? 20000 : self::MAX_FIELD_LENGTH);
             if ($value !== '') {
                 $values[mb_strtoupper((string) $sid)] = $value;
             }
@@ -481,6 +481,11 @@ final class RosomahaCrmBridge
         $source = self::sourceForPage($pageUrl);
         $formName = self::cleanText((string) ($form['NAME'] ?? $formSid), 250);
 
+        $configuration = $webFormId === 3 ? self::orderConfiguration($values) : '';
+        $commentValues = $values;
+        if ($configuration !== '') {
+            unset($commentValues['PARAMS']);
+        }
         $payload = [
             'lead_submission_id' => self::submissionId($submittedAt, $webFormId, $resultId),
             'source' => $source,
@@ -489,7 +494,8 @@ final class RosomahaCrmBridge
             'phone' => $phone,
             'email' => $email,
             'city' => self::firstValue($values, ['CITY']),
-            'comment' => self::buildComment($formName, $values),
+            'comment' => self::buildComment($formName, $commentValues),
+            'configuration' => $configuration,
             'product' => self::firstValue($values, ['PRODUCT', 'PRODUCT_NAME', 'NEED_PRODUCT', 'ORDER_LIST']),
             'price' => self::firstValue($values, ['PRODUCT_PRICE', 'TOTAL_SUMM', 'TOTAL_SUM']),
             'delivery_address' => self::firstValue($values, ['ADDRESS']),
@@ -503,6 +509,18 @@ final class RosomahaCrmBridge
             'privacy_accepted_at' => $context['captured_at'] ?? date(DATE_ATOM, $submittedAt),
             'consent_source' => $source . '/' . $formSid,
         ];
+        $orderParams = $webFormId === 3 ? self::parseOrderParams((string) ($values['PARAMS'] ?? '')) : null;
+        if ($orderParams !== null) {
+            $payload['deal_amount'] = $orderParams['totalSum'];
+            // The CRM also supports legacy price. Both must carry the order
+            // total so an earlier base-price field cannot override it.
+            $payload['price'] = $orderParams['totalSum'];
+        }
+        if ($webFormId === 3 && $orderParams === null && trim((string) ($values['PARAMS'] ?? '')) !== '') {
+            // Preserve unrecognized input for a human to inspect; do not silently
+            // replace the customer's selection with only a parsing warning.
+            $payload['comment'] .= "\nИсходные параметры комплектации:\n" . $values['PARAMS'];
+        }
 
         foreach ($tracking as $key => $value) {
             $payload[$key] = $value;
@@ -520,7 +538,7 @@ final class RosomahaCrmBridge
         return array_filter($payload, static fn ($value) => $value !== null && $value !== '');
     }
 
-    private static function answerValue(array $answers): string
+    private static function answerValue(array $answers, int $limit = self::MAX_FIELD_LENGTH): string
     {
         $values = [];
         foreach ($answers as $answer) {
@@ -529,7 +547,7 @@ final class RosomahaCrmBridge
             }
 
             foreach (['USER_TEXT', 'USER_DATE', 'ANSWER_TEXT', 'ANSWER_VALUE', 'VALUE'] as $key) {
-                $candidate = self::cleanText((string) ($answer[$key] ?? ''), self::MAX_FIELD_LENGTH);
+                $candidate = self::cleanText((string) ($answer[$key] ?? ''), $limit);
                 if ($candidate !== '') {
                     $values[] = $candidate;
                     break;
@@ -538,6 +556,64 @@ final class RosomahaCrmBridge
         }
 
         return implode("\n", array_values(array_unique($values)));
+    }
+
+    private static function parseOrderParams(string $raw): ?array
+    {
+        if (strlen($raw) > 20000) return null;
+        $parsed = json_decode($raw, true);
+        if (!is_array($parsed)) {
+            // The existing calculator serializes only numeric IDs and a numeric total.
+            // Accept that exact legacy shape, never evaluate JavaScript or arbitrary quotes.
+            if (!preg_match("/^\\s*\\{\\s*'options'\\s*:\\s*\\[\\s*((?:'?[0-9]+'?\\s*(?:,\\s*'?[0-9]+'?\\s*)*)?)\\]\\s*,\\s*'totalSum'\\s*:\\s*([0-9]+(?:\\.[0-9]{1,2})?)\\s*\\}\\s*$/D", $raw, $match)) return null;
+            $tokens = trim($match[1]) === '' ? [] : explode(',', $match[1]);
+            foreach ($tokens as $token) {
+                if (!preg_match("/^(?:[0-9]+|'[0-9]+')$/D", trim($token))) return null;
+            }
+            $ids = array_map(static fn ($id) => trim($id, " '\t\r\n"), $tokens);
+            $parsed = ['options' => $ids, 'totalSum' => $match[2]];
+        }
+        if (array_diff(array_keys($parsed), ['options', 'totalSum']) || !isset($parsed['options'], $parsed['totalSum']) || !is_array($parsed['options']) || count($parsed['options']) > 96) return null;
+        $ids = [];
+        foreach ($parsed['options'] as $id) {
+            if ((!is_string($id) && !is_int($id)) || !preg_match('/^[1-9][0-9]{0,8}$/D', (string) $id)) return null;
+            $ids[] = (int) $id;
+        }
+        $total = $parsed['totalSum'];
+        if ((!is_string($total) && !is_int($total) && !is_float($total)) || !preg_match('/^[0-9]+(?:\.[0-9]{1,2})?$/D', (string) $total) || (float) $total > 1000000000) return null;
+        return ['options' => array_values(array_unique($ids)), 'totalSum' => (float) $total];
+    }
+
+    private static function orderConfiguration(array $values): string
+    {
+        $raw = trim((string) ($values['PARAMS'] ?? ''));
+        if ($raw === '') return '';
+        $params = self::parseOrderParams($raw);
+        $product = self::firstValue($values, ['PRODUCT', 'PRODUCT_NAME', 'NEED_PRODUCT']);
+        $lines = $product !== '' ? ['Модель и комплектация: ' . $product] : [];
+        if ($params === null) {
+            $lines[] = 'Состав дополнительного оснащения не удалось распознать. Требуется уточнение у клиента.';
+            return implode("\n", $lines);
+        }
+        $resolved = [];
+        if ($params['options'] && class_exists('Bitrix\\Main\\Loader') && Bitrix\Main\Loader::includeModule('iblock') && class_exists('CIBlockElement')) {
+            // Fixed Rosomaha accessories scope, independently audited by bitrix-fan-button-option.php.
+            $rows = CIBlockElement::GetList([], ['IBLOCK_ID' => 86, 'SECTION_ID' => 302, 'INCLUDE_SUBSECTIONS' => 'Y', 'ACTIVE' => 'Y', 'ID' => $params['options']], false, ['nTopCount' => 96], ['ID', 'NAME', 'PROPERTY_FILTER_PRICE', 'PROPERTY_PRICE']);
+            while ($row = $rows->Fetch()) {
+                $id = (int) $row['ID'];
+                if (!in_array($id, $params['options'], true)) continue;
+                $name = self::cleanText((string) ($row['NAME'] ?? ''), 120);
+                if ($name === '') continue;
+                $price = trim((string) ($row['PROPERTY_FILTER_PRICE_VALUE'] ?? ''));
+                if ($price === '') $price = preg_replace('/[^0-9]/', '', (string) ($row['PROPERTY_PRICE_VALUE'] ?? ''));
+                $resolved[$id] = $name . (preg_match('/^[0-9]+(?:\.[0-9]{1,2})?$/D', $price) ? ' — ' . number_format((float) $price, 0, '.', ' ') . ' ₽' : ' — цену уточнить');
+            }
+        }
+        $lines[] = 'Дополнительное оснащение (текущие цены каталога):';
+        foreach ($params['options'] as $id) $lines[] = '• ' . ($resolved[$id] ?? 'ID ' . $id . ': название не найдено в каталоге, требуется уточнение');
+        if (!$params['options']) $lines[] = 'Не выбрано';
+        $lines[] = 'Итого, указанное клиенту при отправке: ' . number_format($params['totalSum'], 0, '.', ' ') . ' ₽';
+        return implode("\n", $lines);
     }
 
     private static function firstValue(array $values, array $keys): string
@@ -1410,6 +1486,26 @@ final class RosomahaCrmBridge
     private static function storageDirectory(): string
     {
         return __DIR__ . '/.rosomaha_crm_bridge';
+    }
+
+    private static function validatePendingTarget(?int $formId, ?int $resultId): void
+    {
+        if (($formId !== null || $resultId !== null) && ($formId === null || $resultId === null || $formId <= 0 || $resultId <= 0)) {
+            throw new InvalidArgumentException('Both positive form and result IDs are required.');
+        }
+    }
+
+    private static function selectPendingFiles(array $files, ?int $formId = null, ?int $resultId = null): array
+    {
+        self::validatePendingTarget($formId, $resultId);
+        if ($formId !== null) {
+            // Immediate delivery addresses only the newly saved form result.
+            // Older acknowledged results may still be waiting for analytics.
+            $target = self::recordPath($formId, $resultId);
+            return in_array($target, $files, true) ? [$target] : [];
+        }
+        sort($files, SORT_NATURAL);
+        return $files;
     }
 
     private static function recordPath(int $webFormId, int $resultId): string

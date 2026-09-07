@@ -381,4 +381,18 @@ foreach ([
     }
 }
 
+$oldAnalyticsPending = callPrivate('recordPath', [3, 100]);
+$newCrmPending = callPrivate('recordPath', [3, 101]);
+$anotherFormPending = callPrivate('recordPath', [8, 101]);
+$queueFiles = [$newCrmPending, $anotherFormPending, $oldAnalyticsPending];
+assertSameValue([$newCrmPending], callPrivate('selectPendingFiles', [$queueFiles, 3, 101]), 'An older analytics retry must not occupy the new CRM result delivery slot.');
+assertSameValue([], callPrivate('selectPendingFiles', [$queueFiles, 3, 102]), 'Missing new result must not fall back to another pending result.');
+assertSameValue([$oldAnalyticsPending, $newCrmPending, $anotherFormPending], callPrivate('selectPendingFiles', [$queueFiles]), 'General retry must retain the complete natural-order queue.');
+foreach ([[0, 101], [3, 0], [-3, 101], [null, 101], [3, null]] as $invalidTarget) {
+    $rejected = false;
+    try { callPrivate('selectPendingFiles', [$queueFiles, ...$invalidTarget]); }
+    catch (InvalidArgumentException $exception) { $rejected = true; }
+    assertTrueValue($rejected, 'Invalid targeted delivery ID accepted.');
+}
+assertTrueValue(str_contains($source, 'self::flushPending(1, true, $webFormId, $resultId);'), 'New-result callback must use targeted delivery.');
 fwrite(STDOUT, "bridge_contract_test=ok\n");
