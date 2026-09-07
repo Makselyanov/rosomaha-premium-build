@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite --host --port 8080",
-        "build": "node scripts/generate-finance-privacy.mjs && node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs && node scripts/audit-prerender-seo.mjs",
+        "build": "node --test scripts/product-photo-contract.test.mjs && node scripts/generate-finance-privacy.mjs && node scripts/generate-seo-assets.mjs && vite build && node scripts/prerender-routes.mjs && node scripts/audit-prerender-seo.mjs",
         "generate:finance-privacy": "node scripts/generate-finance-privacy.mjs",
         "build:dev": "vite build --mode development",
         "lint": "eslint .",
@@ -34,6 +34,8 @@
         "test:bitrix-coffer-image": "python scripts/bitrix-coffer-image.test.py",
         "test:bitrix-category-seo": "node --test scripts/bitrix-category-seo-baseline.test.mjs",
         "audit:catalog-parity": "node scripts/audit-catalog-parity.mjs",
+        "audit:catalog-photos": "node scripts/audit-product-photos.mjs",
+        "test:catalog-photos": "node --test scripts/product-photo-contract.test.mjs",
         "audit:seo-prerender": "node scripts/audit-prerender-seo.mjs"
     },
     "dependencies": {

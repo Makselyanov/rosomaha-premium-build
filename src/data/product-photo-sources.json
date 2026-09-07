@@ -1,0 +1,637 @@
+[
+  {
+    "id": "pro-4x4-toyota",
+    "slug": "rosomaha-pro-4x4",
+    "sourceUrl": "https://rosomaha-rus.ru/product/snegobolotokhod-rosomakha-model-pro-4kh4-s-dvs-1zz-fe-1-8-litra-mosty-toyota/",
+    "checkedAt": "2026-09-07T04:14:54.710Z",
+    "sourceSha256": "ceef8f537a7828805616046af5ccf22c2c4ab522ed0d7aa8a5862585d25196d5",
+    "images": [
+      {
+        "token": "'/media/catalog-source/pro-1.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/042/520_520_140cd750bba9870f18aada2478b24840a/62nucjac2jwb58brerd26tg3vrp78nhq.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/042/62nucjac2jwb58brerd26tg3vrp78nhq.JPG",
+        "localPath": "public/media/catalog-source/pro-1.jpg",
+        "sha256": "0639a71c5aef76971c0a0729daf055bff633a249855949a1121765b44df775b5"
+      },
+      {
+        "token": "'/media/catalog-source/pro-2.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/e7b/520_520_140cd750bba9870f18aada2478b24840a/g1djgi59jfvtji4st6c1wuhn0tjc5wga.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/e7b/g1djgi59jfvtji4st6c1wuhn0tjc5wga.JPG",
+        "localPath": "public/media/catalog-source/pro-2.jpg",
+        "sha256": "50ad604386baaaf25537e49de611963273b6b1565b3c8acebe4ffbdb70444371"
+      },
+      {
+        "token": "'/media/catalog-source/pro-3.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/b41/520_520_140cd750bba9870f18aada2478b24840a/bgjsw5p45d0pyf7576lqf20xc6hauggh.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b41/bgjsw5p45d0pyf7576lqf20xc6hauggh.JPG",
+        "localPath": "public/media/catalog-source/pro-3.jpg",
+        "sha256": "ae2f9b3300978575f23d6517d56a663f64c3e3eaaba6475e57ff20c3d3c4cd92"
+      },
+      {
+        "token": "'/media/catalog-source/pro-4.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/7a8/520_520_140cd750bba9870f18aada2478b24840a/emw0ic09mg1pyqcesnnk3u9u8a8xw048.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/7a8/emw0ic09mg1pyqcesnnk3u9u8a8xw048.JPG",
+        "localPath": "public/media/catalog-source/pro-4.jpg",
+        "sha256": "66f0ed0f29c6a7ed60a46e34bb944b19922998f8bf3a63c0b52b86dc2ca7e0d9"
+      },
+      {
+        "token": "'/media/catalog-source/pro-5.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/650/520_520_140cd750bba9870f18aada2478b24840a/qgzs9ndfo9192an5lhreq145r40dve0y.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/650/qgzs9ndfo9192an5lhreq145r40dve0y.JPG",
+        "localPath": "public/media/catalog-source/pro-5.jpg",
+        "sha256": "6cef63934a2cb99558424451f87b5160a616fc38b88b0dcd9597951823358e10"
+      },
+      {
+        "token": "'/media/catalog-source/pro-6.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/4a3/520_520_140cd750bba9870f18aada2478b24840a/un7c0ramm22vdgeh653btxqvjc4zztjm.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/4a3/un7c0ramm22vdgeh653btxqvjc4zztjm.JPG",
+        "localPath": "public/media/catalog-source/pro-6.jpg",
+        "sha256": "ce9483e0ebcdce7a7824f00960d804a9a343aba2569b4d737ed725f301846c98"
+      },
+      {
+        "token": "'/media/catalog-source/pro-7.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/c4e/520_520_140cd750bba9870f18aada2478b24840a/81baqryb37a83sifc66lfihxn1ppr8rf.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/c4e/81baqryb37a83sifc66lfihxn1ppr8rf.JPG",
+        "localPath": "public/media/catalog-source/pro-7.jpg",
+        "sha256": "92b6e10756ead6037b76c5300c392a4601ce2c56a8826e98b62ac5bca2208a2d"
+      },
+      {
+        "token": "'/media/catalog-source/pro-8.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/5f7/520_520_140cd750bba9870f18aada2478b24840a/u4j9rjv4mhfmz0wz9a3x3nkf70f72rfa.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/5f7/u4j9rjv4mhfmz0wz9a3x3nkf70f72rfa.JPG",
+        "localPath": "public/media/catalog-source/pro-8.jpg",
+        "sha256": "d08d0029add46434ea1f8d25505aad71ed7bb3c25f7aa40b9de0df3d830f1456"
+      },
+      {
+        "token": "'/media/catalog-source/pro-9.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/b4a/520_520_140cd750bba9870f18aada2478b24840a/j786d8grofba1caqkcfwdp6696oiantp.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b4a/j786d8grofba1caqkcfwdp6696oiantp.JPG",
+        "localPath": "public/media/catalog-source/pro-9.jpg",
+        "sha256": "7149b8bcde47c1d52ece39e8ad96189750faa84526155b7573dd687966ed49d0"
+      },
+      {
+        "token": "'/media/catalog-source/pro-10.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/704/520_520_140cd750bba9870f18aada2478b24840a/lexr27mo08wggfn2rvitian6uoeteod8.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/704/lexr27mo08wggfn2rvitian6uoeteod8.JPG",
+        "localPath": "public/media/catalog-source/pro-10.jpg",
+        "sha256": "d64ce857535e0c5a3b4d9052f1bbbaee2c2e201195715f76e563f77e099f705a"
+      },
+      {
+        "token": "'/media/catalog-source/pro-11.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/c6d/520_520_140cd750bba9870f18aada2478b24840a/9jxm9gfnfzbathg46racst1mze55elwj.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/c6d/9jxm9gfnfzbathg46racst1mze55elwj.JPG",
+        "localPath": "public/media/catalog-source/pro-11.jpg",
+        "sha256": "7b68c1f9d00b5a6fddb83c6e5ea5f9eb92becbeb8967c83d0b57b7c1945f7f79"
+      },
+      {
+        "token": "'/media/catalog-source/pro-12.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/099/520_520_140cd750bba9870f18aada2478b24840a/ha7wtw4yydv0i5v8w40qxxaado1bfm1h.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/099/ha7wtw4yydv0i5v8w40qxxaado1bfm1h.JPG",
+        "localPath": "public/media/catalog-source/pro-12.jpg",
+        "sha256": "3c73d97b6ed126682fa8c64f9de1fb884c607c586c586a7dffc13679122fed96"
+      },
+      {
+        "token": "'/media/catalog-source/pro-13.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/472/520_520_140cd750bba9870f18aada2478b24840a/wuk5f4l5lcr4stj952uokr0v3x41sp34.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/472/wuk5f4l5lcr4stj952uokr0v3x41sp34.JPG",
+        "localPath": "public/media/catalog-source/pro-13.jpg",
+        "sha256": "575d9b1ca07d8d6429c6492957556418082ce8c67797310293902d79ab44ff7e"
+      },
+      {
+        "token": "'/media/catalog-source/pro-14.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/resize_cache/iblock/4e6/520_520_140cd750bba9870f18aada2478b24840a/qhaf34ab3vvxrt4l2in6v1bjn7pqdau3.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/4e6/qhaf34ab3vvxrt4l2in6v1bjn7pqdau3.JPG",
+        "localPath": "public/media/catalog-source/pro-14.jpg",
+        "sha256": "140a0c9a65b86dc4d34871ebdda4a42104d64feb770c020bb4844ec3370ba236"
+      }
+    ]
+  },
+  {
+    "id": "standart-plus-suzuki",
+    "slug": "rosomaha-standart-plus",
+    "sourceUrl": "https://rosomaha-rus.ru/product/standart-plus-1-5-litra/",
+    "checkedAt": "2026-09-07T04:14:55.371Z",
+    "sourceSha256": "9f9af77913c2b9608fca7f48de334a21ba49f16f204babea8015c52d18d68e8b",
+    "images": [
+      {
+        "token": "'/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "localPath": "public/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "sha256": "61764bebfbc4c42e6ec4533768038d9f189cbb8b8723a34499621f27b285732d"
+      },
+      {
+        "token": "'/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg",
+        "localPath": "public/upload/iblock/d89/nnokema0bo8wqr01voblq294xo0wnxhp.jpg",
+        "sha256": "a1bc59ef163ea8873ba1bd2baf6b07af1355122adbddb7a1c8e4f184b96d53d8"
+      },
+      {
+        "token": "'/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png",
+        "localPath": "public/upload/iblock/b74/sz19nfyhxbosqgkzpowvtkctdo5kf2s1.png",
+        "sha256": "199e220c77eaa674fc9971132ff7f28f78ea350d0cfe8d4f2f4202f1e033abc6"
+      },
+      {
+        "token": "'/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png",
+        "localPath": "public/upload/iblock/826/ovggeu8n6wz3ar4wn2jci2hmxxqrsk1n.png",
+        "sha256": "c00a4392a4b235787b139e8aa335757afe43c2eb3b4783b91f16cde2043289f1"
+      },
+      {
+        "token": "'/upload/iblock/f23/fsjwurbhdxokiwtt4e2hraykou0lge5y.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/f23/fsjwurbhdxokiwtt4e2hraykou0lge5y.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/f23/fsjwurbhdxokiwtt4e2hraykou0lge5y.png",
+        "localPath": "public/upload/iblock/f23/fsjwurbhdxokiwtt4e2hraykou0lge5y.png",
+        "sha256": "aaf35f850987ba16ca3a6821fcbb9ca288b2ce157d8091143ab4c514c6b59918"
+      }
+    ]
+  },
+  {
+    "id": "eger-1",
+    "slug": "rosomaha-eger-1",
+    "sourceUrl": "https://rosomaha-rus.ru/product/rosomakha-model-eger-1-dvs-30-l-s-s-mostami-volga-/",
+    "checkedAt": "2026-09-07T04:14:55.933Z",
+    "sourceSha256": "4c766313d2a92950a55e0868b5511f21339f83125fb45afd5fed572ff787ae08",
+    "images": [
+      {
+        "token": "'/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg",
+        "localPath": "public/upload/iblock/706/56r6ct71hj93r3wy4j0gllvo0fcykc6z.jpg",
+        "sha256": "42a2a0671f2ccfcfc8d5ab9d8b63a79d50e799087238b3eabeb7d4dbfadd6e96"
+      },
+      {
+        "token": "'/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG",
+        "localPath": "public/upload/iblock/a4b/117cfmpwa6uf8byc0cp7tjkinmms7gqk.JPG",
+        "sha256": "aad871a8267e9093bf9a3bb6ce346cce253ffca0abdf8ff07ec47c844de13c4d"
+      },
+      {
+        "token": "'/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG",
+        "localPath": "public/upload/iblock/9ee/ufr81fg7opg8y5cy161jvur0a1y3mm82.JPG",
+        "sha256": "3cf9f77df020c79efcf7850e65c008372b8b0e878b747db5509f4dd2ecab8179"
+      },
+      {
+        "token": "'/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG",
+        "localPath": "public/upload/iblock/3fc/n340fo0p74ke3rbpka6dr92544dxks4u.JPG",
+        "sha256": "310965c94a5c46a0b99978d1a268b91cf2d89bd42757738fa09519616f3c533a"
+      },
+      {
+        "token": "'/upload/iblock/d9d/zntr11sgitpap63sighnhxxbzayoxa09.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/d9d/zntr11sgitpap63sighnhxxbzayoxa09.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/d9d/zntr11sgitpap63sighnhxxbzayoxa09.jpg",
+        "localPath": "public/upload/iblock/d9d/zntr11sgitpap63sighnhxxbzayoxa09.jpg",
+        "sha256": "03c4735ebae8a2fddf4d3b1eba7899f3982af1bbb2e47a3a9e8962636821814d"
+      },
+      {
+        "token": "'/upload/iblock/097/a2wltj4wgolb19b69qhmtwcflsa3aqgu.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/097/a2wltj4wgolb19b69qhmtwcflsa3aqgu.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/097/a2wltj4wgolb19b69qhmtwcflsa3aqgu.jpg",
+        "localPath": "public/upload/iblock/097/a2wltj4wgolb19b69qhmtwcflsa3aqgu.jpg",
+        "sha256": "cdf172bb61a207b15d34745a2e1882e67a50bb8ebb7dca2445a3562a028e5355"
+      },
+      {
+        "token": "'/upload/iblock/b11/blocsyyh6bmzutjrjh3v8ecgaurqdue9.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b11/blocsyyh6bmzutjrjh3v8ecgaurqdue9.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b11/blocsyyh6bmzutjrjh3v8ecgaurqdue9.jpg",
+        "localPath": "public/upload/iblock/b11/blocsyyh6bmzutjrjh3v8ecgaurqdue9.jpg",
+        "sha256": "23b736474a8d57ed61233dd48cc25e5a55329919f29fd281083d2065d645ec9f"
+      },
+      {
+        "token": "'/upload/iblock/ce7/124e1a2sbfjjtz8ob3syvtcdskrkybqf.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/ce7/124e1a2sbfjjtz8ob3syvtcdskrkybqf.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/ce7/124e1a2sbfjjtz8ob3syvtcdskrkybqf.jpg",
+        "localPath": "public/upload/iblock/ce7/124e1a2sbfjjtz8ob3syvtcdskrkybqf.jpg",
+        "sha256": "d61392e29a52a2aab344d1f2fff4cdc6025b7b5facfd2931e406b7f0de91cab5"
+      }
+    ]
+  },
+  {
+    "id": "standart-plus-uaz",
+    "slug": "rosomaha-standart-plus-uaz",
+    "sourceUrl": "https://rosomaha-rus.ru/product/rosomakha-standart-plyus-uaz-timken/",
+    "checkedAt": "2026-09-07T04:14:56.544Z",
+    "sourceSha256": "8d4a255565e002e45f1bb68ba986c1d4916a0201c6f93fe69b043e2bdffeb58c",
+    "images": [
+      {
+        "token": "'/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "localPath": "public/upload/iblock/6ae/i7jt7ecrr6795jhqg6g0w5s005hwt23p.png",
+        "sha256": "61764bebfbc4c42e6ec4533768038d9f189cbb8b8723a34499621f27b285732d"
+      },
+      {
+        "token": "'/upload/iblock/e0a/pm6dvi6qqdef30m6pmkwodg2wuik3ckl.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/e0a/pm6dvi6qqdef30m6pmkwodg2wuik3ckl.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/e0a/pm6dvi6qqdef30m6pmkwodg2wuik3ckl.JPG",
+        "localPath": "public/upload/iblock/e0a/pm6dvi6qqdef30m6pmkwodg2wuik3ckl.JPG",
+        "sha256": "b4246bff2b952ed915f7b7210323728bca1bcf320694928fb7466a9b37a8e029"
+      },
+      {
+        "token": "'/upload/iblock/df3/s3tn1t4eh9t0ckijidomsqz7ofn1q0vf.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/df3/s3tn1t4eh9t0ckijidomsqz7ofn1q0vf.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/df3/s3tn1t4eh9t0ckijidomsqz7ofn1q0vf.JPG",
+        "localPath": "public/upload/iblock/df3/s3tn1t4eh9t0ckijidomsqz7ofn1q0vf.JPG",
+        "sha256": "02d114e1a071eaff37ec72c65e709eccfd10def26f64811aa0a5206cbd449ceb"
+      },
+      {
+        "token": "'/upload/iblock/b99/dqvj2ncqmtn7xkehdimg3ppx2ttdu35w.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b99/dqvj2ncqmtn7xkehdimg3ppx2ttdu35w.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b99/dqvj2ncqmtn7xkehdimg3ppx2ttdu35w.JPG",
+        "localPath": "public/upload/iblock/b99/dqvj2ncqmtn7xkehdimg3ppx2ttdu35w.JPG",
+        "sha256": "4d05183d8c72eb55341c5f8827e15c21f71fee76ea0c08c63c0137126ae7a1c7"
+      },
+      {
+        "token": "'/upload/iblock/067/4mvlnyqp24vc2f4lmnvt7hhak4m6wzff.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/067/4mvlnyqp24vc2f4lmnvt7hhak4m6wzff.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/067/4mvlnyqp24vc2f4lmnvt7hhak4m6wzff.JPG",
+        "localPath": "public/upload/iblock/067/4mvlnyqp24vc2f4lmnvt7hhak4m6wzff.JPG",
+        "sha256": "9ec88180fb7f1ef84dc8a201ec9d47244d2604698b6aad4fba7374b664d5a8e2"
+      }
+    ]
+  },
+  {
+    "id": "extrime-uaz",
+    "slug": "rosomaha-extrime-uaz",
+    "sourceUrl": "https://rosomaha-rus.ru/product/extrime-s-1-5l-dvs-1nz-fe/",
+    "checkedAt": "2026-09-07T04:14:57.120Z",
+    "sourceSha256": "f06dcfd0bd35e88999d2ac100df762c3f94dab4db8fe7d6f4a55123a627820c0",
+    "images": [
+      {
+        "token": "'/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "localPath": "public/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "sha256": "1f88866e51a4d77a4a2b2b4c32abec3e9f3e7c680055fc2a34df6c7568dd6968"
+      },
+      {
+        "token": "'/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "localPath": "public/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "sha256": "758acf52ebc2556b53007d78122cbcf16f6a3d600401ad77cf0df59753288142"
+      },
+      {
+        "token": "'/upload/iblock/44b/juwpyfhlr74jixlhaqr56u087uweyrhn.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/44b/juwpyfhlr74jixlhaqr56u087uweyrhn.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/44b/juwpyfhlr74jixlhaqr56u087uweyrhn.jpg",
+        "localPath": "public/upload/iblock/44b/juwpyfhlr74jixlhaqr56u087uweyrhn.jpg",
+        "sha256": "2db802a8e62de8e64cfd9cf9a864a92f2eefbc3299f86b59651481e43d39696a"
+      },
+      {
+        "token": "'/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "localPath": "public/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "sha256": "b77f169f7c0f092f3038b2a8822ae220f2a64a60edb5edc79b1b14f591016196"
+      },
+      {
+        "token": "'/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png",
+        "localPath": "public/upload/iblock/f3c/tpkvg0p4gau48fo3i5f2cel6ap444019.png",
+        "sha256": "db2a178542248d7c22e5e76ee6816489e9d29ca1f2cfdf5158282d9ad2be843b"
+      }
+    ]
+  },
+  {
+    "id": "extrime-toyota",
+    "slug": "rosomaha-extrime-toyota",
+    "sourceUrl": "https://rosomaha-rus.ru/product/extrime-1-5-litra-mosty-toyota/",
+    "checkedAt": "2026-09-07T04:14:57.675Z",
+    "sourceSha256": "8307a850e47b1c55e9368cfa5f3bca9f289279a31ef3a1bcfd9fbc8edbc797cd",
+    "images": [
+      {
+        "token": "'/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "localPath": "public/upload/iblock/120/z5q84tbm8djjahtkvda0r4bhba54lk80.png",
+        "sha256": "1f88866e51a4d77a4a2b2b4c32abec3e9f3e7c680055fc2a34df6c7568dd6968"
+      },
+      {
+        "token": "'/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "localPath": "public/upload/iblock/6cb/z5k612ovj9ctp071qhahfk9n6e2cwfpt.jpg",
+        "sha256": "758acf52ebc2556b53007d78122cbcf16f6a3d600401ad77cf0df59753288142"
+      },
+      {
+        "token": "'/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "localPath": "public/upload/iblock/b2e/xnndhw0nc1bpglasqxv32bxs257lrnld.png",
+        "sha256": "b77f169f7c0f092f3038b2a8822ae220f2a64a60edb5edc79b1b14f591016196"
+      },
+      {
+        "token": "'/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg",
+        "localPath": "public/upload/iblock/fae/aysdl7kptcorpz8hhyn7b1g2hgkek031.jpg",
+        "sha256": "e39e47bb3bcd6a55eff84a4ed0cea1964e5414e7ad3f1332c4fb1224cae2e43f"
+      }
+    ]
+  },
+  {
+    "id": "sixwheel-toyota",
+    "slug": "rosomaha-6x6",
+    "sourceUrl": "https://rosomaha-rus.ru/product/snegobolotokhod-rosomakha-komplektatsiya-shestikolyesnik-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota/",
+    "checkedAt": "2026-09-07T04:14:58.240Z",
+    "sourceSha256": "a4c3a87d26fbeb54b2837b82bd6186a40dccbf6742ac8ca2884cc531e0b39ae3",
+    "images": [
+      {
+        "token": "'/upload/iblock/8ad/d1941o3udkjzz13273pwepp2ddi6yj5m.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/8ad/d1941o3udkjzz13273pwepp2ddi6yj5m.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/8ad/d1941o3udkjzz13273pwepp2ddi6yj5m.jpg",
+        "localPath": "public/upload/iblock/8ad/d1941o3udkjzz13273pwepp2ddi6yj5m.jpg",
+        "sha256": "975860798f4e104468200d3899194bbbbb2df01df0a74dcfa47ed4eb8b897904"
+      },
+      {
+        "token": "'/upload/iblock/b83/nq2aurtz4wwmbj5tezo3y1sblucbivo9.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/b83/nq2aurtz4wwmbj5tezo3y1sblucbivo9.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/b83/nq2aurtz4wwmbj5tezo3y1sblucbivo9.jpg",
+        "localPath": "public/upload/iblock/b83/nq2aurtz4wwmbj5tezo3y1sblucbivo9.jpg",
+        "sha256": "0f8d34580ad193cf9ef9eb4fbe5ec63445c3721599c530712287de63aaa4cbcc"
+      },
+      {
+        "token": "'/upload/iblock/95f/10w5enpf5nujwdm1mdig9sd2643kf9cl.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/95f/10w5enpf5nujwdm1mdig9sd2643kf9cl.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/95f/10w5enpf5nujwdm1mdig9sd2643kf9cl.jpg",
+        "localPath": "public/upload/iblock/95f/10w5enpf5nujwdm1mdig9sd2643kf9cl.jpg",
+        "sha256": "73b0a7ce009ac9d618f5bd6d143d7a062aa0859ff6c6742434ea428d68399f26"
+      },
+      {
+        "token": "'/upload/iblock/eb1/d54ssc71qb1qow7rg7yhrjr3q9bbohni.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/eb1/d54ssc71qb1qow7rg7yhrjr3q9bbohni.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/eb1/d54ssc71qb1qow7rg7yhrjr3q9bbohni.jpg",
+        "localPath": "public/upload/iblock/eb1/d54ssc71qb1qow7rg7yhrjr3q9bbohni.jpg",
+        "sha256": "411fe6ec5098c69540a44b8ad122ceecd0a2bd976bf1e5d1350d612020a25c79"
+      }
+    ]
+  },
+  {
+    "id": "trailer",
+    "slug": "rosomaha-trailer",
+    "sourceUrl": "https://rosomaha-rus.ru/product/pritsep-k-kvadrotsiklu-plavayushchiy-na-obdiryshakh/",
+    "checkedAt": "2026-09-07T04:14:58.779Z",
+    "sourceSha256": "ba5277212d6159032fa04553738733e0fe9b0c1c4a114a5381056ab11bb86c2c",
+    "images": [
+      {
+        "token": "'/upload/iblock/ee8/b5ew0s3wap580ogl3u1v1dmg567n1t66.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/ee8/b5ew0s3wap580ogl3u1v1dmg567n1t66.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/ee8/b5ew0s3wap580ogl3u1v1dmg567n1t66.jpg",
+        "localPath": "public/upload/iblock/ee8/b5ew0s3wap580ogl3u1v1dmg567n1t66.jpg",
+        "sha256": "171e821a19345c066fb717149d43e564bd734993ed93d4478f879925587a35b0"
+      },
+      {
+        "token": "'/upload/iblock/9ab/4mqu40eq2159s237lj58ns304p0bli0x.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/9ab/4mqu40eq2159s237lj58ns304p0bli0x.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/9ab/4mqu40eq2159s237lj58ns304p0bli0x.jpg",
+        "localPath": "public/upload/iblock/9ab/4mqu40eq2159s237lj58ns304p0bli0x.jpg",
+        "sha256": "b0356e0328a896f5b4b223638eb793cc72625f4532620833d43806b7faecab25"
+      },
+      {
+        "token": "'/upload/iblock/87e/j5w4nwr6kny96ntdyacp0i4ru3evnf38.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/87e/j5w4nwr6kny96ntdyacp0i4ru3evnf38.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/87e/j5w4nwr6kny96ntdyacp0i4ru3evnf38.jpg",
+        "localPath": "public/upload/iblock/87e/j5w4nwr6kny96ntdyacp0i4ru3evnf38.jpg",
+        "sha256": "30f7baf12d8c10838d6421153802790b0d8ecd95f992d37f2db2937647f65bc8"
+      },
+      {
+        "token": "'/upload/iblock/13a/rhrzld6i7h6jw1kzw3q2lzlymodwtcqc.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/13a/rhrzld6i7h6jw1kzw3q2lzlymodwtcqc.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/13a/rhrzld6i7h6jw1kzw3q2lzlymodwtcqc.jpg",
+        "localPath": "public/upload/iblock/13a/rhrzld6i7h6jw1kzw3q2lzlymodwtcqc.jpg",
+        "sha256": "a4dc05538613d52fd6c4234a48630b11723935332bf377677a8e304948355145"
+      },
+      {
+        "token": "'/upload/iblock/5e9/z3xnwnctrrk0p2unfzoynsdt5fdlrqo5.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/5e9/z3xnwnctrrk0p2unfzoynsdt5fdlrqo5.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/5e9/z3xnwnctrrk0p2unfzoynsdt5fdlrqo5.jpg",
+        "localPath": "public/upload/iblock/5e9/z3xnwnctrrk0p2unfzoynsdt5fdlrqo5.jpg",
+        "sha256": "0df2d7d48c02ed0ccf37b05097234f0b99f266f2f32b0e720c1d804fe4ae3c09"
+      },
+      {
+        "token": "'/upload/iblock/3ea/vw6ohwt18y26pnq1rmxcpdyjm3hbgu85.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/3ea/vw6ohwt18y26pnq1rmxcpdyjm3hbgu85.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/3ea/vw6ohwt18y26pnq1rmxcpdyjm3hbgu85.jpg",
+        "localPath": "public/upload/iblock/3ea/vw6ohwt18y26pnq1rmxcpdyjm3hbgu85.jpg",
+        "sha256": "63a8d117f9aec2d5cc77d142165e9648242caf6d03fed55378e8061f2ac82fe8"
+      },
+      {
+        "token": "'/upload/iblock/713/cg5ip19ve3vljwath1735hr3lbmf9t0o.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/713/cg5ip19ve3vljwath1735hr3lbmf9t0o.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/713/cg5ip19ve3vljwath1735hr3lbmf9t0o.jpg",
+        "localPath": "public/upload/iblock/713/cg5ip19ve3vljwath1735hr3lbmf9t0o.jpg",
+        "sha256": "665506035bdc0797f4a2ef9437decaeaa8dbd38c7f2a46fc3a88b7d2981c3705"
+      },
+      {
+        "token": "'/upload/iblock/1d7/1gfvmqksb2qmh986yinvjqy35pselu5x.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/1d7/1gfvmqksb2qmh986yinvjqy35pselu5x.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/1d7/1gfvmqksb2qmh986yinvjqy35pselu5x.jpg",
+        "localPath": "public/upload/iblock/1d7/1gfvmqksb2qmh986yinvjqy35pselu5x.jpg",
+        "sha256": "e5f0eafee761d1f8581735faaee21d68ba4db33362dec54d1406197cd513fa2a"
+      }
+    ]
+  },
+  {
+    "id": "pickup-uaz-timken",
+    "slug": "rosomaha-pickup-uaz-timken",
+    "sourceUrl": "https://rosomaha-rus.ru/product/snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1nz-fe-1-5-litra-s-mostami-uaz-timken/",
+    "checkedAt": "2026-09-07T04:14:59.345Z",
+    "sourceSha256": "d56305216566eaf66be9d58e938774f6866ed3ef712f37244a13cbde8251f81c",
+    "images": [
+      {
+        "token": "'/upload/iblock/ccd/hi648ovfz4gyyb9d3cnakz81hp1fh0k6.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/ccd/hi648ovfz4gyyb9d3cnakz81hp1fh0k6.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/ccd/hi648ovfz4gyyb9d3cnakz81hp1fh0k6.png",
+        "localPath": "public/upload/iblock/ccd/hi648ovfz4gyyb9d3cnakz81hp1fh0k6.png",
+        "sha256": "769d01ba52f5d544c3fc4f99e404b6d19da266272c23a144ad50b44f4eade36a"
+      },
+      {
+        "token": "'/upload/iblock/2bf/r2kazdn9x4io43o5g6fksf2pfssqt47t.jpeg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/2bf/r2kazdn9x4io43o5g6fksf2pfssqt47t.jpeg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/2bf/r2kazdn9x4io43o5g6fksf2pfssqt47t.jpeg",
+        "localPath": "public/upload/iblock/2bf/r2kazdn9x4io43o5g6fksf2pfssqt47t.jpeg",
+        "sha256": "04dd1f7bd058892d7c0fdc6c59c178cf29ea01d9ecab8b7ee6f10f53ead0d639"
+      },
+      {
+        "token": "'/upload/iblock/52f/d2tbeda8napwhdsli7hlhuc7izv021dd.jpeg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/52f/d2tbeda8napwhdsli7hlhuc7izv021dd.jpeg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/52f/d2tbeda8napwhdsli7hlhuc7izv021dd.jpeg",
+        "localPath": "public/upload/iblock/52f/d2tbeda8napwhdsli7hlhuc7izv021dd.jpeg",
+        "sha256": "b402701476e2ac786db806d61443d8910f89b297dad2f1016d0a3d707d140cfa"
+      },
+      {
+        "token": "'/upload/iblock/d20/z87tyvu3no34u1qf0l191gauyc37h6ni.jpeg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/d20/z87tyvu3no34u1qf0l191gauyc37h6ni.jpeg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/d20/z87tyvu3no34u1qf0l191gauyc37h6ni.jpeg",
+        "localPath": "public/upload/iblock/d20/z87tyvu3no34u1qf0l191gauyc37h6ni.jpeg",
+        "sha256": "caba502180150321ed0d7f921df7061828e8caab39a8e50670c1530c30bb39c0"
+      },
+      {
+        "token": "'/upload/iblock/659/0djthdayk21x8lrgfijx2x43qmja12js.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/659/0djthdayk21x8lrgfijx2x43qmja12js.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/659/0djthdayk21x8lrgfijx2x43qmja12js.jpg",
+        "localPath": "public/upload/iblock/659/0djthdayk21x8lrgfijx2x43qmja12js.jpg",
+        "sha256": "54298da85079927af5071afd197bd3e855afa3726108c309f8564c9afd533271"
+      }
+    ]
+  },
+  {
+    "id": "pickup-uaz-18",
+    "slug": "rosomaha-pickup-uaz-18",
+    "sourceUrl": "https://rosomaha-rus.ru/product/snegobolotokhod-rosomakha-pikap-dvs-1-8-litra-uaz/",
+    "checkedAt": "2026-09-07T04:14:59.914Z",
+    "sourceSha256": "1a71c7772a83c965ba9cb6ff81e2fe093e4c596cdb489bb111672c09212a0412",
+    "images": [
+      {
+        "token": "'/upload/iblock/bf9/v4pgkyxmmdvrudkt4lvu2n05kci6auio.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/bf9/v4pgkyxmmdvrudkt4lvu2n05kci6auio.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/bf9/v4pgkyxmmdvrudkt4lvu2n05kci6auio.jpg",
+        "localPath": "public/upload/iblock/bf9/v4pgkyxmmdvrudkt4lvu2n05kci6auio.jpg",
+        "sha256": "9c14c3da4afd95c01ab340d2dbc7a624e8b417ee98d1ff0d75ee4cafba577197"
+      },
+      {
+        "token": "'/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "localPath": "public/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "sha256": "cd5dbb785ba4a936babd3be647746b3554b44935d1b81dd365ebc1ad75ad2c39"
+      },
+      {
+        "token": "'/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "localPath": "public/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "sha256": "da8cd6ae2153dd5ff4d82ac1f07c1f1aa23b0b5776c5a78a2934de596a919ba3"
+      },
+      {
+        "token": "'/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "localPath": "public/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "sha256": "fe599ce4718b130f044919ae1330bb59c351237d2b594f57a7a157eafdc3e485"
+      },
+      {
+        "token": "'/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "localPath": "public/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "sha256": "4b58be227d567a5c6af71937af403c2403232a4ea9b9dce2930c370dfd097252"
+      }
+    ]
+  },
+  {
+    "id": "pickup-toyota",
+    "slug": "rosomaha-pickup-toyota",
+    "sourceUrl": "https://rosomaha-rus.ru/product/snegobolotokhod-rosomakha-komplektatsiya-pikap-s-dvs-1zz-fe-1-8-litra-s-mostami-toyota/",
+    "checkedAt": "2026-09-07T04:15:00.482Z",
+    "sourceSha256": "ed9e56fe1db5411dadc2cd9669d9b5000c15e9228a8ef8a87ab69cc6cdfb1edd",
+    "images": [
+      {
+        "token": "'/upload/iblock/81a/3uqnjip9gcv95gj7z1ccyhp05hxsswof.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/81a/3uqnjip9gcv95gj7z1ccyhp05hxsswof.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/81a/3uqnjip9gcv95gj7z1ccyhp05hxsswof.jpg",
+        "localPath": "public/upload/iblock/81a/3uqnjip9gcv95gj7z1ccyhp05hxsswof.jpg",
+        "sha256": "7be8b554d76db65f14fd09fd75254704f8008919777d69573d1b14343b50c1a8"
+      },
+      {
+        "token": "'/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "localPath": "public/upload/iblock/713/t12pnerqss6yvqs4tlwwj91pez15j8ta.JPG",
+        "sha256": "cd5dbb785ba4a936babd3be647746b3554b44935d1b81dd365ebc1ad75ad2c39"
+      },
+      {
+        "token": "'/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "localPath": "public/upload/iblock/614/wg753ye8tuif27epzhkfusfhe3n7em5w.JPG",
+        "sha256": "da8cd6ae2153dd5ff4d82ac1f07c1f1aa23b0b5776c5a78a2934de596a919ba3"
+      },
+      {
+        "token": "'/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "localPath": "public/upload/iblock/077/73krjn7rr911s5twz4rdoc4gtx152uts.JPG",
+        "sha256": "fe599ce4718b130f044919ae1330bb59c351237d2b594f57a7a157eafdc3e485"
+      },
+      {
+        "token": "'/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "localPath": "public/upload/iblock/0f0/99t7akcnt2bzdd380f6fgk8w2eyiruzw.JPG",
+        "sha256": "4b58be227d567a5c6af71937af403c2403232a4ea9b9dce2930c370dfd097252"
+      }
+    ]
+  },
+  {
+    "id": "extrime-plus-toyota",
+    "slug": "rosomaha-extrime-plus",
+    "sourceUrl": "https://rosomaha-rus.ru/product/extrime-plus-s-1-8l-dvs-1zz-fe/",
+    "checkedAt": "2026-09-07T04:15:01.103Z",
+    "sourceSha256": "1028b8cfa0030176e7600a30ff112d754b32caf8152b0dd5959b2dd221471da6",
+    "images": [
+      {
+        "token": "'/upload/iblock/f29/6pdsuyrillscy7tkvn32rxnb0miewstj.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/f29/6pdsuyrillscy7tkvn32rxnb0miewstj.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/f29/6pdsuyrillscy7tkvn32rxnb0miewstj.png",
+        "localPath": "public/upload/iblock/f29/6pdsuyrillscy7tkvn32rxnb0miewstj.png",
+        "sha256": "7ba9f22d12c80f16fd4e13390ade25fd723f5a69d1a2b3aafb8990cb6398e514"
+      },
+      {
+        "token": "'/upload/iblock/70a/arvm500pi0v2vn6b6cokpewo1tdvxezg.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/70a/arvm500pi0v2vn6b6cokpewo1tdvxezg.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/70a/arvm500pi0v2vn6b6cokpewo1tdvxezg.jpg",
+        "localPath": "public/upload/iblock/70a/arvm500pi0v2vn6b6cokpewo1tdvxezg.jpg",
+        "sha256": "be353abc886ac5a27af9a21482babd9442035150c4d0675550054176859a921a"
+      },
+      {
+        "token": "'/upload/iblock/faf/28m3tnpgns3u9zszef1yf8j4jq810150.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/faf/28m3tnpgns3u9zszef1yf8j4jq810150.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/faf/28m3tnpgns3u9zszef1yf8j4jq810150.png",
+        "localPath": "public/upload/iblock/faf/28m3tnpgns3u9zszef1yf8j4jq810150.png",
+        "sha256": "40260ef7f013a21650e0143047d76782529a196a3b61b3c1c3954c909389cb90"
+      },
+      {
+        "token": "'/upload/iblock/77b/efojgm3s82rcota0qteh4zwcz85a1hen.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/77b/efojgm3s82rcota0qteh4zwcz85a1hen.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/77b/efojgm3s82rcota0qteh4zwcz85a1hen.jpg",
+        "localPath": "public/upload/iblock/77b/efojgm3s82rcota0qteh4zwcz85a1hen.jpg",
+        "sha256": "383ee2f8ecc0a861de2bad821f23f52a697b25a5b303cdfc1ab6e3a6ddda442e"
+      },
+      {
+        "token": "'/upload/iblock/66b/rl0cjpsrhh6hpuns1d4vjp23t9bredzy.png'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/66b/rl0cjpsrhh6hpuns1d4vjp23t9bredzy.png",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/66b/rl0cjpsrhh6hpuns1d4vjp23t9bredzy.png",
+        "localPath": "public/upload/iblock/66b/rl0cjpsrhh6hpuns1d4vjp23t9bredzy.png",
+        "sha256": "0665fd5d655e9a89b08d44ee3fc6a513e994281d9b3e4caa57cc83e812b043bc"
+      }
+    ]
+  },
+  {
+    "id": "hunter-toyota",
+    "slug": "rosomaha-hunter",
+    "sourceUrl": "https://rosomaha-rus.ru/product/hunter-s-1-5l-dvs-1nz-fe/",
+    "checkedAt": "2026-09-07T04:15:01.740Z",
+    "sourceSha256": "57067d9136dc303320546e26c044c45722633e1657964e57b5097c6b7891430a",
+    "images": [
+      {
+        "token": "'/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg'",
+        "sourceImage": "https://rosomaha-rus.ru/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg",
+        "sourceOriginal": "https://rosomaha-rus.ru/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg",
+        "localPath": "public/upload/iblock/8ea/81yyzpp02rryrfaixm675bbffco3259u.jpg",
+        "sha256": "9985da35d4d079658f2634093ab764fb5217b265b9355a456bd1eca16f904c55"
+      }
+    ]
+  }
+]
