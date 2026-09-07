@@ -545,7 +545,7 @@ export default function OptionsPage() {
                       </p>
 
                       <div className="flex flex-col gap-3 sm:flex-row">
-                        <Link to="/order" className="btn-primary w-full px-5 py-3 text-sm">
+                        <Link to={`/order?option=${encodeURIComponent(option.id)}`} className="btn-primary w-full px-5 py-3 text-sm">
                           Запросить расчёт
                         </Link>
                         <Link to="/catalog" className="btn-secondary w-full px-5 py-3 text-sm">

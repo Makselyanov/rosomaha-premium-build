@@ -1,16 +1,17 @@
 import { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Send, Check, Loader2 } from 'lucide-react';
 import { useCartStore } from '@/store/cartStore';
 import { useToast } from '@/hooks/use-toast';
 import { trackLeadSubmit } from '@/lib/metrika';
 import { getAttribution } from '@/lib/attribution';
 import { PRIVACY_CONSENT_VERSION } from '@/lib/consent';
+import { allProductOptions } from '@/data/products';
+import { buildOrderConfiguration } from '@/lib/orderConfiguration';
 
 const CRM_WEBHOOK_URL = 'https://rosomaha.centrlp.ru/api/webhooks/site-form';
 const USER_COMMENT_LIMIT = 700;
-const CRM_COMMENT_LIMIT = 2400;
 
 function normalizeRussianPhone(value: string) {
   const digits = value.replace(/\D/g, '');
@@ -58,6 +59,9 @@ function limitCrmText(value: string | undefined, limit: number) {
 }
 
 export default function OrderPage() {
+  const [searchParams] = useSearchParams();
+  const requestedOptionId = searchParams.get('option');
+  const requestedOption = allProductOptions.find(option => option.id === requestedOptionId);
   const { items, clearCart, getTotalPrice, getItemTotal } = useCartStore();
   const { toast } = useToast();
   const pendingSubmissionId = useRef<string>();
@@ -87,23 +91,18 @@ export default function OrderPage() {
       return;
     }
 
+    if (requestedOptionId && !requestedOption) {
+      toast({ title: 'Дополнительное оснащение не найдено', description: 'Выберите оснащение заново в каталоге опций.', variant: 'destructive' });
+      return;
+    }
+    let configuration: string;
+    try {
+      configuration = buildOrderConfiguration(items, requestedOption);
+    } catch (error) {
+      toast({ title: 'Проверьте состав заявки', description: (error as Error).message, variant: 'destructive' });
+      return;
+    }
     setIsSending(true);
-
-    // Детализация корзины — читаемый текст в комментарий к заявке
-    const orderDetails = items.map((item, index) => {
-      const options = item.options.length > 0
-        ? `\n   Опции: ${item.options.map(o => `${o.name} (+${formatPrice(o.price)})`).join(', ')}`
-        : '';
-      return `${index + 1}. ${item.product.name} (${item.variant.name}) - ${item.quantity} шт.
-   Цвет: ${item.color.name}
-   Цена: ${formatPrice(getItemTotal(item))}${options}`;
-    }).join('\n\n');
-
-    const totalStr = formatPrice(getTotalPrice());
-    const commentWithOrder = limitCrmText([
-      limitCrmText(formData.comment, USER_COMMENT_LIMIT),
-      orderDetails ? `\n\n--- Заказ ---\n${orderDetails}\n\nИтого: ${totalStr}` : '',
-    ].filter(Boolean).join(''), CRM_COMMENT_LIMIT);
 
     // Первая позиция корзины (если есть) → в структурированные поля сделки
     const firstItem = items[0];
@@ -122,7 +121,8 @@ export default function OrderPage() {
         phone: formData.phone,
         phone_normalized: normalizedPhone,
         lead_submission_id: leadSubmissionId,
-        comment: commentWithOrder,
+        comment: limitCrmText(formData.comment, USER_COMMENT_LIMIT),
+        configuration,
         source: 'росомаха.site',
         form_name: 'order_page',
         privacy_accepted: formData.privacyAccepted ? '1' : '0',
@@ -236,6 +236,17 @@ export default function OrderPage() {
 
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="section-title text-3xl mb-8">Получить расчёт снегоболотохода</h1>
+
+          {requestedOption && (
+            <div className="bg-card p-6 rounded-lg border border-border mb-8">
+              <h2 className="font-display uppercase tracking-wider mb-3">Запрос на дополнительное оснащение</h2>
+              <p className="font-medium">{requestedOption.name} — {formatPrice(requestedOption.price)}</p>
+              <p className="text-sm text-muted-foreground mt-2">Модель и количество уточним при расчёте. В итог корзины не включено.</p>
+            </div>
+          )}
+          {requestedOptionId && !requestedOption && (
+            <p role="alert" className="text-destructive mb-6">Оснащение не найдено. <Link to="/options" className="underline">Выберите его в каталоге опций.</Link></p>
+          )}
 
           {items.length > 0 && (
             <div className="bg-card p-6 rounded-lg border border-border mb-8">
